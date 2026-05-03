@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     # Anonymous POST /api/access/permission: max requests per client IP per rolling minute.
     GUEST_ACCESS_PERMISSION_MAX_PER_MINUTE: int = 60
 
+    # Approved-guest JWT exchange + token TTLs (see API.md).
+    GUEST_ACCESS_EXCHANGE_TTL_MINUTES: int = 12
+    GUEST_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    GUEST_ACCESS_GUEST_SESSION_MAX_PER_MINUTE: int = 30
+
     # H3
     H3_DEFAULT_RESOLUTION: int = 13
     H3_MIN_RESOLUTION: int = 0

@@ -1,7 +1,7 @@
 """Advanced geo propagation and permission APIs."""
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
@@ -234,15 +234,22 @@ async def list_access_schedules(
     response_model=list[GuestAccessSessionListItem],
     summary="List QR guest arrival sessions",
     description=(
-        "Returns recent **`guest_access_sessions`** for **zone_id**. Caller must belong to that zone "
-        "(**owner.zone_id** match). Use **`pending_only=true`** to list unexpected visitors awaiting "
-        "approve/reject. Use **`POST .../guest-requests/{guest_id}/approve|reject?zone_id=`** "
-        "or **`POST /api/access/approve|reject`** with JSON body (**zone_id**, **guest_id**)."
+        "Returns **`guest_access_sessions`** for **`?zone_id=`** — caller must satisfy "
+        "**`owner.zone_id` == zone_id**. Use **`pending_only=true`** for unexpected arrivals still **`pending`**.\n\n"
+        "Resolve them with **`POST /message-feature/access/guest-requests/{guest_id}/approve`** or **`/reject`** "
+        "(Bearer JWT, **guest_id** in path **only**; optional legacy **`zone_id`** query documented on those ops), "
+        "or equivalently **`POST /api/access/approve`** | **`reject`** with JSON **`GuestZoneActionRequest`** "
+        "(**guest_id**, **zone_id** required in body)."
     ),
     response_description="Newest arrivals first.",
 )
 async def list_guest_requests(
-    zone_id: str = Query(..., min_length=1, max_length=100, description="Hex zone id from QR / dashboard."),
+    zone_id: str = Query(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Hex zone id from QR / dashboard (**`zid`**). Required for listing; paired approve/reject use path **guest_id** only.",
+    ),
     pending_only: bool = Query(
         False,
         description="If true, only unexpected sessions still in **pending** resolution.",
@@ -275,45 +282,109 @@ async def list_guest_requests(
     ]
 
 
-def _guest_action_zone_query(
-    zone_id: str = Query(..., min_length=1, max_length=100, description="Zone id for this guest session."),
+def _effective_zone_for_guest_admin_action(
+    db: Session,
+    *,
+    guest_id: str,
+    zone_id_query: str | None,
 ) -> str:
-    return zone_id.strip()
+    """Resolve **zone_id** from the persisted session; legacy **zone_id** query must match if present."""
+    row = guest_access_service.get_guest_access_session_by_guest_id(db, guest_id)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "NOT_FOUND", "message": "Guest session not found."},
+        )
+    hinted = (zone_id_query or "").strip()
+    if hinted and hinted != row.zone_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "FORBIDDEN",
+                "message": "zone_id does not match this guest session.",
+            },
+        )
+    return row.zone_id
+
+
+_LEGACY_ZONE_QUERY = Query(
+    default=None,
+    min_length=1,
+    max_length=100,
+    description=(
+        "Optional legacy duplicate of the session zone; omit in normal SPA/dashboard flows "
+        "(server loads **zone_id** from **`guest_access_sessions`** for **guest_id**). "
+        "If sent, must exactly match that row or the call fails with **`403`**."
+    ),
+)
+
+_GUEST_ID_PATH = Path(
+    ...,
+    min_length=1,
+    max_length=36,
+    description=(
+        "**guest_id**: opaque id issued at **`POST /api/access/permission`** "
+        "(and listed on **`GET /message-feature/access/guest-requests`**). "
+        "**zone_id** is not required here; it comes from this session row unless you pass **`?zone_id=`** "
+        "(legacy, must match the row)."
+    ),
+)
 
 
 @router.post(
     "/access/guest-requests/{guest_id}/approve",
     response_model=GuestAdminDecisionResponse,
     status_code=status.HTTP_200_OK,
-    summary="Approve unexpected guest (message-feature alias)",
+    summary="Approve unexpected guest (dashboard path)",
     description=(
-        "Same behavior as **`POST /api/access/approve`**. **guest_id** is taken from the path; "
-        "pass **zone_id** as a query parameter (consistent with **`GET .../guest-requests`**)."
+        "**Bearer** JWT. Equivalent to **`POST /api/access/approve`**: resolves **zone_id** from "
+        "**`guest_access_sessions`** keyed by **path `guest_id`**, then verifies the caller is an "
+        "**administrator** for that zone and applies approval. "
+        "**`?zone_id=`** is legacy-only — omit unless you intentionally echo the zone; mismatched **`zone_id`** → **`403`**."
+    ),
+    response_description=(
+        "`APPROVED` decision; guest sees status via **`GET /api/access/session/{guest_id}`** (same **guest_id**)."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
-        status.HTTP_403_FORBIDDEN: {"description": "Not a zone administrator.", "model": GuestAccessHttpError},
-        status.HTTP_404_NOT_FOUND: {"description": "Owner or guest session not found.", "model": GuestAccessHttpError},
+        status.HTTP_403_FORBIDDEN: {
+            "description": (
+                "Administrator required for session zone (`FORBIDDEN`), "
+                "or optional **`zone_id`** query does not equal the persisted session (`FORBIDDEN`). "
+                "Structured body: **`error_code`** + **`message`** (see **`GuestAccessHttpError`**)."
+            ),
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": (
+                "Unknown **guest_id** → **`NOT_FOUND`** with **`error_code`** / **`message`**. "
+                "Missing JWT **owner** may return unstructured **`detail`** (string)."
+            ),
+        },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Session not unexpected or already resolved.",
+            "description": "Session not **`unexpected`** or not **`pending`** (`INVALID_STATE`).",
             "model": GuestAccessHttpError,
         },
     },
 )
 async def approve_guest_request_message_feature(
-    guest_id: str,
+    guest_id: str = _GUEST_ID_PATH,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
-    zone_id: str = Depends(_guest_action_zone_query),
+    zone_id: str | None = _LEGACY_ZONE_QUERY,
 ):
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
 
+    effective_zone_id = _effective_zone_for_guest_admin_action(
+        db, guest_id=guest_id, zone_id_query=zone_id
+    )
+
     result = guest_access_service.approve_guest(
         db,
         acting_owner=owner,
-        zone_id=zone_id,
+        zone_id=effective_zone_id,
         guest_id=guest_id.strip(),
     )
     if result.get("error"):
@@ -329,23 +400,38 @@ async def approve_guest_request_message_feature(
     "/access/guest-requests/{guest_id}/reject",
     response_model=GuestAdminDecisionResponse,
     status_code=status.HTTP_200_OK,
-    summary="Reject unexpected guest (message-feature alias)",
-    description="Same as **`POST /api/access/reject`** with **guest_id** in the path and **zone_id** query.",
+    summary="Reject unexpected guest (dashboard path)",
+    description=(
+        "**Bearer** JWT. Same semantics as **`POST /api/access/reject`**: **zone** inferred from the "
+        "**guest_id** session (optional legacy **`?zone_id=`**, must match that row)."
+    ),
+    response_description=(
+        "`REJECTED` decision; guest sees status via **`GET /api/access/session/{guest_id}`**."
+    ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
-        status.HTTP_403_FORBIDDEN: {"description": "Not a zone administrator.", "model": GuestAccessHttpError},
-        status.HTTP_404_NOT_FOUND: {"description": "Owner or guest session not found.", "model": GuestAccessHttpError},
+        status.HTTP_403_FORBIDDEN: {
+            "description": (
+                "Administrator required for session zone (`FORBIDDEN`), "
+                "or **`zone_id`** hint mismatch (`FORBIDDEN`). Structured body **`GuestAccessHttpError`**."
+            ),
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Unknown **guest_id** or owner not found.",
+            "model": GuestAccessHttpError,
+        },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Session not unexpected or already resolved.",
+            "description": "Session not **`unexpected`** or already resolved (`INVALID_STATE`).",
             "model": GuestAccessHttpError,
         },
     },
 )
 async def reject_guest_request_message_feature(
-    guest_id: str,
+    guest_id: str = _GUEST_ID_PATH,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
-    zone_id: str = Depends(_guest_action_zone_query),
+    zone_id: str | None = _LEGACY_ZONE_QUERY,
 ):
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
@@ -354,10 +440,14 @@ async def reject_guest_request_message_feature(
             detail={"error_code": "NOT_FOUND", "message": "Owner not found"},
         )
 
+    effective_zone_id = _effective_zone_for_guest_admin_action(
+        db, guest_id=guest_id, zone_id_query=zone_id
+    )
+
     result = guest_access_service.reject_guest(
         db,
         acting_owner=owner,
-        zone_id=zone_id,
+        zone_id=effective_zone_id,
         guest_id=guest_id.strip(),
     )
     if result.get("error"):

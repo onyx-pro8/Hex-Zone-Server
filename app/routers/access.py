@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.guest_permission_rate_limit import allow_request
-from app.core.security import get_current_user
+from app.core.security import create_guest_access_token, get_current_user
 from app.crud import owner as owner_crud
 from app.database import get_db
 from app.models import GuestAccessSession
@@ -26,8 +26,15 @@ from app.schemas.access_guest import (
     GuestQrTokenLinkBundle,
     GuestQrTokenListItem,
     GuestScanResponse,
+    GuestSessionExchangeRequest,
     GuestSessionPollResponse,
     GuestZoneActionRequest,
+)
+from app.schemas.guest_api import (
+    GuestApiHttpError,
+    GuestSessionExchangeData,
+    GuestSessionExchangeResponse,
+    GuestSessionGuestProfile,
 )
 from app.services import guest_access_qr, guest_access_qr_token_service, guest_access_service
 from app.websocket.manager import ws_manager
@@ -604,15 +611,19 @@ async def guest_access_qr_token_png(
 @router.get(
     "/session/{guest_id}",
     response_model=GuestSessionPollResponse,
+    response_model_exclude_none=True,
     status_code=status.HTTP_200_OK,
     summary="Poll guest session status",
     description=(
         "Public poll for guest clients without a WebSocket. Provide **guest_id** from "
         "`POST /api/access/permission`. "
         "**`zone_id`** should match arrival (invite **`zid`**, **`gt`** QR `zid`, or **`zone_id`** in the permission response); "
-        "when omitted the server resolves **guest_id** alone (opaque UUID)."
+        "when omitted the server resolves **guest_id** alone (opaque UUID).\n\n"
+        "When **status** is **APPROVED** (unexpected guest approved by an administrator), a valid unused "
+        "**`exchange_code`** plus **`exchange_expires_at`** may appear — single-use for **`POST /api/access/guest-session`** "
+        "(TTL from **`GUEST_ACCESS_EXCHANGE_TTL_MINUTES`**). Omitted if consumed, expired, or not approved."
     ),
-    response_description="Guest-visible status and instructional message.",
+    response_description="Guest-visible status; optional one-time exchange when APPROVED.",
     responses={
         status.HTTP_404_NOT_FOUND: {
             "description": "No matching guest session (unknown guest_id or wrong zone_id).",
@@ -621,7 +632,12 @@ async def guest_access_qr_token_png(
     },
 )
 async def guest_session_status(
-    guest_id: str,
+    guest_id: str = Path(
+        ...,
+        min_length=1,
+        max_length=36,
+        description="Opaque id from **POST /api/access/permission** (UUID).",
+    ),
     zone_id: str | None = Query(
         default=None,
         min_length=1,
@@ -647,13 +663,115 @@ async def guest_session_status(
 
 
 @router.post(
+    "/guest-session",
+    response_model=GuestSessionExchangeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Exchange approval code for guest access token",
+    description=(
+        "**No authentication.** Exchange the one-time **`exchange_code`** (from "
+        "**`GET /api/access/session/{guest_id}`** when **status** is **APPROVED**) together with "
+        "**`guest_id`** and **`zone_id`**. The code is **consumed** on success and cannot be reused.\n\n"
+        "Returns a short-lived JWT: use **`Authorization: Bearer <access_token>`** only on **`/api/guest/*`**. "
+        "JWT lifetime: **`expires_in`** seconds (from env **`GUEST_ACCESS_TOKEN_EXPIRE_MINUTES`**).\n\n"
+        "Optional **`device_id`**: if the arrival session stored **`device_id`** from **POST /api/access/permission** "
+        "and the client sends a different non-empty value, the server responds **403** **`device_mismatch`**."
+    ),
+    response_description="Success envelope with guest JWT and profile summary.",
+    responses={
+        status.HTTP_400_BAD_REQUEST: {
+            "description": "`exchange_invalid`, `exchange_expired`, or malformed body.",
+            "model": GuestApiHttpError,
+        },
+        status.HTTP_403_FORBIDDEN: {
+            "description": "`guest_not_approved`, `zone_mismatch`, or `device_mismatch`.",
+            "model": GuestApiHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Unknown **`guest_id`** session (`NOT_FOUND`).",
+            "model": GuestApiHttpError,
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": "`exchange_consumed` — code already used.",
+            "model": GuestApiHttpError,
+        },
+        status.HTTP_429_TOO_MANY_REQUESTS: {
+            "description": "`RATE_LIMITED` — too many attempts per client IP per minute.",
+            "model": GuestApiHttpError,
+        },
+    },
+)
+async def guest_session_exchange(
+    request: Request,
+    payload: GuestSessionExchangeRequest,
+    db: Session = Depends(get_db),
+):
+    ip_key = _client_ip(request)
+    if not allow_request(
+        f"guest_session:{ip_key}",
+        max_events=settings.GUEST_ACCESS_GUEST_SESSION_MAX_PER_MINUTE,
+        window_seconds=60.0,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error_code": "RATE_LIMITED",
+                "message": "Too many guest-session attempts from this network. Please wait and try again.",
+                "error": {
+                    "message": "Too many guest-session attempts from this network. Please wait and try again.",
+                },
+            },
+        )
+
+    result = guest_access_service.consume_guest_exchange_and_issue_context(
+        db,
+        guest_id=payload.guest_id.strip(),
+        zone_id=payload.zone_id.strip(),
+        exchange_code=payload.exchange_code.strip(),
+        device_id=payload.device_id,
+    )
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={
+                "error_code": result["error"],
+                "message": result["message"],
+                "error": {"message": result["message"]},
+            },
+        )
+    row = result["row"]
+    token, expires_in, _ = create_guest_access_token(
+        guest_id=row.guest_id,
+        zone_ids=[row.zone_id],
+    )
+    db.commit()
+    return GuestSessionExchangeResponse(
+        status="success",
+        data=GuestSessionExchangeData(
+            access_token=token,
+            token_type="Bearer",
+            expires_in=expires_in,
+            guest=GuestSessionGuestProfile(
+                guest_id=row.guest_id,
+                display_name=row.guest_name,
+                zone_ids=[row.zone_id],
+                allowed_message_types=["PERMISSION", "CHAT"],
+            ),
+        ),
+    )
+
+
+@router.post(
     "/approve",
     response_model=GuestAdminDecisionResponse,
     status_code=status.HTTP_200_OK,
     summary="Approve unexpected guest",
     description=(
         "Requires **Bearer** JWT. Caller must be an **administrator** with **owner.zone_id** equal to "
-        "**zone_id**. Only unexpected arrivals in **pending** state can be approved."
+        "**payload.zone_id**. Only **`unexpected`** sessions in **`pending`** can be approved.\n\n"
+        "On success, mints a one-time **`exchange_code`** (see **`GET /api/access/session/{guest_id}`**) "
+        "for **`POST /api/access/guest-session`**.\n\n"
+        "**Dashboard SPA alternative:** **`POST /message-feature/access/guest-requests/{guest_id}/approve`** "
+        "with **`guest_id`** in the path (server infers **`zone_id`** from the persisted session; optional **`?zone_id=`** legacy)."
     ),
     response_description="Resolution copied from audit message; guest learns via polling.",
     responses={
@@ -702,8 +820,10 @@ async def approve_guest(
     status_code=status.HTTP_200_OK,
     summary="Reject unexpected guest",
     description=(
-        "Same authorization rules as **approve**. Sets resolution to rejected; guest observes "
-        "via GET /api/access/session/{guest_id}."
+        "Same authorization rules as **approve**. Sets resolution to **`rejected`**; guest observes "
+        "via **`GET /api/access/session/{guest_id}`**.\n\n"
+        "**Dashboard SPA alternative:** **`POST /message-feature/access/guest-requests/{guest_id}/reject`** "
+        "(path **`guest_id`**, inferred zone; optional **`?zone_id=`** legacy)."
     ),
     response_description="Resolution payload for admin client.",
     responses={

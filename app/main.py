@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.database import init_db
-from app.routers import access, owners, devices, zones, utils, messages, message_feature
+from app.routers import access, devices, guest, message_feature, messages, owners, utils, zones
 from app.routes.contract_routes import router as contract_router
 from app.utils.api_response import error_response
 from app.websocket.routes import router as websocket_router
@@ -84,10 +84,13 @@ OPENAPI_TAGS = [
     {
         "name": "message-feature",
         "description": (
-        "Authenticated geo propagation, message blocking, **access schedules** (`/message-feature/access/schedules`), "
-        "**guest arrival history** (`GET /message-feature/access/guest-requests`), "
-        "and **PERMISSION** propagation for logged-in devices (`/message-feature/access/permission`). "
-            "Public QR guests without JWT use **`access`** (`POST /api/access/permission`)."
+            "Authenticated geo propagation, message blocking, **access schedules** "
+            "(`/message-feature/access/schedules`), **guest arrival history** "
+            "(`GET /message-feature/access/guest-requests`), **guest approve/reject** "
+            "(`POST /message-feature/access/guest-requests/{guest_id}/approve|reject` — path **guest_id** only; "
+            "**zone_id** inferred from the session), **PERMISSION** propagation for logged-in devices "
+            "(`/message-feature/access/permission`). Public QR guests without JWT use **`access`** "
+            "(`POST /api/access/permission`)."
         ),
     },
     {
@@ -102,11 +105,28 @@ OPENAPI_TAGS = [
         "description": (
             "Public guest entry for **zone QR scans** (no JWT): `POST /api/access/permission`, "
             "`GET /api/access/session/{guest_id}` (**`zone_id`** query recommended; optional — guest id alone resolves). "
+            "After admin **APPROVED**, poll may return **`exchange_code`** → **`POST /api/access/guest-session`** (no Bearer) "
+            "for a short-lived guest JWT, then **`/api/guest/*`** (see **API.md**). "
             "**Permission** response includes **`zone_id`** for clients that opened only **`?gt=`**. "
             "**Administrators** mint DB-backed tokens (`POST /api/access/qr-tokens`, SPA **`/access?gt=&zid=`**, optional **`eid`**) "
             "or static links (`GET /api/access/qr-link`, **`/access?zid=`**); optional server PNG QR. "
-            "Approve/reject: `POST /api/access/approve|reject` (Bearer JWT). "
+            "Approve/reject unexpected guests: `POST /api/access/approve|reject` (**JSON**: **guest_id**, **zone_id**) "
+            "or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`** (path **guest_id**; zone inferred). "
+            "Bearer JWT for both families. "
             "Not member-invite (`/utils/qr/generate`)."
+        ),
+    },
+    {
+        "name": "guest",
+        "description": (
+            "**Approved anonymous guest** APIs. Obtain **`access_token`** from **`POST /api/access/guest-session`** "
+            "(one-time **`exchange_code`** from **`GET /api/access/session/{guest_id}`** when **APPROVED**). "
+            "Send **`Authorization: Bearer <access_token>`** — JWT claim **`token_use`** is **`guest_access`**; "
+            "do not use this token on owner/member routes.\n\n"
+            "**Endpoints:** **`GET /api/guest/me`**, **`GET /api/guest/zones/{zone_id}/peers`**, "
+            "**`GET /api/guest/zones/{zone_id}/dashboard`**, **`GET|POST /api/guest/messages`** "
+            "(only **PERMISSION** and **CHAT** types). v1 uses REST polling; WebSocket for guests is optional later. "
+            "Contract details: **`API.md`**."
         ),
     },
 ]
@@ -132,6 +152,7 @@ app = FastAPI(
         "Administrators mint tokens with **`POST /api/access/qr-tokens`** or static **`GET /api/access/qr-link`**. "
         "Members create expectations via `/message-feature/access/schedules`; unexpected visits notify "
         "via WebSocket `unexpected_guest` / `guest_is_here`. "
+        "Admins resolve pending unexpected visits with **`POST /api/access/approve|reject`** or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`**. "
         "**Member invite QR** is separate: `POST /utils/qr/generate`."
     ),
     version=settings.API_VERSION,
@@ -164,16 +185,22 @@ async def handle_http_error(request: Request, exc: HTTPException) -> JSONRespons
         message = str(detail.get("message") or "Request failed")
         error_code = str(detail.get("error_code") or f"HTTP_{exc.status_code}")
         details = detail.get("details")
+        err_obj = detail.get("error")
     else:
         message = str(detail) if detail else "Request failed"
         error_code = f"HTTP_{exc.status_code}"
         details = None
+        err_obj = None
 
     payload = {
         "status": "error",
         "message": message,
         "error_code": error_code,
     }
+    if err_obj is not None and isinstance(err_obj, dict):
+        payload["error"] = err_obj
+    else:
+        payload["error"] = {"message": message}
     if details is not None:
         payload["details"] = details
     return JSONResponse(status_code=exc.status_code, content=payload)
@@ -186,6 +213,7 @@ app.include_router(messages.router)
 app.include_router(utils.router)
 app.include_router(message_feature.router)
 app.include_router(access.router)
+app.include_router(guest.router)
 app.include_router(contract_router)
 app.include_router(websocket_router)
 

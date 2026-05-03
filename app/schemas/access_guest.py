@@ -76,10 +76,18 @@ class GuestArrivalRequest(BaseModel):
 
 
 class GuestZoneActionRequest(BaseModel):
-    """Administrator approve or reject for an unexpected guest session."""
+    """Body for **`POST /api/access/approve`** and **`POST /api/access/reject`** (explicit zone).
 
-    guest_id: str = Field(..., min_length=1, max_length=36, description="Returned by POST /api/access/permission.")
-    zone_id: str = Field(..., min_length=1, max_length=100, description="Must match the guest session zone.")
+    SPA routes **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`** do not use this model:
+    **`zone_id`** is derived from **`guest_access_sessions`** for the path **`guest_id`**."""
+
+    guest_id: str = Field(..., min_length=1, max_length=36, description="Returned by **POST /api/access/permission**.")
+    zone_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Must match stored **guest_access_sessions.zone_id** for this **guest_id**.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -94,6 +102,10 @@ class GuestAccessHttpError(BaseModel):
     status: Literal["error"] = Field(default="error", description="Always `error` for API failures.")
     message: str = Field(description="Human-readable explanation.")
     error_code: str = Field(description="Stable machine-readable code (e.g. INVALID_ZONE, FORBIDDEN).")
+    error: dict[str, str] | None = Field(
+        default=None,
+        description="Optional nested message (handler mirrors **message** here when present).",
+    )
 
 
 class GuestScanResponse(BaseModel):
@@ -132,7 +144,8 @@ class GuestScanResponse(BaseModel):
 
 
 class GuestAdminDecisionResponse(BaseModel):
-    """Body returned by POST /api/access/approve or /reject after a successful write."""
+    """Successful approve/reject body from **POST /api/access/approve** / **reject** or
+    **POST /message-feature/access/guest-requests/{guest_id}/approve** / **reject**."""
 
     status: Literal["APPROVED", "REJECTED"] = Field(description="Resolution broadcast to polling clients.")
     message: str = Field(description="Short confirmation shown to admin caller / echoed for logs.")
@@ -148,10 +161,12 @@ class GuestAdminDecisionResponse(BaseModel):
 
 
 class GuestAccessSessionListItem(BaseModel):
-    """One QR arrival session returned to authenticated zone members."""
+    """One QR arrival session returned to authenticated zone members.
+
+    **`guest_id`** feeds **`POST …/guest-requests/{guest_id}/approve|reject`** (no **`zone_id`** in path required)."""
 
     id: int
-    guest_id: str
+    guest_id: str = Field(description="Use on **approve**/**reject** dashboard routes (opaque session id).")
     zone_id: str
     qr_token_id: int | None = Field(default=None, description="Set when arrival used a stored guest QR token.")
     guest_name: str
@@ -305,6 +320,14 @@ class GuestSessionPollResponse(BaseModel):
         description="EXPECTED: scheduled guest; UNEXPECTED: still pending admin; APPROVED/REJECTED: resolved."
     )
     message: str
+    exchange_code: str | None = Field(
+        default=None,
+        description="One-time code for **`POST /api/access/guest-session`** when **status** is **APPROVED** only.",
+    )
+    exchange_expires_at: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC instant when **exchange_code** expires (only with **exchange_code**).",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -314,6 +337,45 @@ class GuestSessionPollResponse(BaseModel):
                     "zone_id": "Z123",
                     "status": "UNEXPECTED",
                     "message": "You are not scheduled. Please wait for approval.",
+                },
+                {
+                    "guest_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "zone_id": "Z123",
+                    "status": "APPROVED",
+                    "message": "Your visit has been approved. Welcome.",
+                    "exchange_code": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                    "exchange_expires_at": "2026-05-03T15:00:00Z",
+                },
+            ]
+        }
+    )
+
+
+class GuestSessionExchangeRequest(BaseModel):
+    """Body for **`POST /api/access/guest-session`** (no Bearer)."""
+
+    guest_id: str = Field(..., min_length=1, max_length=36, description="Same opaque id as **GET /api/access/session/{guest_id}**.")
+    zone_id: str = Field(..., min_length=1, max_length=100, description="Must equal **guest_access_sessions.zone_id** for this guest.")
+    exchange_code: str = Field(
+        ...,
+        min_length=1,
+        max_length=36,
+        description="UUID returned on the poll response when **status** is **APPROVED** (single use).",
+    )
+    device_id: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Optional; if the arrival stored **device_id** and this differs, **403** `device_mismatch`.",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "guest_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "zone_id": "ZN-DEMO",
+                    "exchange_code": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                    "device_id": "ios-client-abc",
                 }
             ]
         }

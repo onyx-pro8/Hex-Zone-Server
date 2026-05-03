@@ -1,7 +1,6 @@
 """CRUD operations for Owner/User."""
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.future import select
-from sqlalchemy.orm import selectinload
 from sqlalchemy import func
 from app.models import Owner, Zone
 from app.schemas.schemas import OwnerCreate, OwnerUpdate
@@ -46,6 +45,10 @@ def get_owner(db: Session, owner_id: int) -> Optional[Owner]:
 
     if not owner:
         return None
+
+    if db.bind and db.bind.dialect.name == "sqlite":
+        # Avoid GeoAlchemy / SpatiaLite reads on in-memory SQLite (tests); callers use **owner.zone_id**.
+        return owner
 
     zone_rows = db.execute(
         select(Zone, func.ST_AsGeoJSON(Zone.geo_fence_polygon).label("geo_fence_polygon"))

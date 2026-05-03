@@ -1,12 +1,16 @@
 """Security utilities for authentication and authorization."""
+import uuid
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer
-from app.core.config import settings
+
 import secrets
+
+from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
@@ -20,6 +24,30 @@ def get_password_hash(password: str) -> str:
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash."""
     return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_guest_access_token(
+    *,
+    guest_id: str,
+    zone_ids: list[str],
+    expires_delta: Optional[timedelta] = None,
+) -> tuple[str, int, datetime]:
+    """Mint a short-lived JWT for approved anonymous guests (`/api/guest/*` only)."""
+    minutes = max(1, int(settings.GUEST_ACCESS_TOKEN_EXPIRE_MINUTES))
+    delta = expires_delta or timedelta(minutes=minutes)
+    expire = datetime.utcnow() + delta
+    to_encode: dict[str, Any] = {
+        "sub": f"guest:{guest_id}",
+        "token_use": "guest_access",
+        "typ": "guest_access",
+        "zone_ids": zone_ids,
+        "allowed_message_types": ["PERMISSION", "CHAT"],
+        "iat": datetime.utcnow(),
+        "exp": expire,
+        "jti": str(uuid.uuid4()),
+    }
+    encoded = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded, int(delta.total_seconds()), expire
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -56,7 +84,54 @@ async def get_current_user(credentials = Depends(security)) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
         )
-    return {"user_id": int(user_id)}
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+        ) from exc
+    return {"user_id": uid}
+
+
+async def get_current_guest(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """Bearer JWT from **`POST /api/access/guest-session`** (`token_use` **guest_access**)."""
+    token = credentials.credentials
+    payload = verify_token(token)
+    if payload.get("token_use") != "guest_access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"message": "Invalid guest token.", "error_code": "INVALID_GUEST_TOKEN"},
+        )
+    sub = str(payload.get("sub") or "")
+    if not sub.startswith("guest:"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"message": "Invalid guest token.", "error_code": "INVALID_GUEST_TOKEN"},
+        )
+    guest_id = sub.split(":", 1)[1].strip()
+    if not guest_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"message": "Invalid guest token.", "error_code": "INVALID_GUEST_TOKEN"},
+        )
+    zone_ids = payload.get("zone_ids") or []
+    if not isinstance(zone_ids, list):
+        zone_ids = []
+    zone_ids = [str(z).strip() for z in zone_ids if str(z).strip()]
+    exp_raw = payload.get("exp")
+    expires_at: str | None = None
+    if isinstance(exp_raw, (int, float)):
+        expires_at = datetime.utcfromtimestamp(int(exp_raw)).replace(microsecond=0).isoformat() + "Z"
+    return {
+        "guest_id": guest_id,
+        "zone_ids": zone_ids,
+        "allowed_message_types": list(payload.get("allowed_message_types") or ["PERMISSION", "CHAT"]),
+        "jti": payload.get("jti"),
+        "expires_at": expires_at,
+    }
 
 
 def generate_api_key() -> str:

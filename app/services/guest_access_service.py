@@ -1,15 +1,20 @@
 """QR guest arrival: zone validation, schedule match, sessions, notifications."""
 from __future__ import annotations
 
+import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
+
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
 from app.models import AccessSchedule, GuestAccessSession, Owner, Zone, ZoneMessageEvent
 from app.models.owner import OwnerRole
+
+logger = logging.getLogger(__name__)
 
 
 def zone_exists(db: Session, zone_id: str) -> bool:
@@ -25,14 +30,17 @@ def zone_exists(db: Session, zone_id: str) -> bool:
 
 
 def resolve_primary_zone_admin_owner(db: Session, zone_id: str) -> Owner | None:
-    z = (
-        db.query(Zone)
-        .filter(Zone.zone_id == zone_id, Zone.active.is_(True))
+    """Prefer the main **zones** row's **owner_id** without loading PostGIS geometry (SQLite-safe)."""
+    zid = zone_id.strip()
+    zone_owner_id = (
+        db.query(Zone.owner_id)
+        .filter(Zone.zone_id == zid, Zone.active.is_(True))
         .order_by(Zone.id.asc())
-        .first()
+        .limit(1)
+        .scalar()
     )
-    if z:
-        owner = db.get(Owner, z.owner_id)
+    if zone_owner_id is not None:
+        owner = db.get(Owner, zone_owner_id)
         if owner and owner.active:
             return owner
     return (
@@ -288,6 +296,14 @@ def serialize_guest_session_row(row: GuestAccessSession) -> dict:
     }
 
 
+def get_guest_access_session_by_guest_id(db: Session, guest_id: str) -> GuestAccessSession | None:
+    """Return the guest row for **guest_id** (opaque id is globally unique per session)."""
+    gid = guest_id.strip()
+    if not gid:
+        return None
+    return db.query(GuestAccessSession).filter(GuestAccessSession.guest_id == gid).first()
+
+
 def list_guest_sessions_for_zone(
     db: Session,
     *,
@@ -315,7 +331,81 @@ def guest_session_public_view(row: GuestAccessSession) -> dict:
     else:
         status = "UNEXPECTED"
         message = "You are not scheduled. Please wait for approval."
-    return {"guest_id": row.guest_id, "zone_id": row.zone_id, "status": status, "message": message}
+    out = {"guest_id": row.guest_id, "zone_id": row.zone_id, "status": status, "message": message}
+    if status == "APPROVED":
+        now = datetime.utcnow()
+        if (
+            row.exchange_code
+            and row.exchange_expires_at
+            and row.exchange_expires_at > now
+            and row.exchange_consumed_at is None
+        ):
+            out["exchange_code"] = row.exchange_code
+            out["exchange_expires_at"] = row.exchange_expires_at.replace(microsecond=0).isoformat() + "Z"
+    return out
+
+
+def consume_guest_exchange_and_issue_context(
+    db: Session,
+    *,
+    guest_id: str,
+    zone_id: str,
+    exchange_code: str,
+    device_id: str | None,
+) -> dict:
+    """Validate one-time exchange; on success set exchange_consumed_at and return session row dict.
+
+    Returns {"ok": True, "row": GuestAccessSession} or {"error": code, "message": str, "http_status": int}.
+    """
+    gid = guest_id.strip()
+    zid = zone_id.strip()
+    code = (exchange_code or "").strip()
+    if not gid or not zid or not code:
+        return {
+            "error": "exchange_invalid",
+            "message": "guest_id, zone_id, and exchange_code are required.",
+            "http_status": 400,
+        }
+
+    row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == gid)
+        .with_for_update()
+        .first()
+    )
+    if not row:
+        return {"error": "NOT_FOUND", "message": "Unknown guest session.", "http_status": 404}
+
+    if row.zone_id != zid:
+        return {"error": "zone_mismatch", "message": "zone_id does not match this guest session.", "http_status": 403}
+
+    if not (row.kind == "unexpected" and row.resolution == "approved"):
+        return {"error": "guest_not_approved", "message": "Guest access is not approved.", "http_status": 403}
+
+    if row.exchange_consumed_at is not None:
+        return {"error": "exchange_consumed", "message": "This exchange code was already used.", "http_status": 409}
+
+    if not row.exchange_code or row.exchange_code != code:
+        return {"error": "exchange_invalid", "message": "Invalid exchange code.", "http_status": 400}
+
+    now = datetime.utcnow()
+    if not row.exchange_expires_at or row.exchange_expires_at <= now:
+        return {"error": "exchange_expired", "message": "Exchange code has expired.", "http_status": 400}
+
+    persisted_dev = (row.device_id or "").strip() or None
+    req_dev = (device_id or "").strip() or None
+    if persisted_dev and req_dev and persisted_dev != req_dev:
+        return {"error": "device_mismatch", "message": "device_id does not match the arrival session.", "http_status": 403}
+
+    row.exchange_consumed_at = now
+    db.flush()
+    logger.info(
+        "guest_exchange_consumed guest_id=%s zone_id=%s session_db_id=%s",
+        gid,
+        zid,
+        row.id,
+    )
+    return {"ok": True, "row": row}
 
 
 def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: str) -> dict:
@@ -338,6 +428,10 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
         return {"error": "INVALID_STATE", "message": "Guest session already resolved.", "http_status": 422}
 
     row.resolution = "approved"
+    ttl = max(1, int(settings.GUEST_ACCESS_EXCHANGE_TTL_MINUTES))
+    row.exchange_code = str(uuid.uuid4())
+    row.exchange_expires_at = datetime.utcnow() + timedelta(minutes=ttl)
+    row.exchange_consumed_at = None
     db.flush()
 
     note = ZoneMessageEvent(

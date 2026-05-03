@@ -25,4 +25,8 @@ class GuestAccessSession(Base):
     schedule_id = Column(Integer, ForeignKey("access_schedules.id", ondelete="SET NULL"), nullable=True, index=True)
     admin_owner_id = Column(Integer, ForeignKey("owners.id", ondelete="SET NULL"), nullable=True, index=True)
     qr_token_id = Column(Integer, ForeignKey("guest_access_qr_tokens.id", ondelete="SET NULL"), nullable=True, index=True)
+    # One-time guest JWT exchange (minted on admin APPROVED; consumed by POST /api/access/guest-session).
+    exchange_code = Column(String(36), nullable=True, unique=True, index=True)
+    exchange_expires_at = Column(DateTime, nullable=True)
+    exchange_consumed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

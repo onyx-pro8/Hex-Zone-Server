@@ -73,6 +73,38 @@ def init_db():
                     "CREATE INDEX IF NOT EXISTS ix_guest_access_sessions_qr_token_id ON guest_access_sessions (qr_token_id);"
                 )
             )
+            conn.execute(
+                text(
+                    "ALTER TABLE guest_access_sessions ADD COLUMN IF NOT EXISTS exchange_code VARCHAR(36);"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE guest_access_sessions ADD COLUMN IF NOT EXISTS exchange_expires_at TIMESTAMP;"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE guest_access_sessions ADD COLUMN IF NOT EXISTS exchange_consumed_at TIMESTAMP;"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_guest_access_sessions_exchange_code "
+                    "ON guest_access_sessions (exchange_code) WHERE exchange_code IS NOT NULL;"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE zone_message_events ADD COLUMN IF NOT EXISTS sender_guest_id VARCHAR(36);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_zone_message_events_sender_guest_id "
+                    "ON zone_message_events (sender_guest_id);"
+                )
+            )
 
         with engine.begin() as conn:
             # Backward-compatible schema patch for older deployments missing owners.zone_id.
