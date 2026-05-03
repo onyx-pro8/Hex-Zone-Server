@@ -209,3 +209,84 @@ async def test_guest_chat_visible_to_recipient_row(test_db, override_get_db):
         assert row is not None
         assert row.type == "CHAT"
         assert "Ping" in row.text
+
+
+@pytest.mark.asyncio
+async def test_member_list_guest_requests_access_api(test_db, override_get_db):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = f"zone-gr-{uuid.uuid4().hex[:8]}"
+        admin_id, admin_token = await _register_admin(client, zone_id=zone_id)
+
+        perm = await client.post(
+            "/api/access/permission",
+            json={"zone_id": zone_id, "guest_name": "List Me"},
+        )
+        assert perm.status_code == 200
+        guest_id = perm.json()["guest_id"]
+
+        no_auth = await client.get("/api/access/guest-requests", params={"zone_id": zone_id})
+        assert no_auth.status_code == 401
+
+        bad_zone = await client.get(
+            "/api/access/guest-requests",
+            params={"zone_id": "nonexistent-zone-xyz"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert bad_zone.status_code == 403
+
+        ok = await client.get(
+            "/api/access/guest-requests",
+            params={"zone_id": zone_id},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body.get("status") == "success"
+        data = body.get("data") or []
+        assert isinstance(data, list)
+        assert any(r.get("guest_id") == guest_id for r in data)
+        row = next(r for r in data if r.get("guest_id") == guest_id)
+        assert row.get("zone_id") == zone_id
+        assert row.get("guest_name") == "List Me"
+        assert row.get("expectation") == "unexpected"
+        assert row.get("status") == "PENDING"
+        assert "created_at" in row
+
+        ap = await client.post(
+            "/api/access/approve",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        assert ap.status_code == 200
+        sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
+        code = sess.json()["exchange_code"]
+        gs = await client.post(
+            "/api/access/guest-session",
+            json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": code},
+        )
+        assert gs.status_code == 200
+        guest_jwt = gs.json()["data"]["access_token"]
+
+        msg = await client.post(
+            "/messages",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "message": "Welcome guest",
+                "type": "CHAT",
+                "visibility": "private",
+                "zone_id": zone_id,
+                "guest_id": guest_id,
+            },
+        )
+        assert msg.status_code == 201, msg.text
+        mid = msg.json().get("id")
+        assert isinstance(mid, str)
+
+        gl = await client.get(
+            "/api/guest/messages",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+            params={"zone_id": zone_id, "with_owner_id": admin_id, "limit": 20},
+        )
+        assert gl.status_code == 200
+        items = gl.json()["data"]["items"]
+        assert any(i.get("text") == "Welcome guest" for i in items)

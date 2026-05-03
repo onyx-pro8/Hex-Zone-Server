@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.controllers import contract_controllers as controllers
@@ -12,10 +12,11 @@ from app.crud import owner as owner_crud
 from app.database import get_db
 from app.middleware.auth import require_auth
 from app.models import Device, MemberLocation, Owner
-from app.schemas.schemas import ZoneMessageCreate, ZoneMessageResponse
+from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.utils.api_response import success_response
 from app.websocket.manager import ws_manager
-from app.domain.message_types import MessageScope, normalize_message_type, type_category, type_scope
+from app.domain.message_types import CanonicalMessageType, MessageScope, normalize_message_type, type_category, type_scope
+from app.services import guest_api_service
 from app.services.access_policy import can_message_owner
 
 router = APIRouter(tags=["contract"])
@@ -164,11 +165,48 @@ class ChatMessageCreateRequest(BaseModel):
 
     message: str = Field(..., min_length=1, max_length=16_384)
     type: str | None = None
+    message_type: str | None = Field(
+        default=None,
+        description="Alias for **type** (e.g. **PERMISSION** / **CHAT**) when **type** is omitted.",
+    )
     visibility: Literal["public", "private"] | None = None
     receiver_id: int | None = Field(
         default=None,
         ge=1,
         description="Required when visibility is private; omitted for public",
+    )
+    guest_id: str | None = Field(default=None, max_length=36)
+    zone_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        validation_alias=AliasChoices("zone_id", "zoneId"),
+    )
+
+    @model_validator(mode="after")
+    def map_message_type_alias(self):
+        if self.type is None and self.message_type:
+            self.type = self.message_type
+        return self
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "message": "Team update",
+                    "type": "CHAT",
+                    "visibility": "private",
+                    "receiver_id": 2,
+                },
+                {
+                    "message": "Your host sent a permission update.",
+                    "message_type": "PERMISSION",
+                    "visibility": "private",
+                    "zone_id": "ZN-1XOJPP",
+                    "guest_id": "019b2c3d-0000-7000-8000-000000000001",
+                },
+            ]
+        }
     )
 
 
@@ -493,23 +531,29 @@ async def remove_zone(zone_id: str, owner: Owner = Depends(require_auth), db: Se
     "/messages",
     status_code=status.HTTP_201_CREATED,
     response_model=ContractSuccessAnyResponse | ZoneMessageResponse,
-    summary="Create contract message",
-    description="Create and broadcast message events to zone subscribers.",
+    summary="Create contract message (legacy envelope or chat / guest-thread)",
+    description=(
+        "**`MessageCreateRequest`** (`zoneId`, `type`, `text`, …): legacy contract envelope via **`success_response`**.\n\n"
+        "**`ChatMessageCreateRequest`**: member **`Message`** when **`guest_id`** is omitted; "
+        "when **`guest_id`** and **`zone_id`** / **`zoneId`** are set, creates **`ZoneMessageEvent`** for **PERMISSION**/**CHAT** "
+        "(same as core **`POST /messages`**). Use **`message_type`** if **`type`** is omitted.\n\n"
+        "See **`ChatMessageCreateRequest`** examples in Swagger."
+    ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {
             "description": "Authentication token missing or invalid.",
         },
         status.HTTP_403_FORBIDDEN: {
-            "description": "Receiver is outside sender zone or caller is forbidden.",
+            "description": "Receiver outside scope, member cannot administer **zone_id** for guest post, or policy **FORBIDDEN**.",
         },
         status.HTTP_404_NOT_FOUND: {
-            "description": "Sender or receiver owner was not found.",
+            "description": "Sender / receiver not found, or **GUEST_NOT_FOUND** for bad **guest_id** + zone.",
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Message payload validation failed.",
+            "description": "Validation failed (including **MISSING_ZONE_FOR_GUEST**, **INVALID_MESSAGE_TYPE_FOR_GUEST**).",
         },
     },
-    response_description="Created message in contract envelope or chat shape (compatibility path).",
+    response_description="**`{ status, data }`** for legacy payload, or **`ZoneMessageResponse`** for chat (string **`id`** when guest thread).",
 )
 async def post_messages(
     payload: MessageCreateRequest | ChatMessageCreateRequest = Body(...),
@@ -530,6 +574,72 @@ async def post_messages(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Sender owner not found",
+        )
+
+    if (chat_payload.guest_id or "").strip():
+        z_req = (chat_payload.zone_id or "").strip()
+        if not z_req:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error_code": "MISSING_ZONE_FOR_GUEST",
+                    "message": "zone_id is required when guest_id is set.",
+                },
+            )
+        try:
+            guest_canonical = normalize_message_type(chat_payload.type or "")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error_code": "INVALID_MESSAGE_TYPE", "message": "Unsupported message type."},
+            ) from exc
+        if guest_canonical not in (CanonicalMessageType.PERMISSION, CanonicalMessageType.CHAT):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error_code": "INVALID_MESSAGE_TYPE_FOR_GUEST",
+                    "message": "Only PERMISSION and CHAT may be sent with guest_id.",
+                },
+            )
+        guest_result = guest_api_service.create_member_to_guest_zone_message(
+            db,
+            sender=sender,
+            zone_id=z_req,
+            guest_id=chat_payload.guest_id.strip(),
+            text=chat_payload.message,
+            msg_type=chat_payload.type or "",
+        )
+        if isinstance(guest_result, dict):
+            code = guest_result.get("__reject__")
+            msg = str(guest_result.get("message") or "Request failed")
+            if code == "forbidden":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"error_code": "FORBIDDEN", "message": msg},
+                )
+            if code == "not_found":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"error_code": "GUEST_NOT_FOUND", "message": msg},
+                )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error_code": "INVALID_GUEST_MESSAGE", "message": msg},
+            )
+        event = guest_result
+        db.commit()
+        gtype = normalize_message_type(event.type)
+        return ZoneMessageResponse(
+            id=event.id,
+            zone_id=event.zone_id,
+            sender_id=event.sender_id,
+            receiver_id=event.receiver_id,
+            type=event.type,
+            category=type_category(gtype).value,
+            scope=type_scope(gtype).value,
+            visibility=MessageVisibilityEnum.PRIVATE,
+            message=event.text,
+            created_at=event.created_at,
         )
 
     normalized_chat_payload = ZoneMessageCreate(

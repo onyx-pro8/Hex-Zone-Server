@@ -2,7 +2,7 @@
 
 Base URL is the same as the rest of the server (e.g. `https://api.example.com`). Paths below are absolute from the server root.
 
-**OpenAPI (Swagger):** interactive docs at **`/docs`** (or **`/redoc`**). Guest and access routes use **`response_model`** so request/response schemas, field descriptions, and error models (**`GuestApiHttpError`**, **`GuestAccessHttpError`**) appear in the UI. Source: `app/schemas/guest_api.py`, `app/schemas/access_guest.py`, `app/routers/guest.py`, `app/routers/access.py`.
+**OpenAPI (Swagger):** interactive docs at **`/docs`** (or **`/redoc`**). Guest and access routes use **`response_model`** so request/response schemas, field descriptions, and error models (**`GuestApiHttpError`**, **`GuestAccessHttpError`**, **`GuestRequestListEnvelope`**, **`GuestAccessSessionListItem`**) appear in the UI. Source: `app/schemas/guest_api.py`, `app/schemas/access_guest.py`, `app/schemas/schemas.py`, `app/routers/guest.py`, `app/routers/access.py`, `app/routers/messages.py`.
 
 ## Envelope
 
@@ -24,6 +24,48 @@ Base URL is the same as the rest of the server (e.g. `https://api.example.com`).
 ```
 
 Common HTTP codes: **400** validation, **401** auth, **403** forbidden, **404** not found, **409** conflict (e.g. consumed exchange), **429** rate limit.
+
+---
+
+## Member: `GET /api/access/guest-requests`
+
+**Auth:** `Authorization: Bearer <member JWT>` (same stack as `/messages`, `/zones`).
+
+**Query**
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `zone_id` | yes | — | Shared Hex zone id (**zid**). |
+| `status` | no | — | Filter **PENDING**, **APPROVED**, **REJECTED** (also **GRANTED** / **DENIED**). |
+| `pending_only` | no | false | If true, only unexpected sessions still **pending**. |
+| `limit` | no | 50 | 1–200. |
+| `skip` | no | 0 | Pagination offset. |
+
+**200** body: `{ "status": "success", "data": [ GuestAccessSessionListItem, … ] }` — newest **`created_at`** first. Each row includes **`guest_id`**, **`zone_id`**, **`guest_name`**, **`guest_status`**, **`status`** (approval UI), **`expectation`** (**expected** \| **unexpected**), **`created_at`**, optional **`device_id`** / **`hid`**, etc. Same **`guest_id`** as `POST /api/access/permission` and as `POST /messages` when messaging that guest.
+
+**401** if bearer missing/invalid. **403** if the caller cannot administer the zone (account visibility rules). **404** if the authenticated owner row is missing (rare).
+
+**Legacy:** `GET /message-feature/access/guest-requests?zone_id=` returns the same rows as a **bare JSON array** (no envelope).
+
+---
+
+## Member: `POST /messages` (guest thread)
+
+**Auth:** member Bearer.
+
+Use the core **`POST /messages`** route (or contract **`POST /messages`** with **`ChatMessageCreateRequest`**) with:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `message` | yes | Body text (**CHAT** must be non-empty after trim). |
+| `type` or `message_type` | yes\* | **PERMISSION** or **CHAT** only for guest threads. |
+| `visibility` | yes\* | Typically **private** (maps scope); \*same rules as normal chat if legacy-only. |
+| `zone_id` or `zoneId` | yes | Must match the guest session’s zone. |
+| `guest_id` | yes | Opaque id from listing or permission flow. |
+
+Do **not** send **`receiver_id`**. Persists **`ZoneMessageEvent`**; the guest reads it on **`GET /api/guest/messages`** with **`with_owner_id`** = the member’s **`owners.id`**.
+
+**201** returns **`ZoneMessageResponse`** with string UUID **`id`** (event id). **403** / **404** / **422** with structured **`detail`** (`FORBIDDEN`, `GUEST_NOT_FOUND`, `MISSING_ZONE_FOR_GUEST`, etc.).
 
 ---
 

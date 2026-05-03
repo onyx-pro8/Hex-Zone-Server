@@ -232,16 +232,19 @@ async def list_access_schedules(
 @router.get(
     "/access/guest-requests",
     response_model=list[GuestAccessSessionListItem],
-    summary="List QR guest arrival sessions",
+    summary="List QR guest arrival sessions (legacy array)",
     description=(
-        "Returns **`guest_access_sessions`** for **`?zone_id=`** — caller must satisfy "
-        "**`owner.zone_id` == zone_id**. Use **`pending_only=true`** for unexpected arrivals still **`pending`**.\n\n"
-        "Resolve them with **`POST /message-feature/access/guest-requests/{guest_id}/approve`** or **`/reject`** "
-        "(Bearer JWT, **guest_id** in path **only**; optional legacy **`zone_id`** query documented on those ops), "
-        "or equivalently **`POST /api/access/approve`** | **`reject`** with JSON **`GuestZoneActionRequest`** "
-        "(**guest_id**, **zone_id** required in body)."
+        "Returns **`guest_access_sessions`** for **`?zone_id=`** (Bearer member JWT). "
+        "**Authorization** matches **`GET /api/access/guest-requests`**: caller must be allowed to administer the zone "
+        "(visible **`zones`** row for this **`zone_id`**, or primary **`owners.zone_id`**, or linked member zone for admins).\n\n"
+        "Response is a **raw JSON array** (no **`{ status, data }`** envelope). Prefer **`GET /api/access/guest-requests`** "
+        "for new SPA clients (envelope + identical row schema **`GuestAccessSessionListItem`**).\n\n"
+        "Use **`pending_only=true`** for unexpected arrivals still **`pending`**. "
+        "Resolve sessions with **`POST /message-feature/access/guest-requests/{guest_id}/approve`** or **`/reject`** "
+        "(path **guest_id** only; optional legacy **`?zone_id=`**), or **`POST /api/access/approve`** | **`reject`** "
+        "with **`GuestZoneActionRequest`** (**guest_id**, **zone_id** in body)."
     ),
-    response_description="Newest arrivals first.",
+    response_description="Newest **`created_at`** first; each item matches **`GuestAccessSessionListItem`** in OpenAPI.",
 )
 async def list_guest_requests(
     zone_id: str = Query(
@@ -262,12 +265,12 @@ async def list_guest_requests(
     if not viewer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
     zid = zone_id.strip()
-    if viewer.zone_id != zid:
+    if not guest_access_service.can_manage_zone_guest_requests(db, viewer, zid):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "error_code": "FORBIDDEN",
-                "message": "You may only list guest requests for your own zone.",
+                "message": "You are not allowed to list guest requests for this zone.",
             },
         )
     rows = guest_access_service.list_guest_sessions_for_zone(

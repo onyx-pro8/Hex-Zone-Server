@@ -218,6 +218,69 @@ async def notify_guest_message_recipient(*, recipient_owner_id: int, payload: di
     await ws_manager.broadcast_to_users([recipient_owner_id], "guest_zone_message", payload)
 
 
+def create_member_to_guest_zone_message(
+    db: Session,
+    *,
+    sender: Owner,
+    zone_id: str,
+    guest_id: str,
+    text: str,
+    msg_type: str,
+) -> ZoneMessageEvent | dict[str, Any]:
+    """Persist **ZoneMessageEvent** from a member to a guest thread (same store as **GET /api/guest/messages**).
+
+    Returns the persisted **`ZoneMessageEvent`**, or **`{"__reject__": "<code>", "message": "..."}`** on validation
+    or policy failure (caller maps to HTTP).
+    """
+    from app.services import guest_access_service
+
+    zid = zone_id.strip()
+    gid = (guest_id or "").strip()
+    if not zid or not gid:
+        return {"__reject__": "validation", "message": "zone_id and guest_id are required."}
+
+    if not guest_access_service.can_manage_zone_guest_requests(db, sender, zid):
+        return {"__reject__": "forbidden", "message": "You cannot message guests for this zone."}
+
+    row = guest_access_service.get_guest_access_session_by_guest_id(db, gid)
+    if not row or row.zone_id != zid:
+        return {"__reject__": "not_found", "message": "Guest session not found for this zone."}
+
+    try:
+        canonical = normalize_message_type(msg_type)
+    except ValueError:
+        return {"__reject__": "invalid_type", "message": "Unsupported message type."}
+
+    if canonical.value not in GUEST_ALLOWED_TYPES:
+        return {"__reject__": "invalid_type", "message": "Only PERMISSION and CHAT are allowed for guest threads."}
+
+    display_text = (text or "").strip()
+    if canonical == CanonicalMessageType.CHAT and not display_text:
+        return {"__reject__": "validation", "message": "message text is required for CHAT."}
+
+    body: dict[str, Any] = {
+        "guest_id": gid,
+        "guest_name": row.guest_name,
+        "zone_id": zid,
+    }
+    event = ZoneMessageEvent(
+        zone_id=zid,
+        sender_id=sender.id,
+        sender_guest_id=None,
+        receiver_id=None,
+        type=canonical.value,
+        category=type_category(canonical),
+        scope=type_scope(canonical),
+        text=display_text or "(no text)",
+        body_json=body,
+        metadata_json={"flow": "member_to_guest", "guest_id": gid},
+    )
+    db.add(event)
+    db.flush()
+    db.refresh(event)
+    return event
+
+
 def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
     z = (
         db.query(Zone)

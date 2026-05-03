@@ -80,7 +80,7 @@ Authorization: Bearer <token>
 
 ### Messages (`/messages`)
 
-- `POST /messages/` - create zone message (`public` or `private`)
+- `POST /messages/` - create zone message (`public` or `private`), or **member→guest** **PERMISSION**/**CHAT** when **`guest_id`** + **`zone_id`** are sent (stores **`ZoneMessageEvent`**; see **`GET /api/guest/messages`**)
 - `GET /messages?owner_id={id}&other_owner_id={id?}&skip=0&limit=100` - list visible messages
 
 Notes:
@@ -100,6 +100,8 @@ Door guests (no JWT): `POST /api/access/permission`, poll `GET /api/access/sessi
 **Static deep link (legacy):** `GET /api/access/qr-link?zone_id=...` → `/access?zid=…` (+ optional `eid`). `GET /api/access/qr.png` for PNG (needs `GUEST_ACCESS_APP_BASE_URL`).
 
 **Stored QR tokens (recommended):** Administrator JWT — `POST /api/access/qr-tokens` mints an opaque secret; SPA opens `/access?gt=<secret>`. List `GET /api/access/qr-tokens?zone_id=...`, revoke `POST /api/access/qr-tokens/{id}/revoke?zone_id=...`, resolve URL `GET /api/access/qr-tokens/{id}/link?zone_id=...`, PNG `GET /api/access/qr-tokens/{id}/qr.png?zone_id=...`. Tokens support **expires_at** / **expires_in_hours** (default **168h** if omitted), optional **max_uses**, optional bound **event_id**, optional **label**. Successful arrivals increment **use_count** (failed checks do not).
+
+Members (Bearer): `GET /api/access/guest-requests?zone_id=...` — list **`guest_access_sessions`** (`{ status, data }` envelope; same rows as `GET /message-feature/access/guest-requests` without envelope).
 
 Unexpected guests: `POST /api/access/approve`, `POST /api/access/reject`.
 

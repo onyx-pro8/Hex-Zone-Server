@@ -163,7 +163,8 @@ class GuestAdminDecisionResponse(BaseModel):
 class GuestAccessSessionListItem(BaseModel):
     """One QR arrival session returned to authenticated zone members.
 
-    **`guest_id`** feeds **`POST …/guest-requests/{guest_id}/approve|reject`** (no **`zone_id`** in path required)."""
+    **`guest_id`** is shared with **`GET /api/access/session/{guest_id}`**, **`POST /messages`** (guest thread),
+    and **`POST …/guest-requests/{guest_id}/approve|reject`** (no **`zone_id`** in path required)."""
 
     id: int
     guest_id: str = Field(description="Use on **approve**/**reject** dashboard routes (opaque session id).")
@@ -172,6 +173,7 @@ class GuestAccessSessionListItem(BaseModel):
     guest_name: str
     event_id: str | None = None
     device_id: str | None = None
+    hid: str | None = Field(default=None, description="Alias of **device_id** (optional client fingerprint).")
     kind: str = Field(description="expected | unexpected")
     resolution: str | None = Field(description="pending | approved | rejected; null for expected arrivals.")
     schedule_id: int | None = None
@@ -181,6 +183,58 @@ class GuestAccessSessionListItem(BaseModel):
     created_at: datetime
     guest_status: Literal["EXPECTED", "UNEXPECTED", "APPROVED", "REJECTED"] = Field(
         description="Derived guest-facing status (matches GET /api/access/session/{guest_id})."
+    )
+    status: Literal["PENDING", "APPROVED", "REJECTED"] = Field(
+        description="Approval UI status: **PENDING** for unexpected awaiting decision; otherwise **APPROVED**/**REJECTED**."
+    )
+    expectation: Literal["expected", "unexpected"] = Field(
+        description="Whether the guest matched an access schedule (**expected**) or not (**unexpected**)."
+    )
+
+
+class GuestRequestListEnvelope(BaseModel):
+    """OpenAPI: success body for **`GET /api/access/guest-requests`** (member JWT).
+
+    Same row fields as **`GuestAccessSessionListItem`**; **`GET /message-feature/access/guest-requests`**
+    returns the same items as a bare JSON array (legacy).
+    """
+
+    status: Literal["success"] = Field(default="success", description="Always **`success`** on HTTP 200.")
+    data: list[GuestAccessSessionListItem] = Field(
+        ...,
+        description="Guest **arrival sessions** for **zone_id**, newest **created_at** first.",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "success",
+                    "data": [
+                        {
+                            "id": 1,
+                            "guest_id": "019b2c3d-0000-7000-8000-000000000001",
+                            "zone_id": "ZN-1XOJPP",
+                            "qr_token_id": None,
+                            "guest_name": "Alex Visitor",
+                            "event_id": None,
+                            "device_id": "ios-abc",
+                            "hid": "ios-abc",
+                            "kind": "unexpected",
+                            "resolution": "pending",
+                            "schedule_id": None,
+                            "admin_owner_id": 42,
+                            "latitude": None,
+                            "longitude": None,
+                            "created_at": "2026-05-03T12:00:00",
+                            "guest_status": "UNEXPECTED",
+                            "status": "PENDING",
+                            "expectation": "unexpected",
+                        }
+                    ],
+                }
+            ]
+        }
     )
 
 

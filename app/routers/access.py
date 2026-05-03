@@ -19,12 +19,14 @@ from app.models.owner import Owner, OwnerRole
 from app.schemas.access_guest import (
     GuestAccessHttpError,
     GuestAccessQrLinkResponse,
+    GuestAccessSessionListItem,
     GuestAdminDecisionResponse,
     GuestArrivalRequest,
     GuestQrTokenCreate,
     GuestQrTokenCreatedResponse,
     GuestQrTokenLinkBundle,
     GuestQrTokenListItem,
+    GuestRequestListEnvelope,
     GuestScanResponse,
     GuestSessionExchangeRequest,
     GuestSessionPollResponse,
@@ -758,6 +760,93 @@ async def guest_session_exchange(
             ),
         ),
     )
+
+
+@router.get(
+    "/guest-requests",
+    response_model=GuestRequestListEnvelope,
+    status_code=status.HTTP_200_OK,
+    summary="List guest access sessions (member JWT)",
+    description=(
+        "**Bearer** member JWT (same **`Authorization: Bearer`** stack as **`/messages`**, **`/zones`**, …). "
+        "Query **`zone_id`** (required).\n\n"
+        "**Authorization:** caller must be allowed to administer the zone — any active **`zones`** row "
+        "for this **`zone_id`** whose **`owner_id`** is in the caller’s account visibility list "
+        "(`zone_listing_owner_ids`), or the caller’s primary **`owners.zone_id`** matches and the zone exists, "
+        "or (administrators only) a linked active member has that **`zone_id`**.\n\n"
+        "Returns **`guest_access_sessions`** newest first. Each **`guest_id`** matches "
+        "**`POST /api/access/permission`**, **`GET /api/access/session/{guest_id}`**, and "
+        "**`POST /messages`** when posting **PERMISSION** / **CHAT** with **`guest_id`** + **`zone_id`** "
+        "(persists **`ZoneMessageEvent`** for **`GET /api/guest/messages`**).\n\n"
+        "**Query:** **`status`** (alias for internal param) filters **PENDING** / **APPROVED** / **REJECTED** "
+        "(also **GRANTED** / **DENIED**). **`pending_only=true`** restricts to unexpected + pending. "
+        "**`limit`** (1–200, default 50) and **`skip`** paginate."
+    ),
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "description": "Missing or invalid bearer token (or non-numeric JWT `sub`).",
+        },
+        status.HTTP_403_FORBIDDEN: {
+            "description": (
+                "Caller cannot list guest requests for this zone. "
+                "Body follows the global error handler: **`status`**, **`message`**, **`error_code`**."
+            ),
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Authenticated owner record not found (rare; **`detail`** may be unstructured).",
+        },
+    },
+    response_description="Envelope **`{ status, data }`** where **`data`** is an array of **`GuestAccessSessionListItem`**.",
+)
+async def list_guest_requests_for_access_api(
+    zone_id: str = Query(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Hex zone id (**zid**); required.",
+    ),
+    filter_status: str | None = Query(
+        default=None,
+        max_length=32,
+        alias="status",
+        description="Optional filter: **PENDING**, **APPROVED**, **REJECTED** (case-insensitive; GRANTED/DENIED accepted).",
+    ),
+    pending_only: bool = Query(
+        False,
+        description="If true, only unexpected sessions still **pending** (same as legacy list).",
+    ),
+    limit: int = Query(50, ge=1, le=200, description="Max rows (most recent first)."),
+    skip: int = Query(0, ge=0, le=10_000, description="Offset for pagination."),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    viewer = owner_crud.get_owner(db, current_user["user_id"])
+    if not viewer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "NOT_FOUND", "message": "Owner not found"},
+        )
+    zid = zone_id.strip()
+    if not guest_access_service.can_manage_zone_guest_requests(db, viewer, zid):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "FORBIDDEN",
+                "message": "You are not allowed to list guest requests for this zone.",
+            },
+        )
+    rows = guest_access_service.list_guest_sessions_for_zone(
+        db,
+        zone_id=zid,
+        limit=limit,
+        skip=skip,
+        pending_only=pending_only,
+        status=filter_status,
+    )
+    data = [
+        GuestAccessSessionListItem.model_validate(guest_access_service.serialize_guest_session_row(r)) for r in rows
+    ]
+    return GuestRequestListEnvelope(status="success", data=data)
 
 
 @router.post(

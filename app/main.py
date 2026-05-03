@@ -70,7 +70,11 @@ OPENAPI_TAGS = [
     },
     {
         "name": "messages",
-        "description": "Zone-scoped messaging for public and private communication.",
+        "description": (
+            "Member zone messaging. **`POST /messages`** creates **`Message`** rows for normal member↔member types, "
+            "or **`ZoneMessageEvent`** when **`guest_id`** + **`zone_id`** are sent (**PERMISSION** / **CHAT** to QR guests; "
+            "same persistence as **`GET /api/guest/messages`**). **`GET /messages`** lists **`Message`** history for the caller."
+        ),
     },
     {
         "name": "utilities",
@@ -110,6 +114,7 @@ OPENAPI_TAGS = [
             "**Permission** response includes **`zone_id`** for clients that opened only **`?gt=`**. "
             "**Administrators** mint DB-backed tokens (`POST /api/access/qr-tokens`, SPA **`/access?gt=&zid=`**, optional **`eid`**) "
             "or static links (`GET /api/access/qr-link`, **`/access?zid=`**); optional server PNG QR. "
+            "Members list guest arrivals: **`GET /api/access/guest-requests?zone_id=`** (Bearer). "
             "Approve/reject unexpected guests: `POST /api/access/approve|reject` (**JSON**: **guest_id**, **zone_id**) "
             "or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`** (path **guest_id**; zone inferred). "
             "Bearer JWT for both families. "

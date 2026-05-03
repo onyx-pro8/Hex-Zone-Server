@@ -1,5 +1,5 @@
 """Pydantic schemas for request/response validation."""
-from pydantic import BaseModel, EmailStr, Field, model_validator, computed_field
+from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, model_validator, computed_field
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -420,10 +420,19 @@ class MessageVisibilityEnum(str, Enum):
 
 
 class ZoneMessageCreate(BaseModel):
-    """Create a zone message."""
+    """Create a zone **member** message.
+
+    **Default:** persists a **`Message`** row (member ↔ member) when **`guest_id`** is omitted.
+
+    **Guest thread:** set **`guest_id`** and **`zone_id`** (or **`zoneId`**) to append a **`ZoneMessageEvent`**
+    for **PERMISSION** or **CHAT** (same store as **`GET /api/guest/messages`**). Omit **`receiver_id`**.
+    """
 
     message: str = Field(..., min_length=1, max_length=16_384)
-    type: Optional[str] = Field(default=None, description="Canonical message type")
+    type: Optional[str] = Field(
+        default=None,
+        description="Canonical **`Message`** / event type (e.g. **CHAT**, **PERMISSION**, **SERVICE**). Required unless **visibility** alone is sent (legacy).",
+    )
     visibility: Optional[MessageVisibilityEnum] = Field(
         default=None,
         description="Deprecated legacy field. If sent without type, maps private->PRIVATE, public->SERVICE.",
@@ -432,6 +441,18 @@ class ZoneMessageCreate(BaseModel):
         None,
         ge=1,
         description="Required when visibility is private; omitted for public",
+    )
+    guest_id: Optional[str] = Field(
+        default=None,
+        max_length=36,
+        description="When set with **zone_id**, creates a **PERMISSION**/**CHAT** **ZoneMessageEvent** for that guest (not **messages** table).",
+    )
+    zone_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        validation_alias=AliasChoices("zone_id", "zoneId"),
+        description="Target zone for member→guest messaging; required when **guest_id** is set.",
     )
 
     @model_validator(mode="after")
@@ -445,23 +466,58 @@ class ZoneMessageCreate(BaseModel):
             return self
         raise ValueError("type is required (or send legacy visibility for temporary compatibility)")
 
+    @model_validator(mode="after")
+    def guest_thread_fields(self):
+        gid = (self.guest_id or "").strip()
+        zid = (self.zone_id or "").strip()
+        if gid and not zid:
+            raise ValueError("zone_id is required when guest_id is set")
+        if gid and self.receiver_id is not None:
+            raise ValueError("receiver_id must be omitted when guest_id is set")
+        return self
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "message": "Hello team",
+                    "type": "CHAT",
+                    "visibility": "private",
+                    "receiver_id": 2,
+                },
+                {
+                    "message": "Please proceed to reception.",
+                    "type": "PERMISSION",
+                    "visibility": "private",
+                    "zone_id": "ZN-1XOJPP",
+                    "guest_id": "019b2c3d-0000-7000-8000-000000000001",
+                },
+            ]
+        }
+    )
+
 
 class ZoneMessageResponse(BaseModel):
-    """Zone message returned to clients."""
+    """Created **`Message`** (numeric **`id`**) or **`ZoneMessageEvent`** (string UUID **`id`**) for guest threads."""
 
-    id: int
-    zone_id: str = Field(..., description="Zone UUID (not the internal DB id)")
-    sender_id: int
-    receiver_id: Optional[int]
-    type: str
-    category: str
-    scope: str
-    visibility: MessageVisibilityEnum
-    message: str
-    created_at: datetime
+    id: int | str = Field(
+        ...,
+        description="**`messages.id`** (integer) for normal posts, or **`zone_message_events.id`** (UUID string) when **`guest_id`** was used.",
+    )
+    zone_id: str = Field(..., description="Shared zone id string (**not** the internal **`zones.id`** PK).")
+    sender_id: int = Field(..., description="**`owners.id`** of the sender (always set for member posts).")
+    receiver_id: Optional[int] = Field(
+        default=None,
+        description="Recipient **`owners.id`** for private member messages; **null** for guest-thread events.",
+    )
+    type: str = Field(description="Canonical message type string (e.g. **CHAT**, **PERMISSION**).")
+    category: str = Field(description="Derived **Access** / **Alarm** / **Alert** grouping.")
+    scope: str = Field(description="**public** or **private** scope for this type.")
+    visibility: MessageVisibilityEnum = Field(description="Legacy visibility; aligns with **scope** for new clients.")
+    message: str = Field(description="Body text stored for the message or zone event.")
+    created_at: datetime = Field(description="Server **UTC** creation time.")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # Update forward references

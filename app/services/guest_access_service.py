@@ -5,7 +5,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
 from app.models import AccessSchedule, GuestAccessSession, Owner, Zone, ZoneMessageEvent
 from app.models.owner import OwnerRole
+from app.services.access_policy import zone_listing_owner_ids
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,43 @@ def zone_exists(db: Session, zone_id: str) -> bool:
         .first()
         is not None
     )
+
+
+def can_manage_zone_guest_requests(db: Session, viewer: Owner, zone_id: str) -> bool:
+    """True if the owner may list guest arrivals and send PERMISSION/CHAT to guests for this zone id."""
+    zid = (zone_id or "").strip()
+    if not zid:
+        return False
+    allowed_ids = zone_listing_owner_ids(db, viewer)
+    if not allowed_ids:
+        return False
+    if (
+        db.query(Zone.id)
+        .filter(Zone.zone_id == zid, Zone.active.is_(True), Zone.owner_id.in_(allowed_ids))
+        .first()
+    ):
+        return True
+    if viewer.zone_id == zid and zone_exists(db, zid):
+        return True
+    if viewer.role == OwnerRole.ADMINISTRATOR:
+        return (
+            db.query(Owner.id)
+            .filter(Owner.zone_id == zid, Owner.active.is_(True), Owner.id.in_(allowed_ids))
+            .first()
+            is not None
+        )
+    return False
+
+
+def _guest_row_client_status(row: GuestAccessSession) -> str:
+    """PENDING / APPROVED / REJECTED for dashboard approval UI."""
+    if row.kind == "expected":
+        return "APPROVED"
+    if row.resolution == "approved":
+        return "APPROVED"
+    if row.resolution == "rejected":
+        return "REJECTED"
+    return "PENDING"
 
 
 def resolve_primary_zone_admin_owner(db: Session, zone_id: str) -> Owner | None:
@@ -284,6 +322,7 @@ def serialize_guest_session_row(row: GuestAccessSession) -> dict:
         "guest_name": row.guest_name,
         "event_id": row.event_id,
         "device_id": row.device_id,
+        "hid": row.device_id,
         "kind": row.kind,
         "resolution": row.resolution,
         "schedule_id": row.schedule_id,
@@ -293,6 +332,8 @@ def serialize_guest_session_row(row: GuestAccessSession) -> dict:
         "longitude": row.longitude,
         "created_at": row.created_at,
         "guest_status": base["status"],
+        "status": _guest_row_client_status(row),
+        "expectation": row.kind,
     }
 
 
@@ -309,13 +350,31 @@ def list_guest_sessions_for_zone(
     *,
     zone_id: str,
     limit: int = 50,
+    skip: int = 0,
     pending_only: bool = False,
+    status: str | None = None,
 ) -> list[GuestAccessSession]:
     lim = max(1, min(int(limit), 200))
+    sk = max(0, min(int(skip), 10_000))
     q = db.query(GuestAccessSession).filter(GuestAccessSession.zone_id == zone_id.strip())
     if pending_only:
         q = q.filter(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "pending")
-    return q.order_by(GuestAccessSession.created_at.desc()).limit(lim).all()
+    elif status and (st := status.strip().upper()):
+        if st == "PENDING":
+            q = q.filter(
+                GuestAccessSession.kind == "unexpected",
+                GuestAccessSession.resolution == "pending",
+            )
+        elif st in ("APPROVED", "GRANTED"):
+            q = q.filter(
+                or_(
+                    GuestAccessSession.kind == "expected",
+                    and_(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "approved"),
+                )
+            )
+        elif st in ("REJECTED", "DENIED"):
+            q = q.filter(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "rejected")
+    return q.order_by(GuestAccessSession.created_at.desc()).offset(sk).limit(lim).all()
 
 
 def guest_session_public_view(row: GuestAccessSession) -> dict:

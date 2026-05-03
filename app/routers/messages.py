@@ -4,11 +4,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.schemas.schemas import ZoneMessageCreate, ZoneMessageResponse
+from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.crud import message as message_crud
 from app.crud import owner as owner_crud
 from app.core.security import get_current_user
-from app.domain.message_types import MessageScope, normalize_message_type, type_category, type_scope
+from app.domain.message_types import CanonicalMessageType, MessageScope, normalize_message_type, type_category, type_scope
+from app.services import guest_api_service
 from app.services.access_policy import can_message_owner
 
 router = APIRouter(prefix="/messages", tags=["messages"])
@@ -19,20 +20,37 @@ logger = logging.getLogger(__name__)
     "/",
     response_model=ZoneMessageResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create zone message",
-    description="Create public/private chat messages scoped to the sender's zone.",
+    summary="Create zone message or member→guest zone event",
+    description=(
+        "**Member ↔ member (default):** requires **`type`** (or legacy **`visibility`** only). "
+        "Persists **`Message`**; **`receiver_id`** required for private-scope types.\n\n"
+        "**Member → guest:** send **`guest_id`** (from **`GET /api/access/guest-requests`** or permission flow) "
+        "and **`zone_id`** / **`zoneId`**. Types allowed: **PERMISSION** and **CHAT** only. "
+        "Do **not** send **`receiver_id`**. Creates **`ZoneMessageEvent`** (guest sees it on **`GET /api/guest/messages`** "
+        "with **`with_owner_id`** = your **`owners.id`**).\n\n"
+        "See **`ZoneMessageCreate`** schema examples in Swagger."
+    ),
     responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "description": "Missing or invalid bearer token.",
+        },
         status.HTTP_403_FORBIDDEN: {
-            "description": "Receiver is outside sender zone.",
+            "description": (
+                "**`FORBIDDEN`**: member→guest caller cannot administer **`zone_id`**, "
+                "or member↔member receiver is outside allowed zone/account scope."
+            ),
         },
         status.HTTP_404_NOT_FOUND: {
-            "description": "Sender or receiver owner was not found.",
+            "description": "**`OWNER_NOT_FOUND`** (sender), **`RECEIVER_NOT_FOUND`**, or **`GUEST_NOT_FOUND`** (bad **guest_id** / zone).",
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Message visibility/receiver rules were violated.",
+            "description": (
+                "Validation: missing **type**/legacy **visibility**, bad **receiver_id** / scope mix, "
+                "**`MISSING_ZONE_FOR_GUEST`**, **`INVALID_MESSAGE_TYPE_FOR_GUEST`**, or other **`error_code`** in **detail**."
+            ),
         },
     },
-    response_description="Created zone message payload.",
+    response_description="**`ZoneMessageResponse`**: integer **`id`** for **`messages`**, string UUID **`id`** for guest-thread **`ZoneMessageEvent`**.",
 )
 async def create_message(
     payload: ZoneMessageCreate,
@@ -46,6 +64,73 @@ async def create_message(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error_code": "OWNER_NOT_FOUND", "message": "Sender owner not found"},
+        )
+
+    if (payload.guest_id or "").strip():
+        gid = payload.guest_id.strip()
+        zid = (payload.zone_id or "").strip()
+        if not zid:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error_code": "MISSING_ZONE_FOR_GUEST",
+                    "message": "zone_id is required when guest_id is set.",
+                },
+            )
+        try:
+            guest_canonical = normalize_message_type(payload.type or "")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error_code": "INVALID_MESSAGE_TYPE", "message": "Unsupported message type."},
+            ) from exc
+        if guest_canonical not in (CanonicalMessageType.PERMISSION, CanonicalMessageType.CHAT):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error_code": "INVALID_MESSAGE_TYPE_FOR_GUEST",
+                    "message": "Only PERMISSION and CHAT may be sent with guest_id.",
+                },
+            )
+        guest_result = guest_api_service.create_member_to_guest_zone_message(
+            db,
+            sender=sender,
+            zone_id=zid,
+            guest_id=gid,
+            text=payload.message,
+            msg_type=payload.type or "",
+        )
+        if isinstance(guest_result, dict):
+            code = guest_result.get("__reject__")
+            msg = str(guest_result.get("message") or "Request failed")
+            if code == "forbidden":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"error_code": "FORBIDDEN", "message": msg},
+                )
+            if code == "not_found":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"error_code": "GUEST_NOT_FOUND", "message": msg},
+                )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error_code": "INVALID_GUEST_MESSAGE", "message": msg},
+            )
+        event = guest_result
+        db.commit()
+        gtype = normalize_message_type(event.type)
+        return ZoneMessageResponse(
+            id=event.id,
+            zone_id=event.zone_id,
+            sender_id=event.sender_id,
+            receiver_id=event.receiver_id,
+            type=event.type,
+            category=type_category(gtype).value,
+            scope=type_scope(gtype).value,
+            visibility=MessageVisibilityEnum.PRIVATE,
+            message=event.text,
+            created_at=event.created_at,
         )
 
     try:

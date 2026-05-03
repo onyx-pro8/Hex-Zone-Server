@@ -13,7 +13,8 @@ import secrets
 from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+# Missing `Authorization` should yield **401** (not FastAPI's default **403** from auto_error).
+security = HTTPBearer(auto_error=False)
 
 
 def get_password_hash(password: str) -> str:
@@ -74,8 +75,13 @@ def verify_token(token: str) -> dict:
         )
 
 
-async def get_current_user(credentials = Depends(security)) -> dict:
+async def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> dict:
     """Dependency to get current user from token."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
     token = credentials.credentials
     payload = verify_token(token)
     user_id = payload.get("sub")
@@ -95,9 +101,14 @@ async def get_current_user(credentials = Depends(security)) -> dict:
 
 
 async def get_current_guest(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict:
     """Bearer JWT from **`POST /api/access/guest-session`** (`token_use` **guest_access**)."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
     token = credentials.credentials
     payload = verify_token(token)
     if payload.get("token_use") != "guest_access":
