@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal, cast
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
@@ -59,7 +60,8 @@ def _guest_zone_allowed(guest_ctx: dict, zone_id: str) -> None:
     summary="Guest session profile",
     description=(
         "Returns profile and JWT expiry for the **guest_access** bearer issued by "
-        "**`POST /api/access/guest-session`**. Use **`Authorization: Bearer <access_token>`**."
+        "**`POST /api/access/guest-session`**. Use **`Authorization: Bearer <access_token>`**. "
+        "**`allowed_message_types`** mirrors the JWT claim (defaults to PERMISSION + CHAT)."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError, "description": "Missing/invalid token or wrong `token_use`."},
@@ -85,13 +87,21 @@ async def guest_me(
             },
         )
     expires_at = guest_ctx.get("expires_at") or datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    amt_raw = guest_ctx.get("allowed_message_types") or []
+    allowed: list[str] = []
+    for t in amt_raw:
+        u = str(t).strip().upper()
+        if u in ("PERMISSION", "CHAT") and u not in allowed:
+            allowed.append(u)
+    if not allowed:
+        allowed = ["PERMISSION", "CHAT"]
     return GuestMeResponse(
         status="success",
         data=GuestMeData(
             guest_id=row.guest_id,
             display_name=row.guest_name,
             zone_ids=guest_ctx["zone_ids"],
-            allowed_message_types=["PERMISSION", "CHAT"],
+            allowed_message_types=cast(list[Literal["PERMISSION", "CHAT"]], allowed),
             expires_at=expires_at,
         ),
     )
@@ -103,7 +113,8 @@ async def guest_me(
     response_model_by_alias=True,
     summary="List zone members (peers)",
     description=(
-        "Active **owners** in **`zone_id`**. **`zone_id`** must appear in the guest JWT **`zone_ids`** claim. "
+        "Active **owners** in **`zone_id`** (hosts/staff the guest may message). **`zone_id`** must appear in the guest JWT **`zone_ids`** claim. "
+        "Each **`owner_id`** is **`owners.id`** — use as **`with_owner_id`** / **`to_owner_id`** on **`/api/guest/messages`**. "
         "**`can_receive_chat`** reflects whether the member has blocked **CHAT**-type delivery."
     ),
     responses={

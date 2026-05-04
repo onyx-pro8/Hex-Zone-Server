@@ -381,16 +381,26 @@ def guest_session_public_view(row: GuestAccessSession) -> dict:
     if row.kind == "expected":
         status = "EXPECTED"
         message = "You are expected. Please proceed."
+        approval_status = "APPROVED"
     elif row.resolution == "approved":
         status = "APPROVED"
         message = "Your visit has been approved. Welcome."
+        approval_status = "APPROVED"
     elif row.resolution == "rejected":
         status = "REJECTED"
         message = "Access was not approved."
+        approval_status = "REJECTED"
     else:
         status = "UNEXPECTED"
         message = "You are not scheduled. Please wait for approval."
-    out = {"guest_id": row.guest_id, "zone_id": row.zone_id, "status": status, "message": message}
+        approval_status = "PENDING"
+    out = {
+        "guest_id": row.guest_id,
+        "zone_id": row.zone_id,
+        "status": status,
+        "approval_status": approval_status,
+        "message": message,
+    }
     if status == "APPROVED":
         now = datetime.utcnow()
         if (

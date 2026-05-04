@@ -74,8 +74,10 @@ async def test_guest_exchange_consumed_and_guest_apis(test_db, override_get_db):
 
         sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
         assert sess.status_code == 200
-        assert sess.json()["status"] == "UNEXPECTED"
-        assert "exchange_code" not in sess.json()
+        sj = sess.json()
+        assert sj["status"] == "UNEXPECTED"
+        assert sj["approval_status"] == "PENDING"
+        assert "exchange_code" not in sj
 
         ap = await client.post(
             "/api/access/approve",
@@ -88,6 +90,7 @@ async def test_guest_exchange_consumed_and_guest_apis(test_db, override_get_db):
         assert sess2.status_code == 200
         body = sess2.json()
         assert body["status"] == "APPROVED"
+        assert body["approval_status"] == "APPROVED"
         assert "exchange_code" in body and body["exchange_code"]
         assert "exchange_expires_at" in body and body["exchange_expires_at"]
         code = body["exchange_code"]

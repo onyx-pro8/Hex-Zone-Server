@@ -71,11 +71,11 @@ OPENAPI_TAGS = [
     {
         "name": "messages",
         "description": (
-            "Member zone messaging. **`POST /messages`** creates **`Message`** rows for normal member↔member types, "
-            "or **`ZoneMessageEvent`** when **`guest_id`** + **`zone_id`** are sent (**PERMISSION** / **CHAT** to QR guests; "
-            "same persistence as **`GET /api/guest/messages`**). "
-            "Guest-thread payloads accept **`type`** or **`message_type`** (see **`ZoneMessageCreate`**). "
-            "**`GET /messages`** lists **`Message`** history for the caller."
+            "Member zone messaging (Bearer **member** JWT — numeric `sub`). **`POST /messages`** creates **`Message`** rows "
+            "for member↔member chat, or **`ZoneMessageEvent`** when **`guest_id`** + **`zone_id`** are set (**Access** channel: "
+            "**PERMISSION** / **CHAT** to approved QR guests; same store as **`GET /api/guest/messages`**). "
+            "Member→guest: send **`message`**, **`type`** or **`message_type`**, **`visibility`** (often **`private`**), **`zone_id`**/**`zoneId`**, **`guest_id`**; omit **`receiver_id`**. "
+            "See schema **`ZoneMessageCreate`** (Swagger **Schemas**). **`GET /messages`** lists the caller’s **`Message`** history only (not guest-thread rows)."
         ),
     },
     {
@@ -91,12 +91,12 @@ OPENAPI_TAGS = [
         "name": "message-feature",
         "description": (
             "Authenticated geo propagation, message blocking, **access schedules** "
-            "(`/message-feature/access/schedules`), **guest arrival history** "
-            "(`GET /message-feature/access/guest-requests`), **guest approve/reject** "
-            "(`POST /message-feature/access/guest-requests/{guest_id}/approve|reject` — path **guest_id** only; "
-            "**zone_id** inferred from the session), **PERMISSION** propagation for logged-in devices "
-            "(`/message-feature/access/permission`). Public QR guests without JWT use **`access`** "
-            "(`POST /api/access/permission`)."
+            "(`/message-feature/access/schedules`). **Guest roster (canonical Swagger):** "
+            "**`GET /api/access/guest-requests`** — this tag still exposes "
+            "**`GET /message-feature/access/guest-requests`** (same rows as raw JSON array) and "
+            "**`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`** (path **guest_id**; "
+            "**zone_id** inferred). **PERMISSION** for logged-in devices: **`/message-feature/access/permission`**. "
+            "Anonymous door guests use **`access`**: **`POST /api/access/permission`**."
         ),
     },
     {
@@ -109,38 +109,49 @@ OPENAPI_TAGS = [
     {
         "name": "access",
         "description": (
-            "Public guest entry for **zone QR scans** (no JWT): `POST /api/access/permission`, "
-            "`GET /api/access/session/{guest_id}` (**`zone_id`** query recommended; optional — guest id alone resolves). "
-            "After admin **APPROVED**, poll may return **`exchange_code`** → **`POST /api/access/guest-session`** (no Bearer) "
-            "for a short-lived guest JWT, then **`/api/guest/*`** (see **API.md**). "
-            "**Permission** response includes **`zone_id`** for clients that opened only **`?gt=`**. "
-            "**Administrators** mint DB-backed tokens (`POST /api/access/qr-tokens`, SPA **`/access?gt=&zid=`**, optional **`eid`**) "
-            "or static links (`GET /api/access/qr-link`, **`/access?zid=`**); optional server PNG QR. "
-            "**Members** list guest arrivals (**Swagger:** **`access_list_guest_requests`**): **`GET /api/access/guest-requests?zone_id=`** "
-            "(Bearer, **`GuestRequestListEnvelope`**). "
-            "Approve/reject unexpected guests: `POST /api/access/approve|reject` (**JSON**: **guest_id**, **zone_id**) "
-            "or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`** (path **guest_id**; zone inferred). "
-            "Bearer JWT for both families. "
-            "Not member-invite (`/utils/qr/generate`)."
+            "**Anonymous + member** guest-access routes under **`/api/access`**. "
+            "**No JWT:** **`POST /api/access/permission`**, **`GET /api/access/session/{guest_id}`**, **`POST /api/access/guest-session`**. "
+            "Poll response includes **`status`** (EXPECTED | UNEXPECTED | APPROVED | REJECTED) and **`approval_status`** "
+            "(PENDING | APPROVED | REJECTED) for dashboards; when approved, **`exchange_code`** + **`exchange_expires_at`** enable the guest JWT exchange. "
+            "**Member JWT:** **`GET /api/access/guest-requests`** (operationId **`access_list_guest_requests`**), **`POST /api/access/approve|reject`**, QR helpers. "
+            "**Permission** response echoes **`zone_id`** when the invite had only **`gt`**. "
+            "**Administrators** mint stored tokens (**`POST /api/access/qr-tokens`**, SPA **`/access?gt=&zid=`**) or static **`GET /api/access/qr-link`**. "
+            "Legacy duplicate listing: **`GET /message-feature/access/guest-requests`** (raw array). "
+            "Not the member-account invite flow: **`POST /utils/qr/generate`**."
         ),
     },
     {
         "name": "guest",
         "description": (
-            "**Approved anonymous guest** APIs. Obtain **`access_token`** from **`POST /api/access/guest-session`** "
-            "(one-time **`exchange_code`** from **`GET /api/access/session/{guest_id}`** when **APPROVED**). "
-            "Send **`Authorization: Bearer <access_token>`** — JWT claim **`token_use`** is **`guest_access`**; "
-            "do not use this token on owner/member routes.\n\n"
-            "**Endpoints:** **`GET /api/guest/me`**, **`GET /api/guest/zones/{zone_id}/peers`**, "
-            "**`GET /api/guest/zones/{zone_id}/dashboard`**, **`GET|POST /api/guest/messages`** "
-            "(only **PERMISSION** and **CHAT** types). v1 uses REST polling; WebSocket for guests is optional later. "
-            "Contract details: **`API.md`**."
+            "**Guest JWT only** (`Authorization: Bearer`; claim **`token_use`=`guest_access`**, subject **`guest:{guest_id}`**). "
+            "Obtain token from **`POST /api/access/guest-session`** using **`exchange_code`** from **`GET /api/access/session/{guest_id}`** after approval. "
+            "Do **not** send the member (zoneweaver) token on these routes.\n\n"
+            "| Endpoint | Purpose |\n"
+            "|----------|--------|\n"
+            "| **`GET /api/guest/me`** | Profile: **`guest_id`**, **`display_name`**, **`zone_ids`**, **`allowed_message_types`**, **`expires_at`** |\n"
+            "| **`GET /api/guest/zones/{zone_id}/peers`** | Hosts/staff (**`owner_id`**) to open PERMISSION/CHAT threads |\n"
+            "| **`GET /api/guest/zones/{zone_id}/dashboard`** | Optional welcome copy and links |\n"
+            "| **`GET /api/guest/messages`** | Thread with **`with_owner_id`** (member **`owners.id`**) |\n"
+            "| **`POST /api/guest/messages`** | Guest → member **CHAT** or **PERMISSION** (**`to_owner_id`**) |\n\n"
+            "Allowed message types default to **PERMISSION** and **CHAT** in the minted JWT. Errors use **`{ \"status\":\"error\", \"message\", \"error_code\" }`**."
         ),
     },
 ]
 
+_ACCESS_ZONE_CLIENT_DOC = """
+
+### Hex Zone client (reference)
+
+**Auth:** Member Bearer = **`zoneweaver_token`** stack (**`sub`** = owner id). Guest Bearer = separate token (**`zoneweaver_guest_access_token`**), **only** **`/api/guest/*`**.
+
+**Typical Vite env (adjust per deploy):** `VITE_API_BASE_URL`, `VITE_GUEST_API_BASE_PATH` (default `/api/guest`), `VITE_GUEST_SESSION_EXCHANGE_URL` (`/api/access/guest-session`), `VITE_ADMIN_GUEST_REQUESTS_LIST_URL` (`/api/access/guest-requests`), `VITE_ACCESS_SESSION_URL_TEMPLATE`, `VITE_ANONYMOUS_ACCESS_PERMISSION_PATH` (`/api/access/permission`).
+"""
+
 app = FastAPI(
     title=settings.API_TITLE,
+    contact={
+        "name": "Zone Weaver / Hex Zone API",
+    },
     description=(
         f"{settings.API_DESCRIPTION}\n\n"
         "This API supports setup wizard flows for administrator and user onboarding, "
@@ -156,13 +167,14 @@ app = FastAPI(
         "- Login: email/username and password authentication.\n"
         "- **QR guest access (no login):** SPA **`/access?zid=`** (static) or **`/access?gt=&zid=`** (issued token; legacy **`gt`**-only URLs still work); "
         "guest submits name → `POST /api/access/permission` (response includes **`zone_id`**). "
-        "Poll **`GET /api/access/session/{guest_id}`** with **`?zone_id=`** from URL or permission body, or omit **`zone_id`** to resolve by guest id. "
+        "Poll **`GET /api/access/session/{guest_id}`** — response includes **`status`**, **`approval_status`**, and when approved **`exchange_code`** → **`POST /api/access/guest-session`**. "
         "Administrators mint tokens with **`POST /api/access/qr-tokens`** or static **`GET /api/access/qr-link`**. "
         "**Members** list arrivals with **`GET /api/access/guest-requests?zone_id=`** (Bearer); use returned **`guest_id`** on **`POST /messages`** (**PERMISSION**/**CHAT**, **`type`** or **`message_type`**). "
         "Members create expectations via `/message-feature/access/schedules`; unexpected visits notify "
         "via WebSocket `unexpected_guest` / `guest_is_here`. "
         "Admins resolve pending unexpected visits with **`POST /api/access/approve|reject`** or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`**. "
         "**Member invite QR** is separate: `POST /utils/qr/generate`."
+        f"{_ACCESS_ZONE_CLIENT_DOC}"
     ),
     version=settings.API_VERSION,
     lifespan=lifespan,

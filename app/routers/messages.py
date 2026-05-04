@@ -25,12 +25,12 @@ logger = logging.getLogger(__name__)
     description=(
         "**Member ↔ member (default):** requires **`type`** (or legacy **`visibility`** only). "
         "Persists **`Message`**; **`receiver_id`** required for private-scope types.\n\n"
-        "**Member → guest:** send **`guest_id`** (from **`GET /api/access/guest-requests`** or permission flow) "
-        "and **`zone_id`** / **`zoneId`**. Message kind: set **`type`** **or** **`message_type`** "
-        "(same field in wire handling; **`type`** wins if both are sent). Only **PERMISSION** and **CHAT** are allowed. "
-        "Do **not** send **`receiver_id`**. Creates **`ZoneMessageEvent`** (guest sees it on **`GET /api/guest/messages`** "
-        "with **`with_owner_id`** = your **`owners.id`**).\n\n"
-        "See **`ZoneMessageCreate`** in **Schemas** for PERMISSION/CHAT examples (including **`message_type`**)."
+        "**Member → guest (Access channel):** Bearer **member** JWT only. Send **`guest_id`** (from **`GET /api/access/guest-requests`** "
+        "or **`POST /api/access/permission`**) and **`zone_id`** / **`zoneId`**. Body: **`message`**, **`message_type`** or **`type`**, "
+        "**`visibility`** (commonly **`private`**). Only **PERMISSION** and **CHAT** allowed with **`guest_id`**. "
+        "Do **not** send **`receiver_id`**. Persists **`ZoneMessageEvent`**; guest reads via **`GET /api/guest/messages`** "
+        "with **`with_owner_id`** = caller **`owners.id`**.\n\n"
+        "OpenAPI schema **`ZoneMessageCreate`** includes Hex-Zone-Client examples."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {

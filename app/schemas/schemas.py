@@ -497,6 +497,7 @@ class ZoneMessageCreate(BaseModel):
         return self
 
     model_config = ConfigDict(
+        title="ZoneMessageCreate",
         json_schema_extra={
             "examples": [
                 {
@@ -513,7 +514,7 @@ class ZoneMessageCreate(BaseModel):
                     "guest_id": "019b2c3d-0000-7000-8000-000000000001",
                 },
             ]
-        }
+        },
     )
 
 

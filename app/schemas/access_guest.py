@@ -381,14 +381,20 @@ class GuestQrTokenLinkBundle(BaseModel):
 
 
 class GuestSessionPollResponse(BaseModel):
-    """Poll shape after permission; callers may use **`GET …/session/{guest_id}?zone_id=`** or omit **`zone_id`**."""
+    """Poll shape after permission; callers may use **`GET …/session/{guest_id}?zone_id=`** or omit **`zone_id`**.
+
+    **`status`** is the detailed guest-flow state; **`approval_status`** collapses to **PENDING** / **APPROVED** / **REJECTED**
+    for UIs that mirror **`GET /api/access/guest-requests`** row **`status`**."""
 
     guest_id: str = Field(description="Same **guest_id** returned by **`POST /api/access/permission`**.")
     zone_id: str = Field(description="Session zone (echoed for display; poll may filter by **`zone_id`** query or omit it).")
     status: Literal["EXPECTED", "UNEXPECTED", "APPROVED", "REJECTED"] = Field(
-        description="EXPECTED: scheduled guest; UNEXPECTED: still pending admin; APPROVED/REJECTED: resolved."
+        description="EXPECTED: schedule-matched guest; UNEXPECTED: awaits admin; APPROVED/REJECTED: unexpected flow resolved."
     )
-    message: str
+    approval_status: Literal["PENDING", "APPROVED", "REJECTED"] = Field(
+        description="PENDING = unexpected and still pending; APPROVED/REJECTED = decision taken. EXPECTED (scheduled) arrivals use APPROVED here."
+    )
+    message: str = Field(description="Guest-facing instruction string for the SPA.")
     exchange_code: str | None = Field(
         default=None,
         description="One-time code for **`POST /api/access/guest-session`** when **status** is **APPROVED** only.",
@@ -405,12 +411,14 @@ class GuestSessionPollResponse(BaseModel):
                     "guest_id": "550e8400-e29b-41d4-a716-446655440000",
                     "zone_id": "Z123",
                     "status": "UNEXPECTED",
+                    "approval_status": "PENDING",
                     "message": "You are not scheduled. Please wait for approval.",
                 },
                 {
                     "guest_id": "550e8400-e29b-41d4-a716-446655440000",
                     "zone_id": "Z123",
                     "status": "APPROVED",
+                    "approval_status": "APPROVED",
                     "message": "Your visit has been approved. Welcome.",
                     "exchange_code": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
                     "exchange_expires_at": "2026-05-03T15:00:00Z",

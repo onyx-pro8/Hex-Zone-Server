@@ -71,16 +71,36 @@ class GuestSessionExchangeResponse(BaseModel):
 
 
 class GuestMeData(BaseModel):
-    guest_id: str
-    display_name: str
-    zone_ids: list[str]
-    allowed_message_types: list[Literal["PERMISSION", "CHAT"]] = ["PERMISSION", "CHAT"]
-    expires_at: str = Field(description="ISO-8601 UTC from JWT `exp`.")
+    guest_id: str = Field(description="Opaque id from **`POST /api/access/permission`**; matches **`guest_access_sessions.guest_id`**.")
+    display_name: str = Field(description="Name captured at check-in.")
+    zone_ids: list[str] = Field(description="Shared zone ids this JWT may access (query **`zone_id`** on nested routes must be listed here).")
+    allowed_message_types: list[Literal["PERMISSION", "CHAT"]] = Field(
+        default_factory=lambda: ["PERMISSION", "CHAT"],
+        description="Subset of Access-channel types allowed for **`POST /api/guest/messages`**; minted JWT defaults to both.",
+    )
+    expires_at: str = Field(description="ISO-8601 UTC from JWT **`exp`** (guest token lifetime sets **`GET /api/guest/me`** refresh cadence).")
 
 
 class GuestMeResponse(BaseModel):
     status: Literal["success"] = "success"
     data: GuestMeData
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "success",
+                    "data": {
+                        "guest_id": "019b2c3d-0000-7000-8000-000000000001",
+                        "display_name": "Walk-in Pat",
+                        "zone_ids": ["ZN-DEMO"],
+                        "allowed_message_types": ["PERMISSION", "CHAT"],
+                        "expires_at": "2026-05-04T14:00:00Z",
+                    },
+                }
+            ]
+        }
+    )
 
 
 # --- GET /api/guest/zones/{zone_id}/peers ---
@@ -88,7 +108,12 @@ class GuestMeResponse(BaseModel):
 
 class GuestPeerItem(BaseModel):
     peer_kind: Literal["owner"] = "owner"
-    owner_id: int
+    owner_id: int = Field(
+        description=(
+            "Member account row **`owners.id`** (integer in JSON). Use as **`with_owner_id`** on **GET** "
+            "and **`to_owner_id`** on **POST** `/api/guest/messages`."
+        ),
+    )
     display_name: str
     role: str = Field(description="`administrator` or `user`.")
     can_receive_chat: bool = Field(
@@ -104,6 +129,28 @@ class GuestPeersData(BaseModel):
 class GuestPeersResponse(BaseModel):
     status: Literal["success"] = "success"
     data: GuestPeersData
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "success",
+                    "data": {
+                        "zone_id": "ZN-DEMO",
+                        "peers": [
+                            {
+                                "peer_kind": "owner",
+                                "owner_id": 42,
+                                "display_name": "Zone Admin",
+                                "role": "administrator",
+                                "can_receive_chat": True,
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+    )
 
 
 # --- GET /api/guest/zones/{zone_id}/dashboard ---
