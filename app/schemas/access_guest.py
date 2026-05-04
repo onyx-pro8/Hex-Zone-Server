@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 MAX_GUEST_QR_TOKEN_TTL_HOURS = 24 * 365
 
@@ -190,6 +190,20 @@ class GuestAccessSessionListItem(BaseModel):
     expectation: Literal["expected", "unexpected"] = Field(
         description="Whether the guest matched an access schedule (**expected**) or not (**unexpected**)."
     )
+
+    @computed_field
+    @property
+    def request_id(self) -> str:
+        """Alias of **`guest_id`** for clients that expect **`request_id`**."""
+
+        return self.guest_id
+
+    @computed_field
+    @property
+    def permission_request_id(self) -> str:
+        """Alias of **`guest_id`** for clients that expect **`permission_request_id`**."""
+
+        return self.guest_id
 
 
 class GuestRequestListEnvelope(BaseModel):

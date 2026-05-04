@@ -1,0 +1,19 @@
+BACKEND PROMPT — Guest requests listing API
+
+Implement GET /api/access/guest-requests?zone_id=<ZONE_ID> with member JWT (Authorization: Bearer member token).
+
+Authorize only users who may manage that zone (owner/admin — match existing rules: visibility via zone_listing_owner_ids / zones row / primary owners.zone_id; see guest_access_service.can_manage_zone_guest_requests).
+
+Return HTTP 200 with either:
+  { "status": "success", "data": [ ...rows ] }, or
+  { "status": "success", "data": { "items": [ ... ] } }, or
+  a raw array (clients may normalize).
+
+Each row exposes a stable guest_id (aliases request_id / permission_request_id duplicate guest_id on GuestAccessSessionListItem) identical to POST /messages guest_id for PERMISSION/CHAT.
+
+Include guest_name, status (PENDING/APPROVED/REJECTED), zone_id, expectation (expected/unexpected), created_at (and derived guest_status), mirroring GuestAccessSessionListItem.
+
+Canonical: GET /api/access/guest-requests (envelope GuestRequestListEnvelope).
+Legacy bare array: GET /message-feature/access/guest-requests?zone_id= (same authorization and row schema).
+
+Optional query parity: status filter (PENDING/APPROVED/REJECTED), pending_only, limit (1–200), skip — see app/routers/access.py operation_id access_list_guest_requests.

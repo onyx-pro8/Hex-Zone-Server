@@ -239,8 +239,9 @@ async def list_access_schedules(
         "(visible **`zones`** row for this **`zone_id`**, or primary **`owners.zone_id`**, or linked member zone for admins).\n\n"
         "Response is a **raw JSON array** (no **`{ status, data }`** envelope). Prefer **`GET /api/access/guest-requests`** "
         "for new SPA clients (envelope + identical row schema **`GuestAccessSessionListItem`**).\n\n"
-        "Use **`pending_only=true`** for unexpected arrivals still **`pending`**. "
-        "Resolve sessions with **`POST /message-feature/access/guest-requests/{guest_id}/approve`** or **`/reject`** "
+        "**Query parity** with **`GET /api/access/guest-requests`**: **`status`** (filter), **`pending_only`**, "
+        "**`limit`**, **`skip`**. Resolve sessions with **`POST /message-feature/access/guest-requests/{guest_id}/approve`** "
+        "or **`/reject`** "
         "(path **guest_id** only; optional legacy **`?zone_id=`**), or **`POST /api/access/approve`** | **`reject`** "
         "with **`GuestZoneActionRequest`** (**guest_id**, **zone_id** in body)."
     ),
@@ -253,11 +254,18 @@ async def list_guest_requests(
         max_length=100,
         description="Hex zone id from QR / dashboard (**`zid`**). Required for listing; paired approve/reject use path **guest_id** only.",
     ),
+    filter_status: str | None = Query(
+        default=None,
+        max_length=32,
+        alias="status",
+        description="Optional filter: **PENDING**, **APPROVED**, **REJECTED** (case-insensitive; GRANTED/DENIED accepted).",
+    ),
     pending_only: bool = Query(
         False,
         description="If true, only unexpected sessions still in **pending** resolution.",
     ),
     limit: int = Query(50, ge=1, le=200, description="Max rows (most recent first)."),
+    skip: int = Query(0, ge=0, le=10_000, description="Offset for pagination."),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -277,7 +285,9 @@ async def list_guest_requests(
         db,
         zone_id=zid,
         limit=limit,
+        skip=skip,
         pending_only=pending_only,
+        status=filter_status,
     )
     return [
         GuestAccessSessionListItem.model_validate(guest_access_service.serialize_guest_session_row(r))
