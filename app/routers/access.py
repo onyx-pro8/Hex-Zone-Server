@@ -766,23 +766,36 @@ async def guest_session_exchange(
     "/guest-requests",
     response_model=GuestRequestListEnvelope,
     status_code=status.HTTP_200_OK,
+    operation_id="access_list_guest_requests",
     summary="List guest access sessions (member JWT)",
     description=(
-        "**Bearer** member JWT (same **`Authorization: Bearer`** stack as **`/messages`**, **`/zones`**, …). "
+        "**Canonical dashboard URL:** **`GET /api/access/guest-requests`** — Hex Zone member SPA / "
+        "**Hex-Zone-Client** use this to populate Guest requests and PERMISSION/CHAT recipient pickers.\n\n"
+        "**Bearer** member JWT (same **`Authorization: Bearer`** stack as **`POST /messages`**, **`/zones`**, …). "
         "Query **`zone_id`** (required).\n\n"
         "**Authorization:** caller must be allowed to administer the zone — any active **`zones`** row "
         "for this **`zone_id`** whose **`owner_id`** is in the caller’s account visibility list "
         "(`zone_listing_owner_ids`), or the caller’s primary **`owners.zone_id`** matches and the zone exists, "
         "or (administrators only) a linked active member has that **`zone_id`**.\n\n"
-        "Returns **`guest_access_sessions`** newest first. Each **`guest_id`** matches "
+        "**Response:** schema **`GuestRequestListEnvelope`** — **`{ \"status\": \"success\", \"data\": [ … ] }`**. "
+        "**`data`** may be empty when no sessions match filters (not an error).\n\n"
+        "Returns **`guest_access_sessions`** newest **`created_at`** first. Each **`guest_id`** matches "
         "**`POST /api/access/permission`**, **`GET /api/access/session/{guest_id}`**, and "
         "**`POST /messages`** when posting **PERMISSION** / **CHAT** with **`guest_id`** + **`zone_id`** "
         "(persists **`ZoneMessageEvent`** for **`GET /api/guest/messages`**).\n\n"
-        "**Query:** **`status`** (alias for internal param) filters **PENDING** / **APPROVED** / **REJECTED** "
-        "(also **GRANTED** / **DENIED**). **`pending_only=true`** restricts to unexpected + pending. "
+        "**Legacy:** **`GET /message-feature/access/guest-requests`** returns the same rows as a **raw JSON array** "
+        "(no envelope).\n\n"
+        "**Query:** **`status`** filters **PENDING** / **APPROVED** / **REJECTED** "
+        "(case-insensitive; **GRANTED** / **DENIED** accepted). **`pending_only=true`** restricts to unexpected + pending. "
         "**`limit`** (1–200, default 50) and **`skip`** paginate."
     ),
     responses={
+        status.HTTP_200_OK: {
+            "description": (
+                "Body matches schema **`GuestRequestListEnvelope`** (see **Schemas**). "
+                "Each **`guest_id`** is the opaque session id for **`POST /messages`** with **`guest_id`** + **`zone_id`**."
+            ),
+        },
         status.HTTP_401_UNAUTHORIZED: {
             "description": "Missing or invalid bearer token (or non-numeric JWT `sub`).",
         },
@@ -796,7 +809,10 @@ async def guest_session_exchange(
             "description": "Authenticated owner record not found (rare; **`detail`** may be unstructured).",
         },
     },
-    response_description="Envelope **`{ status, data }`** where **`data`** is an array of **`GuestAccessSessionListItem`**.",
+    response_description=(
+        "**`GuestRequestListEnvelope`**: **`status`** is always **`success`**; **`data`** is "
+        "**`GuestAccessSessionListItem[]`** (newest first)."
+    ),
 )
 async def list_guest_requests_for_access_api(
     zone_id: str = Query(

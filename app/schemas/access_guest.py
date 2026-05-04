@@ -193,7 +193,7 @@ class GuestAccessSessionListItem(BaseModel):
 
 
 class GuestRequestListEnvelope(BaseModel):
-    """OpenAPI: success body for **`GET /api/access/guest-requests`** (member JWT).
+    """Success body for **`GET /api/access/guest-requests`** (member JWT).
 
     Same row fields as **`GuestAccessSessionListItem`**; **`GET /message-feature/access/guest-requests`**
     returns the same items as a bare JSON array (legacy).
@@ -232,7 +232,8 @@ class GuestRequestListEnvelope(BaseModel):
                             "expectation": "unexpected",
                         }
                     ],
-                }
+                },
+                {"status": "success", "data": []},
             ]
         }
     )

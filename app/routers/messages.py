@@ -20,15 +20,17 @@ logger = logging.getLogger(__name__)
     "/",
     response_model=ZoneMessageResponse,
     status_code=status.HTTP_201_CREATED,
+    operation_id="messages_create",
     summary="Create zone message or member→guest zone event",
     description=(
         "**Member ↔ member (default):** requires **`type`** (or legacy **`visibility`** only). "
         "Persists **`Message`**; **`receiver_id`** required for private-scope types.\n\n"
         "**Member → guest:** send **`guest_id`** (from **`GET /api/access/guest-requests`** or permission flow) "
-        "and **`zone_id`** / **`zoneId`**. Types allowed: **PERMISSION** and **CHAT** only. "
+        "and **`zone_id`** / **`zoneId`**. Message kind: set **`type`** **or** **`message_type`** "
+        "(same field in wire handling; **`type`** wins if both are sent). Only **PERMISSION** and **CHAT** are allowed. "
         "Do **not** send **`receiver_id`**. Creates **`ZoneMessageEvent`** (guest sees it on **`GET /api/guest/messages`** "
         "with **`with_owner_id`** = your **`owners.id`**).\n\n"
-        "See **`ZoneMessageCreate`** schema examples in Swagger."
+        "See **`ZoneMessageCreate`** in **Schemas** for PERMISSION/CHAT examples (including **`message_type`**)."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {
@@ -45,7 +47,7 @@ logger = logging.getLogger(__name__)
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
             "description": (
-                "Validation: missing **type**/legacy **visibility**, bad **receiver_id** / scope mix, "
+                "Validation: missing **type** / **message_type** / legacy **visibility**, bad **receiver_id** / scope mix, "
                 "**`MISSING_ZONE_FOR_GUEST`**, **`INVALID_MESSAGE_TYPE_FOR_GUEST`**, or other **`error_code`** in **detail**."
             ),
         },

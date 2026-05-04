@@ -73,7 +73,9 @@ OPENAPI_TAGS = [
         "description": (
             "Member zone messaging. **`POST /messages`** creates **`Message`** rows for normal member↔member types, "
             "or **`ZoneMessageEvent`** when **`guest_id`** + **`zone_id`** are sent (**PERMISSION** / **CHAT** to QR guests; "
-            "same persistence as **`GET /api/guest/messages`**). **`GET /messages`** lists **`Message`** history for the caller."
+            "same persistence as **`GET /api/guest/messages`**). "
+            "Guest-thread payloads accept **`type`** or **`message_type`** (see **`ZoneMessageCreate`**). "
+            "**`GET /messages`** lists **`Message`** history for the caller."
         ),
     },
     {
@@ -114,7 +116,8 @@ OPENAPI_TAGS = [
             "**Permission** response includes **`zone_id`** for clients that opened only **`?gt=`**. "
             "**Administrators** mint DB-backed tokens (`POST /api/access/qr-tokens`, SPA **`/access?gt=&zid=`**, optional **`eid`**) "
             "or static links (`GET /api/access/qr-link`, **`/access?zid=`**); optional server PNG QR. "
-            "Members list guest arrivals: **`GET /api/access/guest-requests?zone_id=`** (Bearer). "
+            "**Members** list guest arrivals (**Swagger:** **`access_list_guest_requests`**): **`GET /api/access/guest-requests?zone_id=`** "
+            "(Bearer, **`GuestRequestListEnvelope`**). "
             "Approve/reject unexpected guests: `POST /api/access/approve|reject` (**JSON**: **guest_id**, **zone_id**) "
             "or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`** (path **guest_id**; zone inferred). "
             "Bearer JWT for both families. "
@@ -155,6 +158,7 @@ app = FastAPI(
         "guest submits name → `POST /api/access/permission` (response includes **`zone_id`**). "
         "Poll **`GET /api/access/session/{guest_id}`** with **`?zone_id=`** from URL or permission body, or omit **`zone_id`** to resolve by guest id. "
         "Administrators mint tokens with **`POST /api/access/qr-tokens`** or static **`GET /api/access/qr-link`**. "
+        "**Members** list arrivals with **`GET /api/access/guest-requests?zone_id=`** (Bearer); use returned **`guest_id`** on **`POST /messages`** (**PERMISSION**/**CHAT**, **`type`** or **`message_type`**). "
         "Members create expectations via `/message-feature/access/schedules`; unexpected visits notify "
         "via WebSocket `unexpected_guest` / `guest_is_here`. "
         "Admins resolve pending unexpected visits with **`POST /api/access/approve|reject`** or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`**. "

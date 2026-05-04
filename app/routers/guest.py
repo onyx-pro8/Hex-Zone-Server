@@ -156,8 +156,10 @@ async def guest_zone_dashboard(
     response_model_by_alias=True,
     summary="List guest-visible zone messages",
     description=(
-        "Returns **PERMISSION** and **CHAT** `ZoneMessageEvent` rows involving this guest "
-        "(by **`sender_guest_id`** or **`body.guest_id`**). Use **`with_owner_id`** to narrow a DM thread."
+        "Returns **PERMISSION** and **CHAT** **`ZoneMessageEvent`** rows involving this guest "
+        "(by **`sender_guest_id`** / persistence rules). Use **`with_owner_id`** = **`owners.id`** to narrow a DM thread "
+        "with one member. Events are created when members post **`POST /messages`** with **`guest_id`** + **`zone_id`** "
+        "(**`type`** or **`message_type`** **PERMISSION**/**CHAT**)."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},

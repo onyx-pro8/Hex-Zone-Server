@@ -426,12 +426,24 @@ class ZoneMessageCreate(BaseModel):
 
     **Guest thread:** set **`guest_id`** and **`zone_id`** (or **`zoneId`**) to append a **`ZoneMessageEvent`**
     for **PERMISSION** or **CHAT** (same store as **`GET /api/guest/messages`**). Omit **`receiver_id`**.
+    Send **`type`** or **`message_type`** (same semantics; **`type`** wins if both are present).
     """
 
     message: str = Field(..., min_length=1, max_length=16_384)
     type: Optional[str] = Field(
         default=None,
-        description="Canonical **`Message`** / event type (e.g. **CHAT**, **PERMISSION**, **SERVICE**). Required unless **visibility** alone is sent (legacy).",
+        description=(
+            "Canonical **`Message`** / event type (e.g. **CHAT**, **PERMISSION**, **PRIVATE**, **SERVICE**). "
+            "Required unless **visibility** alone is sent (legacy) or **message_type** is sent instead."
+        ),
+    )
+    message_type: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Same as **`type`** when **`type`** is omitted (OpenAPI-visible alias used by Hex-Zone-Client "
+            "for **PERMISSION** / **CHAT** member→guest payloads)."
+        ),
     )
     visibility: Optional[MessageVisibilityEnum] = Field(
         default=None,
@@ -456,6 +468,12 @@ class ZoneMessageCreate(BaseModel):
     )
 
     @model_validator(mode="after")
+    def merge_message_type_into_type(self):
+        if self.type is None and (self.message_type or "").strip():
+            self.type = self.message_type.strip()
+        return self
+
+    @model_validator(mode="after")
     def validate_type_or_visibility(self):
         from app.domain.message_types import LEGACY_VISIBILITY_TO_TYPE
 
@@ -464,7 +482,9 @@ class ZoneMessageCreate(BaseModel):
         if self.visibility:
             self.type = LEGACY_VISIBILITY_TO_TYPE[self.visibility.value].value
             return self
-        raise ValueError("type is required (or send legacy visibility for temporary compatibility)")
+        raise ValueError(
+            "type is required (or send legacy visibility, or message_type where applicable)"
+        )
 
     @model_validator(mode="after")
     def guest_thread_fields(self):
@@ -487,7 +507,7 @@ class ZoneMessageCreate(BaseModel):
                 },
                 {
                     "message": "Please proceed to reception.",
-                    "type": "PERMISSION",
+                    "message_type": "PERMISSION",
                     "visibility": "private",
                     "zone_id": "ZN-1XOJPP",
                     "guest_id": "019b2c3d-0000-7000-8000-000000000001",

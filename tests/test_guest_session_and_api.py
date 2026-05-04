@@ -282,6 +282,19 @@ async def test_member_list_guest_requests_access_api(test_db, override_get_db):
         mid = msg.json().get("id")
         assert isinstance(mid, str)
 
+        msg_alias = await client.post(
+            "/messages",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "message": "message_type alias",
+                "message_type": "CHAT",
+                "visibility": "private",
+                "zone_id": zone_id,
+                "guest_id": guest_id,
+            },
+        )
+        assert msg_alias.status_code == 201, msg_alias.text
+
         gl = await client.get(
             "/api/guest/messages",
             headers={"Authorization": f"Bearer {guest_jwt}"},
@@ -289,4 +302,6 @@ async def test_member_list_guest_requests_access_api(test_db, override_get_db):
         )
         assert gl.status_code == 200
         items = gl.json()["data"]["items"]
-        assert any(i.get("text") == "Welcome guest" for i in items)
+        texts = {i.get("text") for i in items}
+        assert "Welcome guest" in texts
+        assert "message_type alias" in texts
