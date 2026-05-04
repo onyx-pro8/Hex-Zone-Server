@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, defer
 from app.domain.message_types import CanonicalMessageType, normalize_message_type, type_category, type_scope
 from app.models import MessageBlock, Owner, Zone, ZoneMessageEvent
 from app.models.owner import OwnerRole
+from app.services import guest_access_service
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,12 @@ def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) 
 
 
 def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
+    staff_ids = guest_access_service.zone_staff_owner_ids(db, zone_id)
+    if not staff_ids:
+        return []
     owners = (
         db.query(Owner)
-        .filter(Owner.zone_id == zone_id.strip(), Owner.active.is_(True))
+        .filter(Owner.id.in_(staff_ids), Owner.active.is_(True))
         .order_by(Owner.id.asc())
         .all()
     )
@@ -232,8 +236,6 @@ def create_member_to_guest_zone_message(
     Returns the persisted **`ZoneMessageEvent`**, or **`{"__reject__": "<code>", "message": "..."}`** on validation
     or policy failure (caller maps to HTTP).
     """
-    from app.services import guest_access_service
-
     zid = zone_id.strip()
     gid = (guest_id or "").strip()
     if not zid or not gid:

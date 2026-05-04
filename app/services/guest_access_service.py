@@ -122,9 +122,38 @@ def find_matching_schedule_for_arrival(
     return q.order_by(AccessSchedule.created_at.desc()).first()
 
 
+def zone_staff_owner_ids(db: Session, zone_id: str) -> set[int]:
+    """Active **owners.id** values considered zone hosts/staff for a shared **zone_id** string.
+
+    Combines: (1) owners whose **`owners.zone_id`** matches (signup / primary zone), (2) owners who **own**
+    an active **`zones`** row for this **`zone_id`**, and (3) **`resolve_primary_zone_admin_owner`** so at least
+    one administrator appears when data is split across **`owners`** vs **`zones`** tables.
+    Used for guest **peers**, unexpected-guest WebSocket targets (`zone_member_owner_ids`), and must stay aligned.
+    """
+
+    zid = (zone_id or "").strip()
+    if not zid:
+        return set()
+    ids: set[int] = set()
+    for (oid,) in db.query(Owner.id).filter(Owner.zone_id == zid, Owner.active.is_(True)).all():
+        ids.add(oid)
+    for (oid,) in (
+        db.query(Zone.owner_id)
+        .filter(Zone.zone_id == zid, Zone.active.is_(True))
+        .distinct()
+        .all()
+    ):
+        ids.add(oid)
+    primary = resolve_primary_zone_admin_owner(db, zid)
+    if primary and primary.active:
+        ids.add(primary.id)
+    return ids
+
+
 def zone_member_owner_ids(db: Session, zone_id: str) -> list[int]:
-    rows = db.query(Owner.id).filter(Owner.zone_id == zone_id, Owner.active.is_(True)).all()
-    return [row[0] for row in rows]
+    """Sorted list of active owners to notify for unexpected guest (same cohort as **GET …/peers**)."""
+
+    return sorted(zone_staff_owner_ids(db, zone_id))
 
 
 def process_guest_arrival(
