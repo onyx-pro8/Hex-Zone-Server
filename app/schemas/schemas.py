@@ -1,6 +1,6 @@
 """Pydantic schemas for request/response validation."""
 from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, model_validator, computed_field
-from typing import Optional, List
+from typing import List, Literal, Optional
 from datetime import datetime
 from enum import Enum
 
@@ -546,6 +546,19 @@ class ZoneMessageResponse(BaseModel):
     created_at: datetime = Field(description="Server **UTC** creation time.")
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MemberGuestAccessThreadMessagesData(BaseModel):
+    """Items for **`GET /api/access/guest-messages`** (same **`ZoneMessageEvent`** store as **`GET /api/guest/messages`**)."""
+
+    items: list[ZoneMessageResponse]
+
+
+class MemberGuestAccessThreadMessagesEnvelope(BaseModel):
+    """Member JWT success body for the guest access messaging thread (PERMISSION + CHAT)."""
+
+    status: Literal["success"] = "success"
+    data: MemberGuestAccessThreadMessagesData
 
 
 # Update forward references

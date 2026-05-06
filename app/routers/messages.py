@@ -2,15 +2,13 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.crud import message as message_crud
 from app.crud import owner as owner_crud
 from app.core.security import get_current_user
-from app.domain.message_types import CanonicalMessageType, MessageScope, normalize_message_type, type_category, type_scope
-from app.models import ZoneMessageEvent
+from app.domain.message_types import CanonicalMessageType, normalize_message_type, type_category, type_scope
 from app.services import guest_api_service
 from app.services import guest_access_service
 from app.services.access_policy import can_message_owner
@@ -33,7 +31,9 @@ logger = logging.getLogger(__name__)
         "**`visibility`** (commonly **`private`**). Only **CHAT** is allowed with **`guest_id`**; "
         "**PERMISSION** is server-generated only. "
         "Do **not** send **`receiver_id`**. Persists **`ZoneMessageEvent`**; guest reads via **`GET /api/guest/messages`** "
-        "with **`with_owner_id`** = caller **`owners.id`**.\n\n"
+        "with **`with_owner_id`** = caller **`owners.id`**. Admins list the same thread with "
+        "**`GET /api/access/guest-messages`** or **`GET /messages`** + **`guest_id`** + **`zone_id`** "
+        "(see **`GET /messages`** description).\n\n"
         "OpenAPI schema **`ZoneMessageCreate`** includes Hex-Zone-Client examples."
     ),
     responses={
@@ -293,44 +293,16 @@ async def _list_zone_messages_for_owner(
                     "message": "Guest session not found for this zone.",
                 },
             )
-        q = (
-            db.query(ZoneMessageEvent)
-            .filter(
-                ZoneMessageEvent.zone_id == zid,
-                ZoneMessageEvent.type.in_(
-                    [CanonicalMessageType.PERMISSION.value, CanonicalMessageType.CHAT.value]
-                ),
-            )
-            .filter(
-                or_(
-                    ZoneMessageEvent.sender_guest_id == gid,
-                    ZoneMessageEvent.body_json["guest_id"].as_string() == gid,
-                )
-            )
+        rows = guest_api_service.list_guest_access_thread_for_zone_member(
+            db,
+            zone_id=zid,
+            guest_id=gid,
+            peer_owner_id=other_owner_id,
+            skip=skip,
+            limit=limit,
         )
-        if other_owner_id is not None:
-            q = q.filter(
-                or_(
-                    ZoneMessageEvent.sender_id == other_owner_id,
-                    ZoneMessageEvent.receiver_id == other_owner_id,
-                    ZoneMessageEvent.sender_id.is_(None),
-                )
-            )
-        rows = q.order_by(ZoneMessageEvent.created_at.desc()).offset(skip).limit(limit).all()
         return [
-            ZoneMessageResponse(
-                id=event.id,
-                zone_id=event.zone_id,
-                sender_id=event.sender_id,
-                receiver_id=event.receiver_id,
-                type=event.type,
-                category=event.category.value,
-                scope=event.scope.value,
-                visibility=(MessageVisibilityEnum.PRIVATE if event.scope.value == "private" else MessageVisibilityEnum.PUBLIC),
-                message=event.text,
-                created_at=event.created_at,
-            )
-            for event in rows
+            guest_api_service.zone_message_event_to_member_zone_message_response(event) for event in rows
         ]
 
     if other_owner_id is not None:
@@ -375,10 +347,13 @@ async def _list_zone_messages_for_owner(
     response_model=list[ZoneMessageResponse],
     summary="List zone messages",
     description=(
-        "List zone-visible messages for the authenticated owner. "
-        "This path (GET /messages, no trailing slash) is the canonical list URL and "
-        "matches contract-style clients; GET /messages/ is equivalent and retained for "
-        "backward compatibility."
+        "**Member ↔ member:** returns **`Message`** rows for **`owner_id`** (+ optional **`other_owner_id`**).\n\n"
+        "**Guest access thread:** when **`guest_id`** and **`zone_id`** are sent, returns **`ZoneMessageEvent`** "
+        "**PERMISSION** + **CHAT** for that guest (same persistence as **`GET /api/guest/messages`**). "
+        "Prefer **`GET /api/access/guest-messages`** for SPA guest threads if you want the "
+        "**`{ \"status\": \"success\", \"data\": { \"items\": … } }`** envelope.\n\n"
+        "This path (**`GET /messages`**, no trailing slash) remains the canonical list URL; **`GET /messages/`** "
+        "is equivalent."
     ),
     responses={
         status.HTTP_403_FORBIDDEN: {

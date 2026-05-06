@@ -405,6 +405,18 @@ async def test_admin_can_see_access_permission_and_chat_messages(test_db, overri
         assert any(r["type"] == "PERMISSION" for r in rows)
         assert any(r["type"] == "CHAT" and r["message"] == "Welcome from admin" for r in rows)
 
+        api_access = await client.get(
+            "/api/access/guest-messages",
+            headers=headers,
+            params={"guest_id": guest_id, "zone_id": zone_id, "limit": 50},
+        )
+        assert api_access.status_code == 200, api_access.text
+        envelope = api_access.json()
+        assert envelope["status"] == "success"
+        items = envelope["data"]["items"]
+        assert any(i["type"] == "PERMISSION" for i in items)
+        assert any(i["type"] == "CHAT" and i["message"] == "Welcome from admin" for i in items)
+
 
 @pytest.mark.asyncio
 async def test_guest_messaging_restricted_to_host_admin_peers(test_db, override_get_db):

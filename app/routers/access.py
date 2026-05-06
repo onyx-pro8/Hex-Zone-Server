@@ -50,7 +50,8 @@ from app.schemas.guest_api import (
     GuestSessionExchangeResponse,
     GuestSessionGuestProfile,
 )
-from app.services import guest_access_qr, guest_access_qr_token_service, guest_access_service
+from app.schemas.schemas import MemberGuestAccessThreadMessagesData, MemberGuestAccessThreadMessagesEnvelope
+from app.services import guest_access_qr, guest_access_qr_token_service, guest_access_service, guest_api_service
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -990,6 +991,83 @@ async def list_guest_requests_for_access_api(
             )
         )
     return GuestRequestListContractEnvelope(status="success", data=data)
+
+
+@router.get(
+    "/guest-messages",
+    response_model=MemberGuestAccessThreadMessagesEnvelope,
+    status_code=status.HTTP_200_OK,
+    summary="List guest access thread for member/admin (PERMISSION + CHAT)",
+    description=(
+        "**Bearer member JWT.** Returns the same **`ZoneMessageEvent`** history the guest sees on "
+        "**`GET /api/guest/messages`** (automatic **PERMISSION** plus **CHAT**), plus member→guest **CHAT** "
+        "created via **`POST /messages`** with **`guest_id`** + **`zone_id`**.\n\n"
+        "**`zone_id`** and **`guest_id`** are required. Optional **`with_owner_id`** narrows to a single "
+        "peer thread (same semantics as **`GET /api/guest/messages`** / **`GET /messages`** + **`other_owner_id`**).\n\n"
+        "**Authorization** matches **`GET /api/access/guest-requests`**: administrator for the zone plus "
+        "**`can_manage_zone_guest_requests`**."
+    ),
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {"model": GuestAccessHttpError},
+        status.HTTP_404_NOT_FOUND: {"description": "Owner or guest session not found."},
+    },
+)
+async def list_guest_access_messages_for_member(
+    zone_id: str = Query(..., min_length=1, max_length=100, description="Hex zone id (**zid**)."),
+    guest_id: str = Query(..., min_length=1, max_length=36, description="Opaque id from **`POST /api/access/permission`**."),
+    with_owner_id: int | None = Query(
+        default=None,
+        ge=1,
+        description="Optional; restrict to DM with this **owners.id** (peer).",
+    ),
+    skip: int = Query(0, ge=0, le=10_000),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    viewer = owner_crud.get_owner(db, current_user["user_id"])
+    if not viewer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "NOT_FOUND", "message": "Owner not found"},
+        )
+    zid = zone_id.strip()
+    if viewer.role != OwnerRole.ADMINISTRATOR or viewer.zone_id != zid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "FORBIDDEN",
+                "message": "Administrator role is required for this zone.",
+            },
+        )
+    if not guest_access_service.can_manage_zone_guest_requests(db, viewer, zid):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "FORBIDDEN",
+                "message": "You are not allowed to view guest messages for this zone.",
+            },
+        )
+    row = guest_access_service.get_guest_access_session_by_guest_id(db, guest_id.strip())
+    if not row or row.zone_id != zid:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "GUEST_NOT_FOUND", "message": "Guest session not found for this zone."},
+        )
+    events = guest_api_service.list_guest_access_thread_for_zone_member(
+        db,
+        zone_id=zid,
+        guest_id=guest_id.strip(),
+        peer_owner_id=with_owner_id,
+        skip=skip,
+        limit=limit,
+    )
+    items = [guest_api_service.zone_message_event_to_member_zone_message_response(e) for e in events]
+    return MemberGuestAccessThreadMessagesEnvelope(
+        status="success",
+        data=MemberGuestAccessThreadMessagesData(items=items),
+    )
 
 
 @router.post(

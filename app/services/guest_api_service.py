@@ -8,7 +8,13 @@ from typing import Any
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, defer
 
-from app.domain.message_types import CanonicalMessageType, normalize_message_type, type_category, type_scope
+from app.domain.message_types import (
+    CanonicalMessageType,
+    MessageScope,
+    normalize_message_type,
+    type_category,
+    type_scope,
+)
 from app.models import MessageBlock, Owner, Zone, ZoneMessageEvent
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
@@ -23,6 +29,10 @@ GUEST_VISIBLE_TYPES = frozenset(
     }
 )
 GUEST_WRITABLE_TYPES = frozenset({CanonicalMessageType.CHAT.value})
+
+# Cap how many newest zone rows we scan when assembling a guest access thread without
+# brittle JSON-SQL (PERMISSION rows only carry guest_id inside body_json).
+_MEMBER_GUEST_THREAD_MAX_SCAN = 5000
 
 
 def _authorized_guest_peer_owner_ids(db: Session, *, zone_id: str) -> set[int]:
@@ -100,6 +110,87 @@ def _body_guest_id_matches(row: ZoneMessageEvent, guest_id: str) -> bool:
         return False
     gid = str(body.get("guest_id") or "").strip()
     return gid == guest_id
+
+
+def belongs_to_guest_access_thread(row: ZoneMessageEvent, guest_id: str) -> bool:
+    """True when this zone event belongs to **guest_id** access thread (CHAT/PERMISSION)."""
+    gid = (guest_id or "").strip()
+    if not gid:
+        return False
+    if row.type not in GUEST_VISIBLE_TYPES:
+        return False
+    if row.sender_guest_id == gid:
+        return True
+    return _body_guest_id_matches(row, gid)
+
+
+def list_guest_access_thread_for_zone_member(
+    db: Session,
+    *,
+    zone_id: str,
+    guest_id: str,
+    peer_owner_id: int | None,
+    skip: int,
+    limit: int,
+) -> list[ZoneMessageEvent]:
+    """Return **`ZoneMessageEvent`** rows visible to admins for the guest access thread.
+
+    Uses an in-memory filter so **PERMISSION** rows ( **`sender_id`/ `sender_guest_id` null**, guest only in **`body`**)
+    match reliably on SQLite **and** PostgreSQL (avoids dialect-specific JSON path SQL).
+    """
+    zid = zone_id.strip()
+    gid = (guest_id or "").strip()
+    sk = max(0, int(skip))
+    lim = max(1, min(int(limit), 1000))
+
+    rows = (
+        db.query(ZoneMessageEvent)
+        .filter(
+            ZoneMessageEvent.zone_id == zid,
+            ZoneMessageEvent.type.in_(tuple(GUEST_VISIBLE_TYPES)),
+        )
+        .order_by(ZoneMessageEvent.created_at.desc())
+        .limit(_MEMBER_GUEST_THREAD_MAX_SCAN)
+        .all()
+    )
+
+    peer = peer_owner_id
+    filtered: list[ZoneMessageEvent] = []
+    for row in rows:
+        if not belongs_to_guest_access_thread(row, gid):
+            continue
+        if peer is not None:
+            if not (
+                row.sender_id == peer
+                or row.receiver_id == peer
+                or row.sender_id is None
+            ):
+                continue
+        filtered.append(row)
+    return filtered[sk : sk + lim]
+
+
+def zone_message_event_to_member_zone_message_response(row: ZoneMessageEvent):
+    """Build **`ZoneMessageResponse`** for admin/member clients (import local to avoid circular imports)."""
+    from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageResponse
+
+    gtype = normalize_message_type(row.type)
+    return ZoneMessageResponse(
+        id=row.id,
+        zone_id=row.zone_id,
+        sender_id=row.sender_id,
+        receiver_id=row.receiver_id,
+        type=row.type,
+        category=type_category(gtype).value,
+        scope=type_scope(gtype).value,
+        visibility=(
+            MessageVisibilityEnum.PRIVATE
+            if type_scope(gtype) == MessageScope.PRIVATE
+            else MessageVisibilityEnum.PUBLIC
+        ),
+        message=row.text,
+        created_at=row.created_at,
+    )
 
 
 def _guest_visible_message_predicate(guest_id: str, with_owner_id: int | None):

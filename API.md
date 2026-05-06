@@ -212,6 +212,40 @@ Manual compose for `PERMISSION` is rejected:
 
 `PERMISSION` remains visible in thread/history; `CHAT` stays user-generated.
 
+### Member/admin: read the same thread as the guest
+
+Guests load history with `GET /api/guest/messages`. Members who administer the zone should use:
+
+`GET /api/access/guest-messages?zone_id={zone_id}&guest_id={guest_id}`
+
+Response `200`:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "id": "uuid",
+        "zone_id": "ZN-ABC",
+        "sender_id": null,
+        "receiver_id": null,
+        "type": "PERMISSION",
+        "category": "Access",
+        "scope": "private",
+        "visibility": "private",
+        "message": "You are not scheduled. Please wait for approval.",
+        "created_at": "2026-05-06T14:00:00"
+      }
+    ]
+  }
+}
+```
+
+Optional query `with_owner_id={owners.id}` narrows to messages involving that peer (aligned with the guest’s `with_owner_id` filter).
+
+Legacy alternative: `GET /messages?owner_id={member_owner_id}&guest_id={guest_id}&zone_id={zone_id}` returns the same **items** as a bare array (no envelope).
+
 ## Guest Role Boundaries
 
 Guest can:
