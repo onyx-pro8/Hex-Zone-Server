@@ -19,8 +19,8 @@ OpenAPI remains available at `/docs` and `/redoc`.
 - `POST /api/access/permission`: anonymous guest submit request.
 - `GET /api/access/session/{guest_id}?zone_id={zone_id}`: poll `PENDING | APPROVED | REJECTED`.
 - `GET /api/access/guest-requests?zone_id={zone_id}`: admin list requests by zone.
-- `POST /message-feature/access/guest-requests/{requestId}/approve?zone_id={zone_id}`: approve request.
-- `POST /message-feature/access/guest-requests/{requestId}/reject?zone_id={zone_id}`: reject request.
+- `POST /message-feature/access/guest-requests/{requestId}/approve?zone_id={zone_id}`: approve request (zone_id required).
+- `POST /message-feature/access/guest-requests/{requestId}/reject?zone_id={zone_id}`: reject request (zone_id required).
 
 ## Backward Compatibility
 

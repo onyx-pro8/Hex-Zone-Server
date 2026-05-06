@@ -99,6 +99,12 @@ def init_db():
             )
             conn.execute(
                 text(
+                    "ALTER TABLE guest_access_qr_tokens "
+                    "ALTER COLUMN expires_at DROP NOT NULL;"
+                )
+            )
+            conn.execute(
+                text(
                     "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_tokens_is_primary "
                     "ON guest_access_qr_tokens (is_primary);"
                 )

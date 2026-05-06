@@ -291,7 +291,7 @@ async def test_permission_events_auto_generated_for_submit_approve_reject(overri
 
 
 @pytest.mark.asyncio
-async def test_message_feature_approve_reject_zone_query_optional(override_get_db):
+async def test_message_feature_approve_reject_zone_query_required(override_get_db):
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = f"z-{uuid.uuid4().hex[:6]}"
         admin_token = await _register_admin(client, zone_id)
@@ -305,9 +305,16 @@ async def test_message_feature_approve_reject_zone_query_optional(override_get_d
         rid = req.json()["data"][0]["id"]
 
         ap = await client.post(f"/message-feature/access/guest-requests/{rid}/approve", headers=headers)
-        assert ap.status_code == 200, ap.text
-        assert ap.json()["data"]["status"] == "APPROVED"
-        assert ap.json()["data"]["zone_id"] == zone_id
+        assert ap.status_code == 422, ap.text
+
+        ap_ok = await client.post(
+            f"/message-feature/access/guest-requests/{rid}/approve",
+            params={"zone_id": zone_id},
+            headers=headers,
+        )
+        assert ap_ok.status_code == 200, ap_ok.text
+        assert ap_ok.json()["data"]["status"] == "APPROVED"
+        assert ap_ok.json()["data"]["zone_id"] == zone_id
 
         perm2 = await client.post("/api/access/permission", json={"zone_id": zone_id, "guest_name": "Guest Optional Zone 2"})
         assert perm2.status_code == 200
@@ -316,9 +323,16 @@ async def test_message_feature_approve_reject_zone_query_optional(override_get_d
         rid2 = next(x["id"] for x in req2.json()["data"] if x["guest_id"] == guest_id_2)
 
         rj = await client.post(f"/message-feature/access/guest-requests/{rid2}/reject", headers=headers)
-        assert rj.status_code == 200, rj.text
-        assert rj.json()["data"]["status"] == "REJECTED"
-        assert rj.json()["data"]["zone_id"] == zone_id
+        assert rj.status_code == 422, rj.text
+
+        rj_ok = await client.post(
+            f"/message-feature/access/guest-requests/{rid2}/reject",
+            params={"zone_id": zone_id},
+            headers=headers,
+        )
+        assert rj_ok.status_code == 200, rj_ok.text
+        assert rj_ok.json()["data"]["status"] == "REJECTED"
+        assert rj_ok.json()["data"]["zone_id"] == zone_id
 
 
 @pytest.mark.asyncio

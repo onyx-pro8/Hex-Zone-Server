@@ -323,11 +323,11 @@ async def guest_post_message(
     peer = next((p for p in peers if p["owner_id"] == to_owner_id), None)
     if not peer:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail={
-                "message": "Recipient is not an active member of this zone.",
-                "error_code": "NOT_FOUND",
-                "error": {"message": "Recipient is not an active member of this zone."},
+                "message": "Recipient is not an authorized host/admin peer for this zone.",
+                "error_code": "GUEST_NOT_AUTHORIZED_FOR_ZONE",
+                "error": {"message": "Recipient is not an authorized host/admin peer for this zone."},
             },
         )
     if msg_type == CanonicalMessageType.CHAT.value:

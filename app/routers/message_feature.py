@@ -223,9 +223,9 @@ async def list_access_schedules(
         "Response is a **raw JSON array** (no **`{ status, data }`** envelope). Prefer **`GET /api/access/guest-requests`** "
         "for new SPA clients (envelope + identical row schema **`GuestAccessSessionListItem`**).\n\n"
         "**Query parity** with **`GET /api/access/guest-requests`**: **`status`** (filter), **`pending_only`**, "
-        "**`limit`**, **`skip`**. Resolve sessions with **`POST /message-feature/access/guest-requests/{guest_id}/approve`** "
-        "or **`/reject`** "
-        "(path **guest_id** only; optional legacy **`?zone_id=`**), or **`POST /api/access/approve`** | **`reject`** "
+        "**`limit`**, **`skip`**. Resolve sessions with **`POST /message-feature/access/guest-requests/{guest_id}/approve?zone_id=`** "
+        "or **`/reject?zone_id=`** "
+        "(path **guest_id** + required **`zone_id`** query), or **`POST /api/access/approve`** | **`reject`** "
         "with **`GuestZoneActionRequest`** (**guest_id**, **zone_id** in body)."
     ),
     response_description="Newest **`created_at`** first; each item matches **`GuestAccessSessionListItem`** in OpenAPI.",
@@ -311,12 +311,12 @@ def _effective_zone_for_guest_admin_action(
     return row.zone_id
 
 
-_LEGACY_ZONE_QUERY = Query(
-    default=None,
+_REQUIRED_ZONE_QUERY = Query(
+    ...,
     min_length=1,
     max_length=100,
     description=(
-        "Optional legacy zone id query parameter. When provided, it must exactly match "
+        "Required zone id query parameter. It must exactly match "
         "the zone on the stored guest request."
     ),
 )
@@ -343,7 +343,7 @@ _GUEST_ID_PATH = Path(
         "**Bearer** JWT. Equivalent to **`POST /api/access/approve`**: resolves **zone_id** from "
         "**`guest_access_sessions`** keyed by **path `requestId`** (session table row id), then verifies the caller is an "
         "**administrator** for that zone and applies approval. "
-        "**`?zone_id=`** is legacy-only — omit unless you intentionally echo the zone; mismatched **`zone_id`** → **`403`**."
+        "**`?zone_id=`** is required and must match the persisted session zone; mismatched **`zone_id`** → **`403`**."
     ),
     response_description=(
         "`APPROVED` decision envelope with request id and zone metadata."
@@ -374,7 +374,7 @@ async def approve_guest_request_message_feature(
     requestId: str = _GUEST_ID_PATH,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
-    zone_id: str | None = _LEGACY_ZONE_QUERY,
+    zone_id: str = _REQUIRED_ZONE_QUERY,
 ):
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
@@ -419,7 +419,7 @@ async def approve_guest_request_message_feature(
     summary="Reject unexpected guest (dashboard path)",
     description=(
         "**Bearer** JWT. Same semantics as **`POST /api/access/reject`**: **zone** inferred from the "
-        "**requestId** session row (optional legacy **`?zone_id=`**, must match that row)."
+        "**requestId** session row and **`?zone_id=`** is required (must match that row)."
     ),
     response_description=(
         "`REJECTED` decision envelope with request id and zone metadata."
@@ -447,7 +447,7 @@ async def reject_guest_request_message_feature(
     requestId: str = _GUEST_ID_PATH,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
-    zone_id: str | None = _LEGACY_ZONE_QUERY,
+    zone_id: str = _REQUIRED_ZONE_QUERY,
 ):
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:

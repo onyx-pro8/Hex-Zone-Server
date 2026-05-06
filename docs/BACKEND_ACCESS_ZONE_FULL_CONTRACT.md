@@ -12,8 +12,8 @@ Audience: backend team owning this repo. Frontend: Hex-Zone-Client (React/Vite).
 - `POST /api/access/permission` (anonymous) -> submit guest request
 - `GET /api/access/session/{guest_id}?zone_id={zone_id}` -> poll approval status (`PENDING | APPROVED | REJECTED`)
 - `GET /api/access/guest-requests?zone_id={zone_id}` -> admin/member request list with envelope
-- `POST /message-feature/access/guest-requests/{requestId}/approve` (`zone_id` query optional legacy echo)
-- `POST /message-feature/access/guest-requests/{requestId}/reject` (`zone_id` query optional legacy echo)
+- `POST /message-feature/access/guest-requests/{requestId}/approve?zone_id={zone_id}` (`zone_id` query required)
+- `POST /message-feature/access/guest-requests/{requestId}/reject?zone_id={zone_id}` (`zone_id` query required)
 
 ### API shapes (frontend contract lock)
 
