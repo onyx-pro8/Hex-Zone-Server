@@ -1,4 +1,12 @@
-"""Websocket endpoint for realtime zone subscriptions."""
+"""Websocket endpoint for realtime zone subscriptions.
+
+After **`?token=`** JWT auth, clients send JSON text **`type=SUBSCRIBE`** with **`zoneIds`** array.
+
+Server sends **`type`** + **`data`** envelopes. Common **`type`** values:
+
+- **`NEW_MESSAGE`** — **`data`** matches **`ZoneMessageResponse`** JSON for member posts or (when **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT`**) Access **`CHAT`** (**UUID **`id`**, **`guest_id`** when present) delivered to participant **`owners.id`**.
+- **`guest_zone_message`** — legacy **`POST /api/guest/messages`** push (nested **`event`** in **`data`**).
+"""
 import json
 import logging
 
@@ -94,6 +102,7 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
 
 @router.websocket("/ws")
 async def websocket_handler(websocket: WebSocket) -> None:
+    """Authenticate with **`?token=`** bearer JWT (**`sub`** = **`owners.id`** string); subscribe zones (see module doc **`NEW_MESSAGE`**)."""
     await _zone_websocket_session(websocket)
 
 

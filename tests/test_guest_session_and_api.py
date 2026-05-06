@@ -229,6 +229,128 @@ async def test_guest_chat_visible_to_recipient_row(test_db, override_get_db):
 
 
 @pytest.mark.asyncio
+async def test_guest_chat_mirrors_to_admin_messages_inbox_and_symmetric_thread(test_db, override_get_db):
+    """Guest POST CHAT → **`GET /messages?owner_id=`** includes **CHAT**; member reply visible to guest thread (newest first)."""
+
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        admin_id, admin_token = await _register_admin(client, zone_id="zone-guest-inbox-chat")
+
+        perm = await client.post(
+            "/api/access/permission",
+            json={"zone_id": "zone-guest-inbox-chat", "guest_name": "Inbox Guest"},
+        )
+        guest_id = perm.json()["data"]["guest_id"]
+        zone_id = perm.json()["data"]["zone_id"]
+        await client.post(
+            "/api/access/approve",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
+        code = sess.json()["data"]["exchange_code"]
+        gs = await client.post(
+            "/api/access/guest-session",
+            json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": code},
+        )
+        guest_jwt = gs.json()["data"]["access_token"]
+
+        await client.post(
+            "/api/guest/messages",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+            json={"zone_id": zone_id, "type": "CHAT", "text": "Guest line one", "to_owner_id": admin_id},
+        )
+
+        inbox = await client.get(
+            "/messages",
+            params={"owner_id": admin_id, "skip": 0, "limit": 100},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert inbox.status_code == 200, inbox.text
+        items = inbox.json()
+        chats = [m for m in items if isinstance(m.get("id"), str) and m.get("type") == "CHAT"]
+        ours = next((m for m in chats if m.get("message") == "Guest line one"), None)
+        assert ours is not None
+        assert ours.get("receiver_id") == admin_id
+        assert ours.get("sender_id") is None
+        assert ours.get("guest_id") == guest_id
+        assert ours.get("zone_id") == zone_id
+
+        rep = await client.post(
+            "/messages/",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "zone_id": zone_id,
+                "guest_id": guest_id,
+                "message": "Admin reply ok",
+                "type": "CHAT",
+                "visibility": "private",
+            },
+        )
+        assert rep.status_code == 201, rep.text
+        rj = rep.json()
+        assert rj.get("type") == "CHAT"
+        assert rj.get("guest_id") == guest_id
+
+        gst = await client.get(
+            "/api/guest/messages",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+            params={"zone_id": zone_id, "with_owner_id": admin_id, "limit": 50},
+        )
+        assert gst.status_code == 200
+        git = gst.json()["data"]["items"]
+        texts = [i["text"] for i in git]
+        assert "Admin reply ok" in texts
+        assert "Guest line one" in texts
+        # Newest-first within this peer thread
+        assert texts[0] == "Admin reply ok"
+
+
+@pytest.mark.asyncio
+async def test_guest_chat_inbox_mirror_respects_disable_flag(test_db, override_get_db):
+    from app.core.config import settings
+
+    prev = settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT
+    try:
+        setattr(settings, "MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT", False)
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            admin_id, admin_token = await _register_admin(client, zone_id="zone-guest-inbox-flag")
+            perm = await client.post(
+                "/api/access/permission",
+                json={"zone_id": "zone-guest-inbox-flag", "guest_name": "Flag Guest"},
+            )
+            gid = perm.json()["data"]["guest_id"]
+            zid = perm.json()["data"]["zone_id"]
+            await client.post(
+                "/api/access/approve",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"guest_id": gid, "zone_id": zid},
+            )
+            sess = await client.get(f"/api/access/session/{gid}", params={"zone_id": zid})
+            code = sess.json()["data"]["exchange_code"]
+            gs = await client.post(
+                "/api/access/guest-session",
+                json={"guest_id": gid, "zone_id": zid, "exchange_code": code},
+            )
+            gj = gs.json()["data"]["access_token"]
+            await client.post(
+                "/api/guest/messages",
+                headers={"Authorization": f"Bearer {gj}"},
+                json={"zone_id": zid, "type": "CHAT", "text": "Hidden from merge", "to_owner_id": admin_id},
+            )
+            inbox = await client.get(
+                "/messages",
+                params={"owner_id": admin_id, "skip": 0, "limit": 100},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            assert inbox.status_code == 200
+            assert not any(
+                m.get("type") == "CHAT" and m.get("message") == "Hidden from merge" for m in inbox.json()
+            )
+    finally:
+        setattr(settings, "MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT", prev)
+
+
+@pytest.mark.asyncio
 async def test_guest_zone_scope_enforced_for_read_and_write(test_db, override_get_db):
     async with AsyncClient(app=app, base_url="http://test") as client:
         admin_id, admin_token = await _register_admin(client, zone_id="zone-guest-scope")

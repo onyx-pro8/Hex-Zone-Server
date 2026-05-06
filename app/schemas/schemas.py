@@ -424,9 +424,10 @@ class ZoneMessageCreate(BaseModel):
 
     **Default:** persists a **`Message`** row (member ↔ member) when **`guest_id`** is omitted.
 
-    **Guest thread:** set **`guest_id`** and **`zone_id`** (or **`zoneId`**) to append a **`ZoneMessageEvent`**
-    for **CHAT** only (same store as **`GET /api/guest/messages`**). **PERMISSION** is system-generated.
-    Omit **`receiver_id`**.
+    **Member → guest (Access):** set **`guest_id`** and **`zone_id`** (or **`zoneId`**) to append **`ZoneMessageEvent`**
+    **CHAT** (same persistence as **`GET /api/guest/messages`** / merged **`GET /messages`** inbox). **PERMISSION** is never composed here—server-only.
+    Omit **`receiver_id`**. Returned **`ZoneMessageResponse`** includes **`guest_id`** and UUID **`id`**.
+
     Send **`type`** or **`message_type`** (same semantics; **`type`** wins if both are present).
     """
 
@@ -522,15 +523,19 @@ class ZoneMessageCreate(BaseModel):
 class ZoneMessageResponse(BaseModel):
     """**`messages`** row (**numeric `id`**) or **`ZoneMessageEvent`** (**UUID string `id`**).
 
-    Returned by **`POST /messages`**, **`GET /messages`** (member inbox merges **PERMISSION** zone events with integer-id messages),
-    and guest-thread listings.
+    Returned by **`POST /messages`**, **`GET /messages`**, **`GET /api/access/guest-messages`**.
+
+    Default member inbox (**no `guest_id` query**) merges **`Message`** + **PERMISSION** + Access **CHAT**
+    (**`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT`**; see **`GET /messages`** OpenAPI).
+
+    **`guest_id`** narrows correlated Access rows for admin UIs (**CHAT**/ **PERMISSION**).
     """
 
     id: int | str = Field(
         ...,
         description=(
-            "**`messages.id`** (integer) for member-table posts; **UUID string** for **`ZoneMessageEvent`** "
-            "(guest thread, merged **PERMISSION** inbox, approve/reject audit lines)."
+            "**`messages.id`** (integer) for member-table rows; **UUID string** for **`ZoneMessageEvent`** "
+            "(Access **PERMISSION**/**CHAT**, member→guest **CHAT**, guest→staff **CHAT** in inbox merge)."
         ),
     )
     zone_id: str = Field(..., description="Shared zone id string (**not** the internal **`zones.id`** PK).")
@@ -543,7 +548,10 @@ class ZoneMessageResponse(BaseModel):
     )
     receiver_id: Optional[int] = Field(
         default=None,
-        description="Recipient **`owners.id`** for private member messages; **null** for guest-thread events.",
+        description=(
+            "Recipient **`owners.id`** for member private types; guest→staff Access **CHAT** sets **`receiver_id`** to **`to_owner_id`**; "
+            "member→guest Access **CHAT** often **`null`** (guest is **`guest_id`** field)."
+        ),
     )
     type: str = Field(description="Canonical message type string (e.g. **CHAT**, **PERMISSION**).")
     category: str = Field(description="Derived **Access** / **Alarm** / **Alert** grouping.")
@@ -551,6 +559,14 @@ class ZoneMessageResponse(BaseModel):
     visibility: MessageVisibilityEnum = Field(description="Legacy visibility; aligns with **scope** for new clients.")
     message: str = Field(description="Body text stored for the message or zone event.")
     created_at: datetime = Field(description="Server **UTC** creation time.")
+    guest_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Opaque guest session id (**`guest_access_sessions.guest_id`**) for Access-channel "
+            "**`ZoneMessageEvent`** rows (**CHAT**, **PERMISSION**) when inferable "
+            "(**`sender_guest_id`** or **`body`/metadata **`guest_id`**)."
+        ),
+    )
 
     model_config = ConfigDict(
         from_attributes=True,
@@ -561,6 +577,7 @@ class ZoneMessageResponse(BaseModel):
                     "zone_id": "ZN-DEMO",
                     "sender_id": 42,
                     "receiver_id": None,
+                    "guest_id": "019b2c3d-0000-7000-8000-000000000088",
                     "type": "PERMISSION",
                     "category": "Access",
                     "scope": "private",
@@ -573,12 +590,26 @@ class ZoneMessageResponse(BaseModel):
                     "zone_id": "ZN-DEMO",
                     "sender_id": 42,
                     "receiver_id": 43,
+                    "guest_id": None,
                     "type": "PRIVATE",
                     "category": "Alert",
                     "scope": "private",
                     "visibility": "private",
                     "message": "Are you coming to briefing?",
                     "created_at": "2026-05-06T14:29:45",
+                },
+                {
+                    "id": "019b4c72-9000-7a00-a000-cc0000000001",
+                    "zone_id": "ZN-DEMO",
+                    "sender_id": None,
+                    "receiver_id": 55,
+                    "guest_id": "019b2c3d-0000-7000-8000-0000000000aa",
+                    "type": "CHAT",
+                    "category": "Access",
+                    "scope": "private",
+                    "visibility": "private",
+                    "message": "Guest to host",
+                    "created_at": "2026-05-06T14:33:22",
                 },
             ]
         },
@@ -609,6 +640,7 @@ class MemberGuestAccessThreadMessagesEnvelope(BaseModel):
                                 "zone_id": "ZN-DEMO",
                                 "sender_id": 42,
                                 "receiver_id": None,
+                                "guest_id": "019b2c3d-0000-7000-8000-000000000001",
                                 "type": "PERMISSION",
                                 "category": "Access",
                                 "scope": "private",

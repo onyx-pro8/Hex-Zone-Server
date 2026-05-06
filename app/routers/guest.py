@@ -7,6 +7,7 @@ from typing import Literal, cast
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.security import get_current_guest
 from app.crud import owner as owner_crud
 from app.database import get_db
@@ -175,7 +176,8 @@ async def guest_zone_dashboard(
         "Returns **`ZoneMessageEvent`** rows: **PERMISSION** (server-only: submit / approve / reject) and **CHAT** (guest or member). "
         "Query **`zone_id`** (required, must be in JWT) and optional **`with_owner_id`** = staff **`owners.id`**. "
         "**PERMISSION** audit lines appear for **every** **`with_owner_id`** thread (canonical guest↔staff view). "
-        "Pagination: **`limit`**, **`cursor`** (opaque), optional **`before_id`**. See **`GuestMessagesListResponse`** example."
+        "**CHAT** lines are peer-scoped the same way staff **`GET /messages`** merged inbox uses **party** filters for Access **CHAT**.\n\n"
+        "**Pagination:** **`limit`**, **`cursor`** (opaque), optional **`before_id`**. See **`GuestMessagesListResponse`** example."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
@@ -242,7 +244,10 @@ async def guest_list_messages(
         "JSON body: **`zone_id`**, **`type`**, **`to_owner_id`**, and **`text`**. "
         "Only **CHAT** is allowed. **PERMISSION** and other types → **`422`** with **`PERMISSION_MANUAL_DISABLED`** or "
         "**`GUEST_MESSAGE_TYPE_NOT_ALLOWED`**. Recipient must be **`GET …/peers`** staff: wrong target → **`403`** **`GUEST_NOT_AUTHORIZED_FOR_ZONE`** "
-        "(or **`PEERS_NOT_AVAILABLE`** if no peers). See **`GuestMessageCreatedResponse`** example."
+        "(or **`PEERS_NOT_AVAILABLE`** if no peers).\n\n"
+        "**Side effects:** persists **`ZoneMessageEvent`** (**`guest_id`** in body/metadata). Recipient staff see the same chat in **`GET /messages?owner_id={to_owner_id}`** merged "
+        "inbox (**`skip`/`limit`**) when **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT`** is **true** (default)—**`ZoneMessageResponse`** mirrors **`guest_id`**, **`type`:** **`CHAT`**. "
+        "Optional **`NEW_MESSAGE`** WebSocket (**same JSON shape**) to participant **`owners.id`**. See **`GuestMessageCreatedResponse`** example."
     ),
     responses={
         status.HTTP_201_CREATED: {"description": "Created **CHAT** zone event (**`GuestZoneMessageItem`**)."},
@@ -433,6 +438,11 @@ async def guest_post_message(
         )
 
     db.commit()
+    mid = str(created.get("id") or "").strip()
+    if mid and settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
+        zr = db.get(ZoneMessageEvent, mid)
+        if zr:
+            await guest_api_service.notify_access_chat_inbox_ws(zr)
     await guest_api_service.notify_guest_message_recipient(
         recipient_owner_id=to_owner_id,
         payload={"event": created, "zone_id": zone_id},

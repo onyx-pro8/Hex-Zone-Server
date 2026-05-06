@@ -11,7 +11,8 @@ from app.crud import message as message_crud
 from app.crud import owner as owner_crud
 from app.database import get_db
 from app.middleware.auth import require_auth
-from app.models import Device, MemberLocation, Owner
+from app.core.config import settings
+from app.models import Device, MemberLocation, Owner, ZoneMessageEvent
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.utils.api_response import success_response
 from app.websocket.manager import ws_manager
@@ -535,8 +536,10 @@ async def remove_zone(zone_id: str, owner: Owner = Depends(require_auth), db: Se
     description=(
         "**`MessageCreateRequest`** (`zoneId`, `type`, `text`, …): legacy contract envelope via **`success_response`**.\n\n"
         "**`ChatMessageCreateRequest`**: member **`Message`** when **`guest_id`** is omitted; "
-        "when **`guest_id`** and **`zone_id`** / **`zoneId`** are set, creates **`ZoneMessageEvent`** for **PERMISSION**/**CHAT** "
-        "(same as core **`POST /messages`**). Use **`message_type`** if **`type`** is omitted.\n\n"
+        "when **`guest_id`** and **`zone_id`** / **`zoneId`** are set, creates **`ZoneMessageEvent`** **CHAT** only "
+        "(**PERMISSION** is server-generated — same rejection semantics as **`POST /messages`**). "
+        "**`ZoneMessageResponse`** includes **`guest_id`** and UUID **`id`**; aligns with **`GET /messages`** merged inbox when **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT=true`**. "
+        "Use **`message_type`** if **`type`** is omitted.\n\n"
         "See **`ChatMessageCreateRequest`** examples in Swagger."
     ),
     responses={
@@ -553,7 +556,10 @@ async def remove_zone(zone_id: str, owner: Owner = Depends(require_auth), db: Se
             "description": "Validation failed (including **MISSING_ZONE_FOR_GUEST**, **INVALID_MESSAGE_TYPE_FOR_GUEST**).",
         },
     },
-    response_description="**`{ status, data }`** for legacy payload, or **`ZoneMessageResponse`** for chat (string **`id`** when guest thread).",
+    response_description=(
+        "**`{ status, data }`** for legacy contract payload, or **`ZoneMessageResponse`** for chat / guest-thread **CHAT** "
+        "(UUID **`id`**, **`guest_id`**, **`category`:** **`Access`**)."
+    ),
 )
 async def post_messages(
     payload: MessageCreateRequest | ChatMessageCreateRequest = Body(...),
@@ -645,20 +651,13 @@ async def post_messages(
                 detail={"error_code": "INVALID_GUEST_MESSAGE", "message": msg},
             )
         event = guest_result
+        eid = event.id
         db.commit()
-        gtype = normalize_message_type(event.type)
-        return ZoneMessageResponse(
-            id=event.id,
-            zone_id=event.zone_id,
-            sender_id=event.sender_id,
-            receiver_id=event.receiver_id,
-            type=event.type,
-            category=type_category(gtype).value,
-            scope=type_scope(gtype).value,
-            visibility=MessageVisibilityEnum.PRIVATE,
-            message=event.text,
-            created_at=event.created_at,
-        )
+        if settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
+            zr = db.get(ZoneMessageEvent, eid)
+            if zr:
+                await guest_api_service.notify_access_chat_inbox_ws(zr)
+        return guest_api_service.zone_message_event_to_member_zone_message_response(event)
 
     normalized_chat_payload = ZoneMessageCreate(
         message=chat_payload.message,

@@ -1,4 +1,5 @@
 """Configuration management for Zone Weaver backend."""
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +29,15 @@ class Settings(BaseSettings):
     API_DESCRIPTION: str = "User-Defined Zone Message Distribution Platform"
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+
+    MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT: bool = Field(
+        default=True,
+        description=(
+            "When **true**, **`GET /messages?owner_id=…`** merges Access-channel **`ZoneMessageEvent`** **`CHAT`** for thread parties "
+            "with **`Message`** rows and **`PERMISSION`** audit lines (**OpenAPI**: **`messages` → GET /**). "
+            "**false** disables only **CHAT** merge (guest **CHAT** remains on **`GET /api/guest/messages`** and on **`GET /messages`** when **`guest_id`** query scopes the Access thread)."
+        ),
+    )
 
     # Guest access QR: canonical SPA origin for `/access?zid=...` (no trailing slash).
     # Production/staging: set **GUEST_ACCESS_APP_BASE_URL** (e.g. https://app.example.com).

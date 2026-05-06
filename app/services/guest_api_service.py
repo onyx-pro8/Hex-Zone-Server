@@ -18,6 +18,7 @@ from app.models import MessageBlock, Owner, Zone, ZoneMessageEvent
 from app.services.access_policy import zone_listing_owner_ids
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
+from app.core.config import settings
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,20 @@ def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
             }
         )
     return out
+
+
+def access_thread_guest_marker(row: ZoneMessageEvent) -> str | None:
+    """Infer Access-thread guest UUID from **`ZoneMessageEvent`** (guest-send or staff→guest)."""
+    if row.sender_guest_id:
+        s = row.sender_guest_id.strip()
+        return s or None
+    body = row.body_json if isinstance(row.body_json, dict) else {}
+    g = str(body.get("guest_id") or "").strip()
+    if g:
+        return g
+    meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+    g = str(meta.get("guest_id") or "").strip()
+    return g or None
 
 
 def _body_guest_id_matches(row: ZoneMessageEvent, guest_id: str) -> bool:
@@ -230,6 +245,51 @@ def list_zone_permission_events_for_owner_feed(
     return visible
 
 
+def list_zone_guest_access_chat_events_for_owner_inbox(
+    db: Session,
+    *,
+    owner: Owner,
+    max_scan: int = 3000,
+) -> list[ZoneMessageEvent]:
+    """**CHAT** **`ZoneMessageEvent`** rows surfaced on **`GET /messages`** for this owner.
+
+    Visibility (peer-style, analogous to **`with_owner_id`** on **`GET /api/guest/messages`**):
+
+    - **Guest → staff**: include when **`receiver_id`** is this owner **`and`** **`sender_guest_id`** is set
+      (true Access guest channel message to this peer).
+
+    - **Staff → guest**: include when **`sender_id`** is this owner **`and`** a guest id marker exists on the row
+      (**`body`** or **`metadata` **`guest_id`**), matching member→guest **CHAT** persistence.
+
+    Additionally requires **`guest_access_service.can_manage_zone_guest_requests`** for the row **`zone_id`**
+    (same gate as merged **PERMISSION** audit lines).
+    """
+    zonable = manageable_zone_ids_for_permission_inbox(db, owner)
+    if not zonable:
+        return []
+    chunk = tuple(sorted(zonable))
+    rows = (
+        db.query(ZoneMessageEvent)
+        .filter(
+            ZoneMessageEvent.zone_id.in_(chunk),
+            ZoneMessageEvent.type == CanonicalMessageType.CHAT.value,
+        )
+        .order_by(ZoneMessageEvent.created_at.desc())
+        .limit(max(1, min(int(max_scan), 8000)))
+        .all()
+    )
+    visible: list[ZoneMessageEvent] = []
+    for row in rows:
+        if not guest_access_service.can_manage_zone_guest_requests(db, owner, row.zone_id):
+            continue
+        if row.receiver_id == owner.id and row.sender_guest_id:
+            visible.append(row)
+            continue
+        if row.sender_id == owner.id and access_thread_guest_marker(row):
+            visible.append(row)
+    return visible
+
+
 def zone_message_event_to_member_zone_message_response(row: ZoneMessageEvent):
     """Build **`ZoneMessageResponse`** for admin/member clients (import local to avoid circular imports)."""
     from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageResponse
@@ -250,6 +310,7 @@ def zone_message_event_to_member_zone_message_response(row: ZoneMessageEvent):
         ),
         message=row.text,
         created_at=row.created_at,
+        guest_id=access_thread_guest_marker(row),
     )
 
 
@@ -410,6 +471,23 @@ def create_guest_zone_message(
 
 async def notify_guest_message_recipient(*, recipient_owner_id: int, payload: dict) -> None:
     await ws_manager.broadcast_to_users([recipient_owner_id], "guest_zone_message", payload)
+
+
+async def notify_access_chat_inbox_ws(row: ZoneMessageEvent) -> None:
+    """Push **`NEW_MESSAGE`** to staff parties with the same **`ZoneMessageResponse`** shape as **`GET /messages`**."""
+
+    if not settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
+        return
+
+    recipients: set[int] = set()
+    if row.receiver_id is not None:
+        recipients.add(int(row.receiver_id))
+    if row.sender_id is not None:
+        recipients.add(int(row.sender_id))
+    if not recipients:
+        return
+    payload = zone_message_event_to_member_zone_message_response(row).model_dump(mode="json")
+    await ws_manager.broadcast_to_users(sorted(recipients), "NEW_MESSAGE", payload)
 
 
 def create_member_to_guest_zone_message(

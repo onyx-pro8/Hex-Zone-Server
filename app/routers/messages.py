@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.core.config import settings
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.crud import message as message_crud
 from app.crud import owner as owner_crud
@@ -15,7 +16,7 @@ from app.domain.message_types import (
     type_category,
     type_scope,
 )
-from app.models import GuestAccessSession
+from app.models import GuestAccessSession, ZoneMessageEvent
 from app.services import guest_api_service
 from app.services import guest_access_service
 from app.services.access_policy import can_message_owner
@@ -44,13 +45,47 @@ def _first_non_empty_str(*vals: str | None) -> str:
         "**Member → guest (Access channel):** Bearer **member** JWT only. Send **`guest_id`** + **`zone_id`**/**`zoneId`**. Body: **`message`**, **`type`**/**`message_type`**, "
         "**`visibility`** (often **`private`**). Only **CHAT** is supported; **`PERMISSION`** for guests is server-only "
         "(arrival submit / **`/api/access/approve|reject`**) — use **`422`** **`PERMISSION_MANUAL_DISABLED`** if a client sends it. "
-        "Do **not** send **`receiver_id`**. Persists **`ZoneMessageEvent`**; guest reads via **`GET /api/guest/messages`** "
-        "with **`with_owner_id`** = caller **`owners.id`**. Admins list the same thread with "
-        "**`GET /api/access/guest-messages`** or **`GET /messages`** + **`guest_id`** + **`zone_id`** "
-        "(see **`GET /messages`** description).\n\n"
+        "Do **not** send **`receiver_id`**. Persists **`ZoneMessageEvent`**.\n\n"
+        "**Responses:** **`ZoneMessageResponse`** includes **`guest_id`** (opaque guest UUID) when the event is tied to Access; "
+        "**`sender_id`** = caller, **`receiver_id`** usually **`null`** for outbound member→guest **CHAT**.\n\n"
+        "**Hydration:** the sending member sees this **CHAT** in **`GET /messages?owner_id={their owners.id}&skip=&limit=`** merged inbox "
+        "when **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT`** is **true** (default). **`POST`** may also enqueue WebSocket **`NEW_MESSAGE`** "
+        "with the **same payload shape** to connected staff apps (participant **`owners.id`** only).\n\n"
+        "**Read path for guest:** **`GET /api/guest/messages`** with **`with_owner_id`** = caller **`owners.id`**. Admins listing the raw thread "
+        "use **`GET /api/access/guest-messages`** or **`GET /messages`** + **`guest_id`** + **`zone_id`** (see **`GET /messages`**).\n\n"
         "OpenAPI schema **`ZoneMessageCreate`** includes Hex-Zone-Client examples."
     ),
+    response_description=(
+        "**`ZoneMessageResponse`**: integer **`id`** for **`messages`** table rows; UUID string **`id`** for **`ZoneMessageEvent`** "
+        "(member→guest **CHAT**, merged inbox **PERMISSION**/**CHAT**). **`guest_id`** is set when inferable."
+    ),
     responses={
+        status.HTTP_201_CREATED: {
+            "description": "Created **`Message`** row or **`ZoneMessageEvent`** (guest thread CHAT shows **`guest_id`**).",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "member_to_guest_chat": {
+                            "summary": "Member→guest Access CHAT (UUID id + guest_id)",
+                            "description": "**`POST`** with **`guest_id`** + **`zone_id`**; mirrors into merged **`GET /messages`** inbox when **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT=true`**.",
+                            "value": {
+                                "id": "019b4c72-9000-7a00-a000-acc3ss000011",
+                                "zone_id": "ZN-DEMO",
+                                "sender_id": 42,
+                                "receiver_id": None,
+                                "guest_id": "019b2c3d-0000-7000-8000-000000000001",
+                                "type": "CHAT",
+                                "category": "Access",
+                                "scope": "private",
+                                "visibility": "private",
+                                "message": "Your host will meet you at reception.",
+                                "created_at": "2026-05-06T15:05:00",
+                            },
+                        }
+                    },
+                },
+            },
+        },
         status.HTTP_401_UNAUTHORIZED: {
             "description": "Missing or invalid bearer token.",
         },
@@ -70,7 +105,6 @@ def _first_non_empty_str(*vals: str | None) -> str:
             ),
         },
     },
-    response_description="**`ZoneMessageResponse`**: integer **`id`** for **`messages`**, string UUID **`id`** for guest-thread **`ZoneMessageEvent`**.",
 )
 async def create_message(
     payload: ZoneMessageCreate,
@@ -151,20 +185,13 @@ async def create_message(
                 detail={"error_code": "INVALID_GUEST_MESSAGE", "message": msg},
             )
         event = guest_result
+        eid = event.id
         db.commit()
-        gtype = normalize_message_type(event.type)
-        return ZoneMessageResponse(
-            id=event.id,
-            zone_id=event.zone_id,
-            sender_id=event.sender_id,
-            receiver_id=event.receiver_id,
-            type=event.type,
-            category=type_category(gtype).value,
-            scope=type_scope(gtype).value,
-            visibility=MessageVisibilityEnum.PRIVATE,
-            message=event.text,
-            created_at=event.created_at,
-        )
+        if settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
+            zr = db.get(ZoneMessageEvent, eid)
+            if zr:
+                await guest_api_service.notify_access_chat_inbox_ws(zr)
+        return guest_api_service.zone_message_event_to_member_zone_message_response(event)
 
     try:
         canonical_type = normalize_message_type(payload.type or "")
@@ -430,8 +457,18 @@ async def _list_zone_messages_for_owner(
         max_scan=fetch_cap + 250,
     )
     perm_responses = [guest_api_service.zone_message_event_to_member_zone_message_response(e) for e in perm_events]
+    chat_responses: list[ZoneMessageResponse] = []
+    if settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
+        chat_events = guest_api_service.list_zone_guest_access_chat_events_for_owner_inbox(
+            db,
+            owner=owner,
+            max_scan=fetch_cap + 250,
+        )
+        chat_responses = [
+            guest_api_service.zone_message_event_to_member_zone_message_response(e) for e in chat_events
+        ]
     merged = sorted(
-        [*msg_responses, *perm_responses],
+        [*msg_responses, *perm_responses, *chat_responses],
         key=lambda item: item.created_at,
         reverse=True,
     )
@@ -444,16 +481,26 @@ async def _list_zone_messages_for_owner(
     summary="List zone messages",
     description=(
         "**Member ↔ member (no `other_owner_id`):** merges **`Message`** inbox rows with recent **`ZoneMessageEvent`** "
-        "**`PERMISSION`** lines for zones the caller may administer (guest access audit feed).\n\n"
+        "**`PERMISSION`** lines plus **Access-channel `CHAT`** for zones the caller may administer. "
+        "**`CHAT`** merge follows a **peer-party** rule aligned with **`GET /api/guest/messages`** + **`with_owner_id`**: "
+        "guest→staff rows where **`receiver_id`** is the caller **`and`** the row is guest-authored; "
+        "staff→guest rows where **`sender_id`** is the caller and a **`guest_id`** marker exists on the event. "
+        "Disable **`CHAT`** merge server-side by setting **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT=false`** (env / "
+        "**`.env`**); **PERMISSION** merge is unchanged.\n\n"
         "**Member ↔ member (with `other_owner_id`):** **`Message`** only between the two owners.\n\n"
         "**Guest access thread:** include any of **`guest_id`** / **`guestId`**, **`zone_id`** / **`zoneId`**, "
         "and/or **`request_id`** / **`requestId`** (**numeric **`guest_access_sessions.id`** from "
         "**`GET /api/access/guest-requests`**). **`zone_id`** may be omitted when **`guest_id`** or "
         "**`requestId`** resolves a session.\n\n"
         "Returns **`ZoneMessageEvent`** **PERMISSION** + **CHAT** (same persistence as **`GET /api/guest/messages`**). "
-        "Optional **`GET /api/access/guest-messages`** returns the same items in **`{ \"data\": { \"items\": … } }`** form.\n\n"
+        "**`ZoneMessageResponse`** items may include **`guest_id`** on Access events.\n\n"
+        "**Hex-Zone-Client default feed:** **`GET /messages?owner_id=`** **`<JWT sub / owners.id>`** **`&skip=0`** **`&limit=100`** "
+        "(no **`guest_id`** / **`other_owner_id`**). Optional WebSocket **`NEW_MESSAGE`** uses the same normalized object as list items.\n\n"
+        "**`other_owner_id`** (peer): if **`guest_id`** (or **`guestId`**) is set → same as guest **`with_owner_id`** (**dm peer**). "
+        "If **`guest_id`** is omitted → **`Message`**-only thread between **`owner_id`** and **`other_owner_id`** (same zone).\n\n"
+        "Optional **`GET /api/access/guest-messages`** returns the same **`ZoneMessageEvent`** items in **`{ \"data\": { \"items\": … } }`** form.\n\n"
         "This path (**`GET /messages`**, no trailing slash) remains the canonical list URL; **`GET /messages/`** "
-        "is equivalent."
+        "is equivalent (**`include_in_schema=false`** duplicate)."
     ),
     response_description=(
         "Ordered by **`created_at`** descending after merge (**`skip`**/**`limit`** apply to the merged list). "
@@ -461,19 +508,37 @@ async def _list_zone_messages_for_owner(
     ),
     responses={
         status.HTTP_200_OK: {
-            "description": "Merged inbox (**`Message`** + **`PERMISSION`**) or peer-only **`Message`** list or guest **`ZoneMessageEvent`** thread.",
+            "description": "Merged inbox (**`Message`** + **`PERMISSION`** + Access **`CHAT`**) or peer-only **`Message`** list or guest **`ZoneMessageEvent`** thread.",
             "content": {
                 "application/json": {
                     "examples": {
                         "merged_member_inbox": {
-                            "summary": "Owner inbox with guest PERMISSION audit",
-                            "description": "**`guest_id`** query params omitted — includes **`ZoneMessageResponse`** UUID rows.",
+                            "summary": "Merged inbox: Access CHAT + PERMISSION + member messages",
+                            "description": (
+                                "**`GET /messages?owner_id=42&skip=0&limit=100`** shape when **`guest_id`** query params omitted: "
+                                "integer‑id **`Message`** rows + UUID **`ZoneMessageEvent`** (**PERMISSION** + peer‑scoped Access **CHAT**). "
+                                "Requires **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT=true`** for **CHAT** merge."
+                            ),
                             "value": [
                                 {
                                     "id": "019b4c72-9000-7a00-a000-aaaaaaaaaa01",
                                     "zone_id": "ZN-DEMO",
+                                    "sender_id": None,
+                                    "receiver_id": 42,
+                                    "guest_id": "019b2c3d-0000-7000-8000-000000000099",
+                                    "type": "CHAT",
+                                    "category": "Access",
+                                    "scope": "private",
+                                    "visibility": "private",
+                                    "message": "Hello reception",
+                                    "created_at": "2026-05-06T14:31:00",
+                                },
+                                {
+                                    "id": "019b4c72-9000-7a00-a000-dddddddd0001",
+                                    "zone_id": "ZN-DEMO",
                                     "sender_id": 42,
                                     "receiver_id": None,
+                                    "guest_id": "019b2c3d-0000-7000-8000-000000000099",
                                     "type": "PERMISSION",
                                     "category": "Access",
                                     "scope": "private",
@@ -494,7 +559,29 @@ async def _list_zone_messages_for_owner(
                                     "created_at": "2026-05-06T14:29:45",
                                 },
                             ],
-                        }
+                        },
+                        "guest_access_thread_scoped": {
+                            "summary": "Access thread via GET /messages + guest_id (+ optional other_owner_id)",
+                            "description": (
+                                "**`GET /messages?owner_id=42&guest_id=…&zone_id=ZN-DEMO`** (optionally **`other_owner_id`** = peer **`owners.id`**): "
+                                "**`ZoneMessageResponse[]`** only—no merge with general **`Message`** inbox."
+                            ),
+                            "value": [
+                                {
+                                    "id": "019b4c72-9000-7a00-a000-gu3st000004",
+                                    "zone_id": "ZN-DEMO",
+                                    "sender_id": None,
+                                    "receiver_id": 42,
+                                    "guest_id": "019b2c3d-0000-7000-8000-000000000001",
+                                    "type": "CHAT",
+                                    "category": "Access",
+                                    "scope": "private",
+                                    "visibility": "private",
+                                    "message": "On my way",
+                                    "created_at": "2026-05-06T16:10:00",
+                                }
+                            ],
+                        },
                     }
                 }
             },
@@ -508,11 +595,34 @@ async def _list_zone_messages_for_owner(
     },
 )
 async def list_messages(
-    owner_id: int = Query(..., ge=1),
-    other_owner_id: int | None = Query(None, ge=1),
-    guest_id: str | None = Query(None, max_length=36),
+    owner_id: int = Query(
+        ...,
+        ge=1,
+        description=(
+            "**`owners.id`** of the authenticated member (must equal JWT **`sub`**). Matches Hex‑Zone‑Client "
+            "**`GET /messages?owner_id=`** `{logged_in_owner_numeric_id}&skip=&limit=`."
+        ),
+    ),
+    other_owner_id: int | None = Query(
+        None,
+        ge=1,
+        description=(
+            "**Peer **`owners.id`**: with **`guest_id`** → **`with_owner_id`**-style thread filter (**Access** DM). "
+            "Without **`guest_id`** → member↔member **`Message`**-only transcript (same **`zone_id`** string required)."
+        ),
+    ),
+    guest_id: str | None = Query(
+        None,
+        max_length=36,
+        description="Opaque **`guest_access_sessions.guest_id`**. When set (or via **`guestId`**), returns raw Access thread (**`ZoneMessageEvent`**) not the merged inbox.",
+    ),
     guestId: str | None = Query(None, max_length=36, description="camelCase alias of **guest_id**."),
-    zone_id: str | None = Query(None, min_length=1, max_length=100),
+    zone_id: str | None = Query(
+        None,
+        min_length=1,
+        max_length=100,
+        description="Required with **`guest_id`** (unless resolved from session / **`requestId`**).",
+    ),
     zoneId: str | None = Query(None, min_length=1, max_length=100, description="camelCase alias of **zone_id**."),
     permission_request_id: str | None = Query(
         None,
@@ -526,8 +636,16 @@ async def list_messages(
         description="Often **numeric **`guest_access_sessions.id`** OR opaque **guest_id** UUID**.",
     ),
     access_session_id: str | None = Query(None, max_length=36, description="Alias of **`request_id`**."),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    skip: int = Query(0, ge=0, description="Pagination offset applied **after** server-side merge ordering."),
+    limit: int = Query(
+        100,
+        ge=1,
+        le=1000,
+        description=(
+            "Default **100** matches common client hydrate (**`skip=0`**). Max **1000**. "
+            "Merged inbox scans a bounded recent window—use **`guest_id`**‑scoped listing for full Access history."
+        ),
+    ),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

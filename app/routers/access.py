@@ -1002,13 +1002,13 @@ async def list_guest_requests_for_access_api(
     status_code=status.HTTP_200_OK,
     summary="List guest access thread for member/admin (PERMISSION + CHAT)",
     description=(
-        "**Bearer member JWT.** Returns the same **`ZoneMessageEvent`** history the guest sees on "
-        "**`GET /api/guest/messages`** (automatic **PERMISSION** plus **CHAT**), plus member→guest **CHAT** "
-        "created via **`POST /messages`** with **`guest_id`** + **`zone_id`**.\n\n"
-        "**`zone_id`** and **`guest_id`** are required. Optional **`with_owner_id`** narrows to a single "
-        "peer thread (same semantics as **`GET /api/guest/messages`** / **`GET /messages`** + **`other_owner_id`**).\n\n"
-        "**Authorization** matches **`GET /api/access/guest-requests`**: administrator for the zone plus "
-        "**`can_manage_zone_guest_requests`**."
+        "**Bearer member JWT.** Returns **`ZoneMessageResponse[]`** (UUID **`id`**, **`guest_id`** populated when inferable) — "
+        "the same **`ZoneMessageEvent`** history the guest sees on **`GET /api/guest/messages`** (**PERMISSION** + **CHAT**), "
+        "including member→guest **CHAT** from **`POST /messages`** with **`guest_id`** + **`zone_id`**.\n\n"
+        "**`zone_id`** and **`guest_id`** are required. Optional **`with_owner_id`** narrows to one staff peer (**`owners.id`**), "
+        "same semantics as **`GET /api/guest/messages`** with **`with_owner_id`**, equivalent to **`GET /messages`** with **`guest_id`** + **`other_owner_id`** "
+        "(peer filter; does **not** use the merged global inbox—it is the scoped Access thread).\n\n"
+        "**Authorization** matches **`GET /api/access/guest-requests`**: zone administrator **`and`** **`can_manage_zone_guest_requests`**."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
