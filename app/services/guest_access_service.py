@@ -177,6 +177,8 @@ def process_guest_arrival(
     ws_guest_is_here: list[tuple[list[int], dict]] = []
     ws_unexpected: list[tuple[list[int], dict]] = []
 
+    permission_sender_owner_id: int | None = None
+
     if schedule:
         session_row = GuestAccessSession(
             guest_id=guest_token,
@@ -233,6 +235,8 @@ def process_guest_arrival(
         }
         if notify_ids:
             ws_guest_is_here.append((notify_ids, payload_here))
+        if notify_ids:
+            permission_sender_owner_id = notify_ids[0]
 
         perm_meta = {
             "flow": "qr_guest_arrival",
@@ -247,6 +251,7 @@ def process_guest_arrival(
         admin = resolve_primary_zone_admin_owner(db, zone_id)
         if not admin:
             return {"error": "NO_ZONE_ADMIN", "message": "No administrator found for this zone.", "http_status": 422}
+        permission_sender_owner_id = admin.id
 
         session_row = GuestAccessSession(
             guest_id=guest_token,
@@ -290,7 +295,7 @@ def process_guest_arrival(
 
     perm_event = ZoneMessageEvent(
         zone_id=zone_id,
-        sender_id=None,
+        sender_id=permission_sender_owner_id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
@@ -513,7 +518,7 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
 
     note = ZoneMessageEvent(
         zone_id=zone_id,
-        sender_id=None,
+        sender_id=acting_owner.id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
@@ -551,7 +556,7 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
 
     note = ZoneMessageEvent(
         zone_id=zone_id,
-        sender_id=None,
+        sender_id=acting_owner.id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),

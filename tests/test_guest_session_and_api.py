@@ -365,6 +365,48 @@ async def test_member_list_guest_requests_access_api(test_db, override_get_db):
 
 
 @pytest.mark.asyncio
+async def test_admin_can_see_access_permission_and_chat_messages(test_db, override_get_db):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = f"zone-admin-thread-{uuid.uuid4().hex[:8]}"
+        admin_id, admin_token = await _register_admin(client, zone_id=zone_id)
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        perm = await client.post("/api/access/permission", json={"zone_id": zone_id, "guest_name": "Thread Guest"})
+        assert perm.status_code == 200
+        guest_id = perm.json()["data"]["guest_id"]
+
+        approve = await client.post(
+            "/api/access/approve",
+            headers=headers,
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        assert approve.status_code == 200
+
+        send_chat = await client.post(
+            "/messages",
+            headers=headers,
+            json={
+                "message": "Welcome from admin",
+                "type": "CHAT",
+                "visibility": "private",
+                "zone_id": zone_id,
+                "guest_id": guest_id,
+            },
+        )
+        assert send_chat.status_code == 201, send_chat.text
+
+        admin_thread = await client.get(
+            "/messages",
+            headers=headers,
+            params={"owner_id": admin_id, "guest_id": guest_id, "zone_id": zone_id, "limit": 50},
+        )
+        assert admin_thread.status_code == 200, admin_thread.text
+        rows = admin_thread.json()
+        assert any(r["type"] == "PERMISSION" for r in rows)
+        assert any(r["type"] == "CHAT" and r["message"] == "Welcome from admin" for r in rows)
+
+
+@pytest.mark.asyncio
 async def test_guest_messaging_restricted_to_host_admin_peers(test_db, override_get_db):
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = f"zone-peer-{uuid.uuid4().hex[:8]}"

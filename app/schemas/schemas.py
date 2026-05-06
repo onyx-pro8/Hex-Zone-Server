@@ -527,7 +527,13 @@ class ZoneMessageResponse(BaseModel):
         description="**`messages.id`** (integer) for normal posts, or **`zone_message_events.id`** (UUID string) when **`guest_id`** was used.",
     )
     zone_id: str = Field(..., description="Shared zone id string (**not** the internal **`zones.id`** PK).")
-    sender_id: int = Field(..., description="**`owners.id`** of the sender (always set for member posts).")
+    sender_id: Optional[int] = Field(
+        default=None,
+        description=(
+            "**`owners.id`** of the sender for member posts; null for system/guest-originated "
+            "**ZoneMessageEvent** rows in guest access threads."
+        ),
+    )
     receiver_id: Optional[int] = Field(
         default=None,
         description="Recipient **`owners.id`** for private member messages; **null** for guest-thread events.",

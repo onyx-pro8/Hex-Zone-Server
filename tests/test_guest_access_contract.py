@@ -200,6 +200,13 @@ async def test_access_permission_contract_and_token_zone_validation(override_get
         assert mismatch.status_code == 422
         assert mismatch.json()["error_code"] == "TOKEN_ZONE_MISMATCH"
 
+        invalid = await client.post(
+            "/api/access/permission",
+            json={"guest_qr_token": "invalid-token-value", "guest_name": "Guest Three"},
+        )
+        assert invalid.status_code == 404
+        assert invalid.json()["error_code"] == "INVALID_GUEST_TOKEN"
+
 
 @pytest.mark.asyncio
 async def test_permission_manual_disabled_and_guest_chat_only(override_get_db):
@@ -249,7 +256,7 @@ async def test_permission_events_auto_generated_for_submit_approve_reject(overri
             .all()
         )
         assert len(first) >= 1
-        assert first[-1].sender_id is None
+        assert first[-1].sender_id is not None
         auto_chat = (
             test_db.query(ZoneMessageEvent)
             .filter(ZoneMessageEvent.zone_id == zone_id, ZoneMessageEvent.type == "CHAT")
@@ -275,7 +282,7 @@ async def test_permission_events_auto_generated_for_submit_approve_reject(overri
             .first()
         )
         assert perm2 is not None
-        assert perm2.sender_id is None
+        assert perm2.sender_id is not None
 
         perm_b = await client.post("/api/access/permission", json={"zone_id": zone_id, "guest_name": "B Guest"})
         req_b = await client.get("/api/access/guest-requests", params={"zone_id": zone_id}, headers=headers)

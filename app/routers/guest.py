@@ -365,7 +365,7 @@ async def guest_post_message(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "message": "Message type not allowed for guests.",
-                "error_code": "forbidden_message_type",
+                "error_code": "GUEST_MESSAGE_TYPE_NOT_ALLOWED",
                 "error": {"message": "Message type not allowed for guests."},
             },
         )

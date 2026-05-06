@@ -12,7 +12,12 @@ class GuestApiHttpError(BaseModel):
 
     status: Literal["error"] = "error"
     message: str = Field(description="Human-readable summary.")
-    error_code: str = Field(description="Stable code, e.g. `exchange_consumed`, `NOT_FOUND`, `forbidden_message_type`.")
+    error_code: str = Field(
+        description=(
+            "Stable code, e.g. `exchange_consumed`, `NOT_FOUND`, "
+            "`PERMISSION_MANUAL_DISABLED`, `GUEST_MESSAGE_TYPE_NOT_ALLOWED`."
+        )
+    )
     error: dict[str, str] = Field(
         default_factory=dict,
         description="Always includes at least `message` mirroring the top-level summary.",

@@ -2,6 +2,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
@@ -9,7 +10,9 @@ from app.crud import message as message_crud
 from app.crud import owner as owner_crud
 from app.core.security import get_current_user
 from app.domain.message_types import CanonicalMessageType, MessageScope, normalize_message_type, type_category, type_scope
+from app.models import ZoneMessageEvent
 from app.services import guest_api_service
+from app.services import guest_access_service
 from app.services.access_policy import can_message_owner
 
 router = APIRouter(prefix="/messages", tags=["messages"])
@@ -242,6 +245,8 @@ async def _list_zone_messages_for_owner(
     *,
     owner_id: int,
     other_owner_id: int | None,
+    guest_id: str | None,
+    zone_id: str | None,
     skip: int,
     limit: int,
     current_user: dict,
@@ -259,6 +264,74 @@ async def _list_zone_messages_for_owner(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Owner not found",
         )
+
+    gid = (guest_id or "").strip()
+    zid = (zone_id or "").strip()
+    if gid:
+        if not zid:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error_code": "MISSING_ZONE_FOR_GUEST",
+                    "message": "zone_id is required when guest_id is provided.",
+                },
+            )
+        if not guest_access_service.can_manage_zone_guest_requests(db, owner, zid):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error_code": "FORBIDDEN",
+                    "message": "You are not allowed to view guest access thread for this zone.",
+                },
+            )
+        row = guest_access_service.get_guest_access_session_by_guest_id(db, gid)
+        if not row or row.zone_id != zid:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error_code": "GUEST_NOT_FOUND",
+                    "message": "Guest session not found for this zone.",
+                },
+            )
+        q = (
+            db.query(ZoneMessageEvent)
+            .filter(
+                ZoneMessageEvent.zone_id == zid,
+                ZoneMessageEvent.type.in_(
+                    [CanonicalMessageType.PERMISSION.value, CanonicalMessageType.CHAT.value]
+                ),
+            )
+            .filter(
+                or_(
+                    ZoneMessageEvent.sender_guest_id == gid,
+                    ZoneMessageEvent.body_json["guest_id"].as_string() == gid,
+                )
+            )
+        )
+        if other_owner_id is not None:
+            q = q.filter(
+                or_(
+                    ZoneMessageEvent.sender_id == other_owner_id,
+                    ZoneMessageEvent.receiver_id == other_owner_id,
+                    ZoneMessageEvent.sender_id.is_(None),
+                )
+            )
+        rows = q.order_by(ZoneMessageEvent.created_at.desc()).offset(skip).limit(limit).all()
+        return [
+            ZoneMessageResponse(
+                id=event.id,
+                zone_id=event.zone_id,
+                sender_id=event.sender_id,
+                receiver_id=event.receiver_id,
+                type=event.type,
+                category=event.category.value,
+                scope=event.scope.value,
+                visibility=(MessageVisibilityEnum.PRIVATE if event.scope.value == "private" else MessageVisibilityEnum.PUBLIC),
+                message=event.text,
+                created_at=event.created_at,
+            )
+            for event in rows
+        ]
 
     if other_owner_id is not None:
         other_owner = owner_crud.get_owner(db, other_owner_id)
@@ -320,6 +393,8 @@ async def _list_zone_messages_for_owner(
 async def list_messages(
     owner_id: int = Query(..., ge=1),
     other_owner_id: int | None = Query(None, ge=1),
+    guest_id: str | None = Query(None, max_length=36),
+    zone_id: str | None = Query(None, min_length=1, max_length=100),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     current_user: dict = Depends(get_current_user),
@@ -328,6 +403,8 @@ async def list_messages(
     return await _list_zone_messages_for_owner(
         owner_id=owner_id,
         other_owner_id=other_owner_id,
+        guest_id=guest_id,
+        zone_id=zone_id,
         skip=skip,
         limit=limit,
         current_user=current_user,
@@ -343,6 +420,8 @@ async def list_messages(
 async def list_messages_trailing_slash(
     owner_id: int = Query(..., ge=1),
     other_owner_id: int | None = Query(None, ge=1),
+    guest_id: str | None = Query(None, max_length=36),
+    zone_id: str | None = Query(None, min_length=1, max_length=100),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     current_user: dict = Depends(get_current_user),
@@ -352,6 +431,8 @@ async def list_messages_trailing_slash(
     return await _list_zone_messages_for_owner(
         owner_id=owner_id,
         other_owner_id=other_owner_id,
+        guest_id=guest_id,
+        zone_id=zone_id,
         skip=skip,
         limit=limit,
         current_user=current_user,
