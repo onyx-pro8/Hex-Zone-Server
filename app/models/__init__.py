@@ -13,6 +13,7 @@ from app.models.zone_membership import ZoneMembership
 from app.models.access_schedule import AccessSchedule
 from app.models.guest_access_session import GuestAccessSession
 from app.models.guest_access_qr_token import GuestAccessQrToken
+from app.models.guest_access_qr_token_audit import GuestAccessQrTokenAudit
 
 __all__ = [
     "Owner",
@@ -29,4 +30,5 @@ __all__ = [
     "AccessSchedule",
     "GuestAccessSession",
     "GuestAccessQrToken",
+    "GuestAccessQrTokenAudit",
 ]

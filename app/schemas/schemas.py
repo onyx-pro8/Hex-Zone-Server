@@ -425,7 +425,8 @@ class ZoneMessageCreate(BaseModel):
     **Default:** persists a **`Message`** row (member ↔ member) when **`guest_id`** is omitted.
 
     **Guest thread:** set **`guest_id`** and **`zone_id`** (or **`zoneId`**) to append a **`ZoneMessageEvent`**
-    for **PERMISSION** or **CHAT** (same store as **`GET /api/guest/messages`**). Omit **`receiver_id`**.
+    for **CHAT** only (same store as **`GET /api/guest/messages`**). **PERMISSION** is system-generated.
+    Omit **`receiver_id`**.
     Send **`type`** or **`message_type`** (same semantics; **`type`** wins if both are present).
     """
 
@@ -442,7 +443,7 @@ class ZoneMessageCreate(BaseModel):
         max_length=64,
         description=(
             "Same as **`type`** when **`type`** is omitted (OpenAPI-visible alias used by Hex-Zone-Client "
-            "for **PERMISSION** / **CHAT** member→guest payloads)."
+            "for member→guest payloads)."
         ),
     )
     visibility: Optional[MessageVisibilityEnum] = Field(
@@ -457,7 +458,7 @@ class ZoneMessageCreate(BaseModel):
     guest_id: Optional[str] = Field(
         default=None,
         max_length=36,
-        description="When set with **zone_id**, creates a **PERMISSION**/**CHAT** **ZoneMessageEvent** for that guest (not **messages** table).",
+        description="When set with **zone_id**, creates a **CHAT** **ZoneMessageEvent** for that guest (not **messages** table).",
     )
     zone_id: Optional[str] = Field(
         default=None,
@@ -508,7 +509,7 @@ class ZoneMessageCreate(BaseModel):
                 },
                 {
                     "message": "Please proceed to reception.",
-                    "message_type": "PERMISSION",
+                    "message_type": "CHAT",
                     "visibility": "private",
                     "zone_id": "ZN-1XOJPP",
                     "guest_id": "019b2c3d-0000-7000-8000-000000000001",

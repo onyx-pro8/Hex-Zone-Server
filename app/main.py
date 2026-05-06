@@ -129,11 +129,11 @@ OPENAPI_TAGS = [
             "| Endpoint | Purpose |\n"
             "|----------|--------|\n"
             "| **`GET /api/guest/me`** | Profile: **`guest_id`**, **`display_name`**, **`zone_ids`**, **`allowed_message_types`**, **`expires_at`** |\n"
-            "| **`GET /api/guest/zones/{zone_id}/peers`** | Hosts/staff (**`owner_id`**) to open PERMISSION/CHAT threads |\n"
+            "| **`GET /api/guest/zones/{zone_id}/peers`** | Hosts/staff (**`owner_id`**) available for guest CHAT |\n"
             "| **`GET /api/guest/zones/{zone_id}/dashboard`** | Optional welcome copy and links |\n"
             "| **`GET /api/guest/messages`** | Thread with **`with_owner_id`** (member **`owners.id`**) |\n"
-            "| **`POST /api/guest/messages`** | Guest → member **CHAT** or **PERMISSION** (**`to_owner_id`**) |\n\n"
-            "Allowed message types default to **PERMISSION** and **CHAT** in the minted JWT. Errors use **`{ \"status\":\"error\", \"message\", \"error_code\" }`**."
+            "| **`POST /api/guest/messages`** | Guest → member **CHAT** only (**`to_owner_id`**) |\n\n"
+            "Allowed message types are **CHAT** only in the minted JWT. Errors use **`{ \"status\":\"error\", \"message\", \"error_code\" }`**."
         ),
     },
 ]

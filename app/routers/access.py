@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
@@ -17,12 +18,23 @@ from app.database import get_db
 from app.models import GuestAccessSession
 from app.models.owner import Owner, OwnerRole
 from app.schemas.access_guest import (
+    AccessPermissionResponseData,
+    AccessPermissionResponseEnvelope,
+    AccessSessionPollData,
+    AccessSessionPollEnvelope,
     GuestAccessHttpError,
     GuestAccessQrLinkResponse,
     GuestAccessSessionListItem,
     GuestAdminDecisionResponse,
     GuestArrivalRequest,
     GuestQrTokenCreate,
+    GuestRequestDecisionData,
+    GuestRequestDecisionEnvelope,
+    GuestRequestListContractEnvelope,
+    GuestRequestListItemContract,
+    PrimaryGuestQrRotateRequest,
+    PrimaryGuestQrTokenData,
+    PrimaryGuestQrTokenEnvelope,
     GuestQrTokenCreatedResponse,
     GuestQrTokenLinkBundle,
     GuestQrTokenListItem,
@@ -42,6 +54,7 @@ from app.services import guest_access_qr, guest_access_qr_token_service, guest_a
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
+_GUEST_NAME_ALLOWED_RE = re.compile(r"^[A-Za-z0-9 .,'-]+$")
 
 router = APIRouter(prefix="/api/access", tags=["access"])
 
@@ -58,7 +71,7 @@ then:
 - **EXPECTED**: persist a guest session, write a PERMISSION zone event, push WebSocket **`guest_is_here`**
   to the schedule creator (and optionally all zone administrators when `notify_member_assist` is set on the schedule).
 - **UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`** to all active owners
-  sharing **zone_id**, and record a CHAT-shaped zone event as an admin↔guest thread anchor.
+  sharing **zone_id**, and record a PERMISSION zone event for request/decision history.
 
 **Response** includes **`guest_id`** (poll path) and **`zone_id`** (use as **`zone_id`** query on
 `GET /api/access/session/{guest_id}` when the client does not already have **`zid`** from the URL).
@@ -77,6 +90,26 @@ def _client_ip(request: Request) -> str:
     if request.client:
         return request.client.host
     return "unknown"
+
+
+def _sanitize_guest_name_or_422(raw_name: str) -> str:
+    normalized = " ".join((raw_name or "").strip().split())
+    if not normalized:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error_code": "INVALID_GUEST_NAME", "message": "guest_name is required."},
+        )
+    if len(normalized) > 255:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error_code": "INVALID_GUEST_NAME", "message": "guest_name is too long."},
+        )
+    if not _GUEST_NAME_ALLOWED_RE.match(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error_code": "INVALID_GUEST_NAME", "message": "guest_name contains unsupported characters."},
+        )
+    return normalized
 
 
 def _require_guest_qr_administrator(db: Session, current_user: dict, zone_id: str) -> Owner:
@@ -103,9 +136,65 @@ def _require_guest_qr_administrator(db: Session, current_user: dict, zone_id: st
     return owner
 
 
+def _primary_token_contract_payload(row) -> PrimaryGuestQrTokenData:
+    path = guest_access_qr.guest_access_path_with_guest_token(row.token, zone_id=row.zone_id, event_id=None)
+    url = guest_access_qr.guest_access_absolute_url_with_guest_token(row.token, zone_id=row.zone_id, event_id=None)
+    return PrimaryGuestQrTokenData(
+        id=row.id,
+        zone_id=row.zone_id,
+        token_suffix=row.token[-6:] if len(row.token) >= 6 else row.token,
+        url=url,
+        path_with_query=path,
+        revoked_at=row.revoked_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/qr-tokens/primary", response_model=PrimaryGuestQrTokenEnvelope, status_code=status.HTTP_200_OK)
+async def get_or_create_primary_guest_qr_token(
+    zone_id: str = Query(..., min_length=1, max_length=100),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+    result = guest_access_qr_token_service.get_or_create_primary_guest_qr_token(db, owner, zone_id=zone_id)
+    if result.get("error"):
+        raise HTTPException(status_code=result["http_status"], detail={"error_code": result["error"], "message": result["message"]})
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+    return PrimaryGuestQrTokenEnvelope(data=_primary_token_contract_payload(row))
+
+
+@router.post("/qr-tokens/primary/rotate", response_model=PrimaryGuestQrTokenEnvelope, status_code=status.HTTP_200_OK)
+async def rotate_primary_guest_qr_token(
+    payload: PrimaryGuestQrRotateRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+    result = guest_access_qr_token_service.rotate_primary_guest_qr_token(
+        db,
+        owner,
+        zone_id=payload.zone_id,
+        reason=payload.reason,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=result["http_status"], detail={"error_code": result["error"], "message": result["message"]})
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+    return PrimaryGuestQrTokenEnvelope(data=_primary_token_contract_payload(row))
+
+
 @router.post(
     "/permission",
-    response_model=GuestScanResponse,
+    response_model=AccessPermissionResponseEnvelope,
     status_code=status.HTTP_200_OK,
     summary=_PERM_SUMMARY,
     description=_PERM_DESCRIPTION.strip(),
@@ -115,12 +204,12 @@ def _require_guest_qr_administrator(db: Session, current_user: dict, zone_id: st
     ),
     responses={
         status.HTTP_404_NOT_FOUND: {
-            "description": "Unknown zone (**INVALID_ZONE**) or unknown guest QR token (**INVALID_TOKEN**).",
+            "description": "Unknown zone (**INVALID_ZONE**) or unknown guest QR token (**INVALID_GUEST_TOKEN**).",
             "model": GuestAccessHttpError,
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
             "description": (
-                "Validation failure, **NO_ZONE_ADMIN**, **ZONE_MISMATCH**, **EVENT_MISMATCH**, "
+                "Validation failure, **NO_ZONE_ADMIN**, **TOKEN_ZONE_MISMATCH**, **EVENT_MISMATCH**, "
                 "or related errors; see `error_code` in body."
             ),
             "model": GuestAccessHttpError,
@@ -176,7 +265,7 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={
-                    "error_code": "ZONE_MISMATCH",
+                    "error_code": "TOKEN_ZONE_MISMATCH",
                     "message": "zone_id does not match the guest QR token.",
                 },
             )
@@ -205,10 +294,12 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
     lat = payload.location.lat if payload.location else None
     lng = payload.location.lng if payload.location else None
 
+    guest_name = _sanitize_guest_name_or_422(payload.guest_name)
+
     result = guest_access_service.process_guest_arrival(
         db,
         zone_id=effective_zone_id,
-        guest_name=payload.guest_name,
+        guest_name=guest_name,
         event_id=effective_event_id,
         device_id=payload.device_id,
         latitude=lat,
@@ -244,7 +335,7 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
     for user_ids, event_payload in result.get("ws_unexpected_guest") or []:
         await ws_manager.broadcast_to_users(user_ids, "unexpected_guest", event_payload)
 
-    return GuestScanResponse.model_validate(gr)
+    return AccessPermissionResponseEnvelope(data=AccessPermissionResponseData.model_validate(gr))
 
 
 @router.get(
@@ -379,6 +470,7 @@ async def create_guest_access_qr_token(
         event_id=payload.event_id,
         label=payload.label,
         max_uses=payload.max_uses,
+        is_primary=bool(payload.is_primary),
     )
     if result.get("error"):
         raise HTTPException(
@@ -612,7 +704,7 @@ async def guest_access_qr_token_png(
 
 @router.get(
     "/session/{guest_id}",
-    response_model=GuestSessionPollResponse,
+    response_model=AccessSessionPollEnvelope,
     response_model_exclude_none=True,
     status_code=status.HTTP_200_OK,
     summary="Poll guest session status",
@@ -621,9 +713,8 @@ async def guest_access_qr_token_png(
         "`POST /api/access/permission`. "
         "**`zone_id`** should match arrival (invite **`zid`**, **`gt`** QR `zid`, or **`zone_id`** in the permission response); "
         "when omitted the server resolves **guest_id** alone (opaque UUID).\n\n"
-        "Each response includes **`status`** (EXPECTED | UNEXPECTED | APPROVED | REJECTED) and **`approval_status`** "
-        "(PENDING | APPROVED | REJECTED). Use **`approval_status`** for simple tri-state UIs; **`status`** distinguishes "
-        "scheduled (**EXPECTED**) vs walk-in (**UNEXPECTED**) before resolution.\n\n"
+        "Each response includes tri-state **`status`** only: **PENDING** | **APPROVED** | **REJECTED**. "
+        "Unexpected + pending maps to **PENDING**; expected or approved maps to **APPROVED**.\n\n"
         "When **status** is **APPROVED** (unexpected guest approved by an administrator), a valid unused "
         "**`exchange_code`** plus **`exchange_expires_at`** may appear — single-use for **`POST /api/access/guest-session`** "
         "(TTL from **`GUEST_ACCESS_EXCHANGE_TTL_MINUTES`**). Omitted if consumed, expired, or not approved."
@@ -664,7 +755,20 @@ async def guest_session_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error_code": "NOT_FOUND", "message": "Unknown guest session."},
         )
-    return GuestSessionPollResponse.model_validate(guest_access_service.guest_session_public_view(row))
+    view = guest_access_service.guest_session_public_view(row)
+    if view["status"] == "UNEXPECTED":
+        mapped_status = "PENDING"
+    elif view["status"] == "EXPECTED":
+        mapped_status = "APPROVED"
+    else:
+        mapped_status = view["status"]
+    data = AccessSessionPollData(
+        status=mapped_status,
+        message=view.get("message"),
+        exchange_code=view.get("exchange_code"),
+        exchange_expires_at=view.get("exchange_expires_at"),
+    )
+    return AccessSessionPollEnvelope(data=data)
 
 
 @router.post(
@@ -759,7 +863,7 @@ async def guest_session_exchange(
                 guest_id=row.guest_id,
                 display_name=row.guest_name,
                 zone_ids=[row.zone_id],
-                allowed_message_types=["PERMISSION", "CHAT"],
+                allowed_message_types=["CHAT"],
             ),
         ),
     )
@@ -767,7 +871,7 @@ async def guest_session_exchange(
 
 @router.get(
     "/guest-requests",
-    response_model=GuestRequestListEnvelope,
+    response_model=GuestRequestListContractEnvelope,
     status_code=status.HTTP_200_OK,
     operation_id="access_list_guest_requests",
     summary="List guest access sessions (member JWT)",
@@ -784,7 +888,7 @@ async def guest_session_exchange(
         "**`data`** may be empty when no sessions match filters (not an error).\n\n"
         "Returns **`guest_access_sessions`** newest **`created_at`** first. Each **`guest_id`** matches "
         "**`POST /api/access/permission`**, **`GET /api/access/session/{guest_id}`**, and "
-        "**`POST /messages`** when posting **PERMISSION** / **CHAT** with **`guest_id`** + **`zone_id`** "
+        "**`POST /messages`** when posting **CHAT** with **`guest_id`** + **`zone_id`** "
         "(persists **`ZoneMessageEvent`** for **`GET /api/guest/messages`**).\n\n"
         "**Legacy:** **`GET /message-feature/access/guest-requests`** returns the same rows as a **raw JSON array** "
         "(no envelope).\n\n"
@@ -846,6 +950,14 @@ async def list_guest_requests_for_access_api(
             detail={"error_code": "NOT_FOUND", "message": "Owner not found"},
         )
     zid = zone_id.strip()
+    if viewer.role != OwnerRole.ADMINISTRATOR or viewer.zone_id != zid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "FORBIDDEN",
+                "message": "Administrator role is required for this zone.",
+            },
+        )
     if not guest_access_service.can_manage_zone_guest_requests(db, viewer, zid):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -862,10 +974,22 @@ async def list_guest_requests_for_access_api(
         pending_only=pending_only,
         status=filter_status,
     )
-    data = [
-        GuestAccessSessionListItem.model_validate(guest_access_service.serialize_guest_session_row(r)) for r in rows
-    ]
-    return GuestRequestListEnvelope(status="success", data=data)
+    data = []
+    for r in rows:
+        row_status = "ARRIVED" if r.kind == "expected" else ("PENDING" if r.resolution == "pending" else str(r.resolution or "").upper())
+        data.append(
+            GuestRequestListItemContract(
+                id=str(r.id),
+                guest_id=r.guest_id,
+                zone_id=r.zone_id,
+                guest_name=r.guest_name,
+                status=row_status,
+                expectation=r.kind,
+                created_at=r.created_at,
+                hid=r.device_id,
+            )
+        )
+    return GuestRequestListContractEnvelope(status="success", data=data)
 
 
 @router.post(
@@ -878,8 +1002,8 @@ async def list_guest_requests_for_access_api(
         "**payload.zone_id**. Only **`unexpected`** sessions in **`pending`** can be approved.\n\n"
         "On success, mints a one-time **`exchange_code`** (see **`GET /api/access/session/{guest_id}`**) "
         "for **`POST /api/access/guest-session`**.\n\n"
-        "**Dashboard SPA alternative:** **`POST /message-feature/access/guest-requests/{guest_id}/approve`** "
-        "with **`guest_id`** in the path (server infers **`zone_id`** from the persisted session; optional **`?zone_id=`** legacy)."
+        "**Dashboard SPA alternative:** **`POST /message-feature/access/guest-requests/{requestId}/approve`** "
+        "with request row **id** in the path (server infers **`zone_id`** from the persisted session; optional **`?zone_id=`** legacy)."
     ),
     response_description="Resolution copied from audit message; guest learns via polling.",
     responses={
@@ -930,8 +1054,8 @@ async def approve_guest(
     description=(
         "Same authorization rules as **approve**. Sets resolution to **`rejected`**; guest observes "
         "via **`GET /api/access/session/{guest_id}`**.\n\n"
-        "**Dashboard SPA alternative:** **`POST /message-feature/access/guest-requests/{guest_id}/reject`** "
-        "(path **`guest_id`**, inferred zone; optional **`?zone_id=`** legacy)."
+        "**Dashboard SPA alternative:** **`POST /message-feature/access/guest-requests/{requestId}/reject`** "
+        "(path request row **id**, inferred zone; optional **`?zone_id=`** legacy)."
     ),
     response_description="Resolution payload for admin client.",
     responses={

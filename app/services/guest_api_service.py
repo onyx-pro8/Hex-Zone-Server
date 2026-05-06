@@ -16,7 +16,13 @@ from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
-GUEST_ALLOWED_TYPES = frozenset({CanonicalMessageType.PERMISSION.value, CanonicalMessageType.CHAT.value})
+GUEST_VISIBLE_TYPES = frozenset(
+    {
+        CanonicalMessageType.CHAT.value,
+        CanonicalMessageType.PERMISSION.value,
+    }
+)
+GUEST_WRITABLE_TYPES = frozenset({CanonicalMessageType.CHAT.value})
 
 
 def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) -> bool:
@@ -98,7 +104,7 @@ def list_guest_zone_messages(
     q = (
         db.query(ZoneMessageEvent)
         .filter(ZoneMessageEvent.zone_id == zone_id.strip())
-        .filter(ZoneMessageEvent.type.in_(tuple(GUEST_ALLOWED_TYPES)))
+        .filter(ZoneMessageEvent.type.in_(tuple(GUEST_VISIBLE_TYPES)))
         .filter(_guest_visible_message_predicate(guest_id, with_owner_id))
     )
     if before_created_at is not None and before_id:
@@ -179,7 +185,7 @@ def create_guest_zone_message(
     if not receiver:
         return None
 
-    if msg_type not in GUEST_ALLOWED_TYPES:
+    if msg_type not in GUEST_WRITABLE_TYPES:
         return {"__reject__": "forbidden_message_type"}
 
     if guest_type_blocked(db, receiver.id, msg_type):
@@ -253,8 +259,13 @@ def create_member_to_guest_zone_message(
     except ValueError:
         return {"__reject__": "invalid_type", "message": "Unsupported message type."}
 
-    if canonical.value not in GUEST_ALLOWED_TYPES:
-        return {"__reject__": "invalid_type", "message": "Only PERMISSION and CHAT are allowed for guest threads."}
+    if canonical == CanonicalMessageType.PERMISSION:
+        return {
+            "__reject__": "permission_manual_disabled",
+            "message": "PERMISSION messages are server-generated only for guest workflow transitions.",
+        }
+    if canonical.value not in GUEST_WRITABLE_TYPES:
+        return {"__reject__": "invalid_type", "message": "Only CHAT is allowed for guest threads."}
 
     display_text = (text or "").strip()
     if canonical == CanonicalMessageType.CHAT and not display_text:

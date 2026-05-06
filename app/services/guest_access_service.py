@@ -278,32 +278,11 @@ def process_guest_arrival(
             )
         )
 
-        chat_event = ZoneMessageEvent(
-            zone_id=zone_id,
-            sender_id=admin.id,
-            type=CanonicalMessageType.CHAT.value,
-            category=type_category(CanonicalMessageType.CHAT),
-            scope=type_scope(CanonicalMessageType.CHAT),
-            text=f"Guest chat: {guest_name.strip()}",
-            body_json={
-                "guest_id": guest_token,
-                "guest_name": guest_name.strip(),
-                "zone_id": zone_id,
-                "role": "guest_admin_thread",
-            },
-            metadata_json={
-                "guest_access_session_db_id": session_row.id,
-                "admin_owner_id": admin.id,
-            },
-        )
-        db.add(chat_event)
-
         perm_meta = {
             "flow": "qr_guest_arrival",
             "guest_id": guest_token,
             "schedule_match": False,
             "websocket_events": [{"name": "unexpected_guest", "targets": "zone_members"}],
-            "chat_anchor_event_id": chat_event.id,
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         }
         decision = "UNEXPECTED"
@@ -534,13 +513,13 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
 
     note = ZoneMessageEvent(
         zone_id=zone_id,
-        sender_id=acting_owner.id,
+        sender_id=None,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
         text="Guest access approved.",
         body_json={"guest_id": guest_id, "zone_id": zone_id, "resolution": "APPROVED"},
-        metadata_json={"flow": "guest_access_approve"},
+        metadata_json={"flow": "guest_access_approve", "acting_owner_id": acting_owner.id},
     )
     db.add(note)
     db.flush()
@@ -572,13 +551,13 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
 
     note = ZoneMessageEvent(
         zone_id=zone_id,
-        sender_id=acting_owner.id,
+        sender_id=None,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
         text="Guest access rejected.",
         body_json={"guest_id": guest_id, "zone_id": zone_id, "resolution": "REJECTED"},
-        metadata_json={"flow": "guest_access_reject"},
+        metadata_json={"flow": "guest_access_reject", "acting_owner_id": acting_owner.id},
     )
     db.add(note)
     db.flush()

@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
         "Persists **`Message`**; **`receiver_id`** required for private-scope types.\n\n"
         "**Member → guest (Access channel):** Bearer **member** JWT only. Send **`guest_id`** (from **`GET /api/access/guest-requests`** "
         "or **`POST /api/access/permission`**) and **`zone_id`** / **`zoneId`**. Body: **`message`**, **`message_type`** or **`type`**, "
-        "**`visibility`** (commonly **`private`**). Only **PERMISSION** and **CHAT** allowed with **`guest_id`**. "
+        "**`visibility`** (commonly **`private`**). Only **CHAT** is allowed with **`guest_id`**; "
+        "**PERMISSION** is server-generated only. "
         "Do **not** send **`receiver_id`**. Persists **`ZoneMessageEvent`**; guest reads via **`GET /api/guest/messages`** "
         "with **`with_owner_id`** = caller **`owners.id`**.\n\n"
         "OpenAPI schema **`ZoneMessageCreate`** includes Hex-Zone-Client examples."
@@ -86,12 +87,20 @@ async def create_message(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"error_code": "INVALID_MESSAGE_TYPE", "message": "Unsupported message type."},
             ) from exc
-        if guest_canonical not in (CanonicalMessageType.PERMISSION, CanonicalMessageType.CHAT):
+        if guest_canonical == CanonicalMessageType.PERMISSION:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={
-                    "error_code": "INVALID_MESSAGE_TYPE_FOR_GUEST",
-                    "message": "Only PERMISSION and CHAT may be sent with guest_id.",
+                    "error_code": "PERMISSION_MANUAL_DISABLED",
+                    "message": "PERMISSION messages are system-generated only for guest workflow transitions.",
+                },
+            )
+        if guest_canonical != CanonicalMessageType.CHAT:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error_code": "GUEST_MESSAGE_TYPE_NOT_ALLOWED",
+                    "message": "Guest thread messaging supports only CHAT.",
                 },
             )
         guest_result = guest_api_service.create_member_to_guest_zone_message(
@@ -114,6 +123,11 @@ async def create_message(
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={"error_code": "GUEST_NOT_FOUND", "message": msg},
+                )
+            if code == "permission_manual_disabled":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"error_code": "PERMISSION_MANUAL_DISABLED", "message": msg},
                 )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

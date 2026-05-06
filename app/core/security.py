@@ -42,7 +42,7 @@ def create_guest_access_token(
         "token_use": "guest_access",
         "typ": "guest_access",
         "zone_ids": zone_ids,
-        "allowed_message_types": ["PERMISSION", "CHAT"],
+        "allowed_message_types": ["CHAT"],
         "iat": datetime.utcnow(),
         "exp": expire,
         "jti": str(uuid.uuid4()),
@@ -139,7 +139,7 @@ async def get_current_guest(
     return {
         "guest_id": guest_id,
         "zone_ids": zone_ids,
-        "allowed_message_types": list(payload.get("allowed_message_types") or ["PERMISSION", "CHAT"]),
+        "allowed_message_types": list(payload.get("allowed_message_types") or ["CHAT"]),
         "jti": payload.get("jti"),
         "expires_at": expires_at,
     }

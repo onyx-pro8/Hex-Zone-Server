@@ -47,7 +47,7 @@ def _guest_zone_allowed(guest_ctx: dict, zone_id: str) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "message": "Guest token is not valid for this zone.",
-                "error_code": "ZONE_NOT_ALLOWED",
+                "error_code": "GUEST_NOT_AUTHORIZED_FOR_ZONE",
                 "error": {"message": "Guest token is not valid for this zone."},
             },
         )
@@ -61,7 +61,7 @@ def _guest_zone_allowed(guest_ctx: dict, zone_id: str) -> None:
     description=(
         "Returns profile and JWT expiry for the **guest_access** bearer issued by "
         "**`POST /api/access/guest-session`**. Use **`Authorization: Bearer <access_token>`**. "
-        "**`allowed_message_types`** mirrors the JWT claim (defaults to PERMISSION + CHAT)."
+        "**`allowed_message_types`** mirrors the JWT claim (defaults to CHAT-only)."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError, "description": "Missing/invalid token or wrong `token_use`."},
@@ -91,17 +91,17 @@ async def guest_me(
     allowed: list[str] = []
     for t in amt_raw:
         u = str(t).strip().upper()
-        if u in ("PERMISSION", "CHAT") and u not in allowed:
+        if u in ("CHAT",) and u not in allowed:
             allowed.append(u)
     if not allowed:
-        allowed = ["PERMISSION", "CHAT"]
+        allowed = ["CHAT"]
     return GuestMeResponse(
         status="success",
         data=GuestMeData(
             guest_id=row.guest_id,
             display_name=row.guest_name,
             zone_ids=guest_ctx["zone_ids"],
-            allowed_message_types=cast(list[Literal["PERMISSION", "CHAT"]], allowed),
+            allowed_message_types=cast(list[Literal["CHAT"]], allowed),
             expires_at=expires_at,
         ),
     )
@@ -119,7 +119,7 @@ async def guest_me(
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
-        status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError, "description": "`ZONE_NOT_ALLOWED` if zone not in token."},
+        status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError, "description": "`GUEST_NOT_AUTHORIZED_FOR_ZONE` if zone not in token."},
     },
 )
 async def guest_zone_peers(
@@ -232,20 +232,22 @@ async def guest_list_messages(
     response_model=GuestMessageCreatedResponse,
     response_model_by_alias=True,
     status_code=status.HTTP_201_CREATED,
-    summary="Send CHAT or PERMISSION to a zone member",
+    summary="Send CHAT to a zone member",
     description=(
-        "JSON body: **`zone_id`**, **`type`**, **`to_owner_id`**, optional **`text`** and **`msg`**. "
-        "Only **CHAT** and **PERMISSION** succeed; any other **`type`** (e.g. **SERVICE**) → **403** "
-        "**`forbidden_message_type`**. Recipient must be an active member of **`zone_id`** and pass block rules."
+        "JSON body: **`zone_id`**, **`type`**, **`to_owner_id`**, and **`text`**. "
+        "Only **CHAT** is allowed. PERMISSION and all other types are rejected."
     ),
     responses={
         status.HTTP_201_CREATED: {"description": "Created message (same item shape as **GET /messages**)."},
         status.HTTP_400_BAD_REQUEST: {"model": GuestApiHttpError, "description": "Validation (missing **zone_id**, **text**, etc.)."},
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
-        status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError, "description": "`forbidden_message_type`, blocks, or cannot receive."},
+        status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError, "description": "Blocked recipient or forbidden zone access."},
         status.HTTP_404_NOT_FOUND: {"model": GuestApiHttpError, "description": "Guest session or recipient not in zone."},
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Request body failed validation (FastAPI **`detail`** array; not the **`GuestApiHttpError`** envelope)."
+            "description": (
+                "Business validation errors such as **`PERMISSION_MANUAL_DISABLED`** or "
+                "**`GUEST_MESSAGE_TYPE_NOT_ALLOWED`**."
+            )
         },
     },
 )
@@ -258,25 +260,26 @@ async def guest_post_message(
     _guest_zone_allowed(guest_ctx, zone_id)
 
     msg_type = message.type.strip().upper()
-    if msg_type == CanonicalMessageType.CHAT.value:
-        text_s = (message.text or "").strip()
-        msg_dict = None
-    elif msg_type == CanonicalMessageType.PERMISSION.value:
-        text_s = (message.text or "").strip() or None
-        msg_dict = message.msg.model_dump(exclude_none=True) if message.msg else None
-    else:
-        text_s = None
-        msg_dict = None
-
-    if msg_type not in guest_api_service.GUEST_ALLOWED_TYPES:
+    if msg_type == CanonicalMessageType.PERMISSION.value:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
-                "message": "Message type not allowed for guests.",
-                "error_code": "forbidden_message_type",
-                "error": {"message": "Message type not allowed for guests."},
+                "message": "PERMISSION messages are system-generated only for guest workflow transitions.",
+                "error_code": "PERMISSION_MANUAL_DISABLED",
+                "error": {"message": "PERMISSION messages are system-generated only for guest workflow transitions."},
             },
         )
+    if msg_type != CanonicalMessageType.CHAT.value:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "Guest message type is not allowed.",
+                "error_code": "GUEST_MESSAGE_TYPE_NOT_ALLOWED",
+                "error": {"message": "Guest message type is not allowed."},
+            },
+        )
+    text_s = (message.text or "").strip()
+    msg_dict = None
 
     to_owner_id = message.to_owner_id
 

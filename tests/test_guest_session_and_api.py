@@ -69,15 +69,15 @@ async def test_guest_exchange_consumed_and_guest_apis(test_db, override_get_db):
             json={"zone_id": "zone-guest-1", "guest_name": "Walk-in Pat"},
         )
         assert perm.status_code == 200
-        guest_id = perm.json()["guest_id"]
-        zone_id = perm.json()["zone_id"]
+        guest_id = perm.json()["data"]["guest_id"]
+        zone_id = perm.json()["data"]["zone_id"]
 
         sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
         assert sess.status_code == 200
         sj = sess.json()
-        assert sj["status"] == "UNEXPECTED"
-        assert sj["approval_status"] == "PENDING"
-        assert "exchange_code" not in sj
+        assert sj["status"] == "success"
+        assert sj["data"]["status"] == "PENDING"
+        assert "exchange_code" not in sj["data"]
 
         ap = await client.post(
             "/api/access/approve",
@@ -88,9 +88,8 @@ async def test_guest_exchange_consumed_and_guest_apis(test_db, override_get_db):
 
         sess2 = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
         assert sess2.status_code == 200
-        body = sess2.json()
+        body = sess2.json()["data"]
         assert body["status"] == "APPROVED"
-        assert body["approval_status"] == "APPROVED"
         assert "exchange_code" in body and body["exchange_code"]
         assert "exchange_expires_at" in body and body["exchange_expires_at"]
         code = body["exchange_code"]
@@ -133,13 +132,26 @@ async def test_guest_exchange_consumed_and_guest_apis(test_db, override_get_db):
             headers={"Authorization": f"Bearer {guest_jwt}"},
             json={
                 "zone_id": zone_id,
+                "type": "PERMISSION",
+                "text": "manual permission",
+                "to_owner_id": admin_id,
+            },
+        )
+        assert bad_msg.status_code == 422
+        assert bad_msg.json().get("error_code") == "PERMISSION_MANUAL_DISABLED"
+
+        bad_msg = await client.post(
+            "/api/guest/messages",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+            json={
+                "zone_id": zone_id,
                 "type": "SERVICE",
                 "text": "nope",
                 "to_owner_id": admin_id,
             },
         )
-        assert bad_msg.status_code == 403
-        assert bad_msg.json().get("error_code") == "forbidden_message_type"
+        assert bad_msg.status_code == 422
+        assert bad_msg.json().get("error_code") == "GUEST_MESSAGE_TYPE_NOT_ALLOWED"
 
         chat = await client.post(
             "/api/guest/messages",
@@ -179,15 +191,15 @@ async def test_guest_chat_visible_to_recipient_row(test_db, override_get_db):
             "/api/access/permission",
             json={"zone_id": "zone-guest-2", "guest_name": "Visitor"},
         )
-        guest_id = perm.json()["guest_id"]
-        zone_id = perm.json()["zone_id"]
+        guest_id = perm.json()["data"]["guest_id"]
+        zone_id = perm.json()["data"]["zone_id"]
         await client.post(
             "/api/access/approve",
             headers={"Authorization": f"Bearer {admin_token}"},
             json={"guest_id": guest_id, "zone_id": zone_id},
         )
         sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
-        code = sess.json()["exchange_code"]
+        code = sess.json()["data"]["exchange_code"]
         gs = await client.post(
             "/api/access/guest-session",
             json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": code},
@@ -215,6 +227,46 @@ async def test_guest_chat_visible_to_recipient_row(test_db, override_get_db):
 
 
 @pytest.mark.asyncio
+async def test_guest_zone_scope_enforced_for_read_and_write(test_db, override_get_db):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        admin_id, admin_token = await _register_admin(client, zone_id="zone-guest-scope")
+        perm = await client.post(
+            "/api/access/permission",
+            json={"zone_id": "zone-guest-scope", "guest_name": "Scoped Visitor"},
+        )
+        guest_id = perm.json()["data"]["guest_id"]
+        zone_id = perm.json()["data"]["zone_id"]
+        await client.post(
+            "/api/access/approve",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
+        code = sess.json()["data"]["exchange_code"]
+        gs = await client.post(
+            "/api/access/guest-session",
+            json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": code},
+        )
+        guest_jwt = gs.json()["data"]["access_token"]
+
+        wrong_zone_read = await client.get(
+            "/api/guest/messages",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+            params={"zone_id": "other-zone"},
+        )
+        assert wrong_zone_read.status_code == 403
+        assert wrong_zone_read.json()["error_code"] == "GUEST_NOT_AUTHORIZED_FOR_ZONE"
+
+        wrong_zone_write = await client.post(
+            "/api/guest/messages",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+            json={"zone_id": "other-zone", "type": "CHAT", "text": "Nope", "to_owner_id": admin_id},
+        )
+        assert wrong_zone_write.status_code == 403
+        assert wrong_zone_write.json()["error_code"] == "GUEST_NOT_AUTHORIZED_FOR_ZONE"
+
+
+@pytest.mark.asyncio
 async def test_member_list_guest_requests_access_api(test_db, override_get_db):
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = f"zone-gr-{uuid.uuid4().hex[:8]}"
@@ -225,7 +277,7 @@ async def test_member_list_guest_requests_access_api(test_db, override_get_db):
             json={"zone_id": zone_id, "guest_name": "List Me"},
         )
         assert perm.status_code == 200
-        guest_id = perm.json()["guest_id"]
+        guest_id = perm.json()["data"]["guest_id"]
 
         no_auth = await client.get("/api/access/guest-requests", params={"zone_id": zone_id})
         assert no_auth.status_code == 401
@@ -262,7 +314,7 @@ async def test_member_list_guest_requests_access_api(test_db, override_get_db):
         )
         assert ap.status_code == 200
         sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
-        code = sess.json()["exchange_code"]
+        code = sess.json()["data"]["exchange_code"]
         gs = await client.post(
             "/api/access/guest-session",
             json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": code},

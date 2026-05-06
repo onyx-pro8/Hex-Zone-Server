@@ -41,6 +41,7 @@ class GuestArrivalRequest(BaseModel):
     )
     device_id: str | None = Field(default=None, max_length=255, description="Optional client device fingerprint.")
     location: GuestArrivalLocation | None = Field(default=None, description="Optional coordinates.")
+    sig: str | None = Field(default=None, max_length=512, description="Optional signature for client integrity checks.")
 
     @model_validator(mode="after")
     def require_zone_or_guest_token(self):
@@ -297,6 +298,13 @@ class GuestQrTokenCreate(BaseModel):
     event_id: str | None = Field(default=None, max_length=100, description="Bind arrivals to this event id.")
     label: str | None = Field(default=None, max_length=255, description="Dashboard label.")
     max_uses: int | None = Field(default=None, ge=1, description="Cap successful arrivals; omit for unlimited.")
+    is_primary: bool | None = Field(
+        default=None,
+        description=(
+            "Legacy compatibility flag. Primary flow should use `/api/access/qr-tokens/primary` endpoints. "
+            "If true, expiration fields are not allowed and are rejected."
+        ),
+    )
 
     @model_validator(mode="after")
     def expires_exclusive(self):
@@ -312,7 +320,7 @@ class GuestQrTokenListItem(BaseModel):
     zone_id: str
     event_id: str | None = None
     label: str | None = None
-    expires_at: datetime
+    expires_at: datetime | None
     revoked_at: datetime | None = None
     max_uses: int | None = None
     use_count: int = 0
@@ -426,6 +434,84 @@ class GuestSessionPollResponse(BaseModel):
             ]
         }
     )
+
+
+class SuccessEnvelope(BaseModel):
+    status: Literal["success"] = "success"
+    data: dict
+
+
+class PrimaryGuestQrTokenData(BaseModel):
+    id: int
+    zone_id: str
+    token_suffix: str
+    url: str | None
+    path_with_query: str
+    revoked_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PrimaryGuestQrTokenEnvelope(BaseModel):
+    status: Literal["success"] = "success"
+    data: PrimaryGuestQrTokenData
+
+
+class PrimaryGuestQrRotateRequest(BaseModel):
+    zone_id: str = Field(..., min_length=1, max_length=100)
+    reason: str | None = Field(default=None, max_length=255)
+
+
+class AccessPermissionResponseData(BaseModel):
+    status: Literal["EXPECTED", "UNEXPECTED"]
+    message: str
+    guest_id: str
+    zone_id: str
+
+
+class AccessPermissionResponseEnvelope(BaseModel):
+    status: Literal["success"] = "success"
+    data: AccessPermissionResponseData
+
+
+class AccessSessionPollData(BaseModel):
+    status: Literal["PENDING", "APPROVED", "REJECTED"]
+    message: str | None = None
+    exchange_code: str | None = None
+    exchange_expires_at: str | None = None
+
+
+class AccessSessionPollEnvelope(BaseModel):
+    status: Literal["success"] = "success"
+    data: AccessSessionPollData
+
+
+class GuestRequestListItemContract(BaseModel):
+    id: str
+    guest_id: str
+    zone_id: str
+    guest_name: str
+    status: Literal["PENDING", "APPROVED", "REJECTED", "ARRIVED"]
+    expectation: Literal["expected", "unexpected"]
+    created_at: datetime
+    hid: str | None = None
+
+
+class GuestRequestListContractEnvelope(BaseModel):
+    status: Literal["success"] = "success"
+    data: list[GuestRequestListItemContract]
+
+
+class GuestRequestDecisionData(BaseModel):
+    id: str
+    status: Literal["APPROVED", "REJECTED"]
+    zone_id: str
+    updated_at: datetime
+
+
+class GuestRequestDecisionEnvelope(BaseModel):
+    status: Literal["success"] = "success"
+    data: GuestRequestDecisionData
 
 
 class GuestSessionExchangeRequest(BaseModel):

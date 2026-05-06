@@ -26,8 +26,8 @@ class GuestSessionGuestProfile(BaseModel):
     guest_id: str
     display_name: str
     zone_ids: list[str] = Field(description="Zones this token may access (subset of approval).")
-    allowed_message_types: list[Literal["PERMISSION", "CHAT"]] = Field(
-        default=["PERMISSION", "CHAT"],
+    allowed_message_types: list[Literal["CHAT"]] = Field(
+        default=["CHAT"],
         description="Types this token may send via **POST /api/guest/messages**.",
     )
 
@@ -58,7 +58,7 @@ class GuestSessionExchangeResponse(BaseModel):
                             "guest_id": "550e8400-e29b-41d4-a716-446655440000",
                             "display_name": "Walk-in Pat",
                             "zone_ids": ["ZN-DEMO"],
-                            "allowed_message_types": ["PERMISSION", "CHAT"],
+                                "allowed_message_types": ["CHAT"],
                         },
                     },
                 }
@@ -74,9 +74,9 @@ class GuestMeData(BaseModel):
     guest_id: str = Field(description="Opaque id from **`POST /api/access/permission`**; matches **`guest_access_sessions.guest_id`**.")
     display_name: str = Field(description="Name captured at check-in.")
     zone_ids: list[str] = Field(description="Shared zone ids this JWT may access (query **`zone_id`** on nested routes must be listed here).")
-    allowed_message_types: list[Literal["PERMISSION", "CHAT"]] = Field(
-        default_factory=lambda: ["PERMISSION", "CHAT"],
-        description="Subset of Access-channel types allowed for **`POST /api/guest/messages`**; minted JWT defaults to both.",
+    allowed_message_types: list[Literal["CHAT"]] = Field(
+        default_factory=lambda: ["CHAT"],
+        description="Subset of Access-channel types allowed for **`POST /api/guest/messages`** (CHAT only).",
     )
     expires_at: str = Field(description="ISO-8601 UTC from JWT **`exp`** (guest token lifetime sets **`GET /api/guest/me`** refresh cadence).")
 
@@ -94,7 +94,7 @@ class GuestMeResponse(BaseModel):
                         "guest_id": "019b2c3d-0000-7000-8000-000000000001",
                         "display_name": "Walk-in Pat",
                         "zone_ids": ["ZN-DEMO"],
-                        "allowed_message_types": ["PERMISSION", "CHAT"],
+                        "allowed_message_types": ["CHAT"],
                         "expires_at": "2026-05-04T14:00:00Z",
                     },
                 }
@@ -217,8 +217,7 @@ class GuestPermissionMsgPayload(BaseModel):
 class GuestMessagePostRequest(BaseModel):
     """Request body for **POST /api/guest/messages**.
 
-    Use **`type`**: **`CHAT`** or **`PERMISSION`** only for successful delivery. Other values (e.g. **`SERVICE`**)
-    are accepted by validation but return **HTTP 403** `forbidden_message_type` from the server.
+    Use **`type`**: **`CHAT`** only for successful delivery. All other values are rejected by policy.
     """
 
     zone_id: str = Field(..., min_length=1, max_length=100)
@@ -226,29 +225,23 @@ class GuestMessagePostRequest(BaseModel):
         ...,
         min_length=1,
         max_length=32,
-        description="Message type: only **CHAT** and **PERMISSION** succeed; others → **403**.",
+        description="Message type: only **CHAT** is allowed; all others are rejected.",
     )
     text: str | None = Field(
         default=None,
         max_length=4000,
-        description="Required for **CHAT**; optional for **PERMISSION**.",
+        description="Required for **CHAT**.",
     )
     to_owner_id: int = Field(..., ge=1, description="Recipient **owners.id** in this zone.")
     msg: GuestPermissionMsgPayload | None = Field(
         default=None,
-        description="Optional for **PERMISSION**; merged into persisted message **body**.",
+        description="Optional extra payload merged into persisted message **body**.",
     )
 
     model_config = ConfigDict(
         json_schema_extra={
             "examples": [
                 {"zone_id": "ZN-1", "type": "CHAT", "text": "Hello", "to_owner_id": 42},
-                {
-                    "zone_id": "ZN-1",
-                    "type": "PERMISSION",
-                    "to_owner_id": 42,
-                    "msg": {"guest_name": "Pat", "event_id": "EVT-1"},
-                },
             ]
         }
     )

@@ -7,11 +7,14 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user
 from app.crud import owner as owner_crud
 from app.database import get_db
-from app.models import AccessSchedule, MessageBlock, ZoneMessageEvent
+from app.models import AccessSchedule, GuestAccessSession, MessageBlock, ZoneMessageEvent
+from app.models.owner import OwnerRole
 from app.schemas.access_guest import (
     GuestAccessHttpError,
     GuestAccessSessionListItem,
     GuestAdminDecisionResponse,
+    GuestRequestDecisionData,
+    GuestRequestDecisionEnvelope,
 )
 from app.schemas.message_feature import (
     AccessScheduleCreate,
@@ -60,23 +63,13 @@ async def create_geo_message(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sender owner not found")
 
     if payload.type.value == "PERMISSION":
-        permission_result = permission_service.process_permission_message(db, sender, payload)
-        db.commit()
-        await ws_manager.broadcast_to_users(
-            permission_result["delivered_owner_ids"],
-            "PERMISSION_MESSAGE",
-            permission_result,
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "PERMISSION_MANUAL_DISABLED",
+                "message": "PERMISSION messages are server-generated only for guest workflow transitions.",
+            },
         )
-        return {
-            "id": "permission-flow",
-            "type": "PERMISSION",
-            "category": "Access",
-            "scope": "private",
-            "zone_ids": [payload.to or sender.zone_id],
-            "delivered_owner_ids": permission_result["delivered_owner_ids"],
-            "blocked_owner_ids": [],
-            "created_at": payload.tt.isoformat(),
-        }
 
     try:
         result = message_feature_service.create_geo_propagated_message(db, sender, payload)
@@ -110,23 +103,13 @@ async def create_geo_message_with_api_key(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
     if payload.type.value == "PERMISSION":
-        permission_result = permission_service.process_permission_message(db, sender, payload)
-        db.commit()
-        await ws_manager.broadcast_to_users(
-            permission_result["delivered_owner_ids"],
-            "PERMISSION_MESSAGE",
-            permission_result,
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "PERMISSION_MANUAL_DISABLED",
+                "message": "PERMISSION messages are server-generated only for guest workflow transitions.",
+            },
         )
-        return {
-            "id": "permission-flow",
-            "type": "PERMISSION",
-            "category": "Access",
-            "scope": "private",
-            "zone_ids": [payload.to or sender.zone_id],
-            "delivered_owner_ids": permission_result["delivered_owner_ids"],
-            "blocked_owner_ids": [],
-            "created_at": payload.tt.isoformat(),
-        }
 
     try:
         result = message_feature_service.create_geo_propagated_message(db, sender, payload)
@@ -273,6 +256,14 @@ async def list_guest_requests(
     if not viewer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
     zid = zone_id.strip()
+    if viewer.role != OwnerRole.ADMINISTRATOR or viewer.zone_id != zid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "FORBIDDEN",
+                "message": "Administrator role is required for this zone.",
+            },
+        )
     if not guest_access_service.can_manage_zone_guest_requests(db, viewer, zid):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -325,9 +316,8 @@ _LEGACY_ZONE_QUERY = Query(
     min_length=1,
     max_length=100,
     description=(
-        "Optional legacy duplicate of the session zone; omit in normal SPA/dashboard flows "
-        "(server loads **zone_id** from **`guest_access_sessions`** for **guest_id**). "
-        "If sent, must exactly match that row or the call fails with **`403`**."
+        "Optional legacy zone id query parameter. When provided, it must exactly match "
+        "the zone on the stored guest request."
     ),
 )
 
@@ -345,18 +335,18 @@ _GUEST_ID_PATH = Path(
 
 
 @router.post(
-    "/access/guest-requests/{guest_id}/approve",
-    response_model=GuestAdminDecisionResponse,
+    "/access/guest-requests/{requestId}/approve",
+    response_model=GuestRequestDecisionEnvelope,
     status_code=status.HTTP_200_OK,
     summary="Approve unexpected guest (dashboard path)",
     description=(
         "**Bearer** JWT. Equivalent to **`POST /api/access/approve`**: resolves **zone_id** from "
-        "**`guest_access_sessions`** keyed by **path `guest_id`**, then verifies the caller is an "
+        "**`guest_access_sessions`** keyed by **path `requestId`** (session table row id), then verifies the caller is an "
         "**administrator** for that zone and applies approval. "
         "**`?zone_id=`** is legacy-only — omit unless you intentionally echo the zone; mismatched **`zone_id`** → **`403`**."
     ),
     response_description=(
-        "`APPROVED` decision; guest sees status via **`GET /api/access/session/{guest_id}`** (same **guest_id**)."
+        "`APPROVED` decision envelope with request id and zone metadata."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
@@ -370,7 +360,7 @@ _GUEST_ID_PATH = Path(
         },
         status.HTTP_404_NOT_FOUND: {
             "description": (
-                "Unknown **guest_id** → **`NOT_FOUND`** with **`error_code`** / **`message`**. "
+                "Unknown **requestId** → **`ACCESS_REQUEST_NOT_FOUND`** with **`error_code`** / **`message`**. "
                 "Missing JWT **owner** may return unstructured **`detail`** (string)."
             ),
         },
@@ -381,7 +371,7 @@ _GUEST_ID_PATH = Path(
     },
 )
 async def approve_guest_request_message_feature(
-    guest_id: str = _GUEST_ID_PATH,
+    requestId: str = _GUEST_ID_PATH,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
     zone_id: str | None = _LEGACY_ZONE_QUERY,
@@ -390,15 +380,21 @@ async def approve_guest_request_message_feature(
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
 
-    effective_zone_id = _effective_zone_for_guest_admin_action(
-        db, guest_id=guest_id, zone_id_query=zone_id
-    )
+    session_row = db.get(GuestAccessSession, int(requestId)) if requestId.isdigit() else None
+    if not session_row:
+        session_row = guest_access_service.get_guest_access_session_by_guest_id(db, requestId)
+    if not session_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "ACCESS_REQUEST_NOT_FOUND", "message": "Guest access request not found."},
+        )
+    effective_zone_id = _effective_zone_for_guest_admin_action(db, guest_id=session_row.guest_id, zone_id_query=zone_id)
 
     result = guest_access_service.approve_guest(
         db,
         acting_owner=owner,
         zone_id=effective_zone_id,
-        guest_id=guest_id.strip(),
+        guest_id=session_row.guest_id.strip(),
     )
     if result.get("error"):
         raise HTTPException(
@@ -406,20 +402,27 @@ async def approve_guest_request_message_feature(
             detail={"error_code": result["error"], "message": result["message"]},
         )
     db.commit()
-    return GuestAdminDecisionResponse.model_validate(result["guest_response"])
+    return GuestRequestDecisionEnvelope(
+        data=GuestRequestDecisionData(
+            id=str(requestId),
+            status="APPROVED",
+            zone_id=effective_zone_id,
+            updated_at=datetime.utcnow(),
+        )
+    )
 
 
 @router.post(
-    "/access/guest-requests/{guest_id}/reject",
-    response_model=GuestAdminDecisionResponse,
+    "/access/guest-requests/{requestId}/reject",
+    response_model=GuestRequestDecisionEnvelope,
     status_code=status.HTTP_200_OK,
     summary="Reject unexpected guest (dashboard path)",
     description=(
         "**Bearer** JWT. Same semantics as **`POST /api/access/reject`**: **zone** inferred from the "
-        "**guest_id** session (optional legacy **`?zone_id=`**, must match that row)."
+        "**requestId** session row (optional legacy **`?zone_id=`**, must match that row)."
     ),
     response_description=(
-        "`REJECTED` decision; guest sees status via **`GET /api/access/session/{guest_id}`**."
+        "`REJECTED` decision envelope with request id and zone metadata."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
@@ -431,7 +434,7 @@ async def approve_guest_request_message_feature(
             "model": GuestAccessHttpError,
         },
         status.HTTP_404_NOT_FOUND: {
-            "description": "Unknown **guest_id** or owner not found.",
+            "description": "Unknown **requestId** (`ACCESS_REQUEST_NOT_FOUND`) or owner not found.",
             "model": GuestAccessHttpError,
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
@@ -441,7 +444,7 @@ async def approve_guest_request_message_feature(
     },
 )
 async def reject_guest_request_message_feature(
-    guest_id: str = _GUEST_ID_PATH,
+    requestId: str = _GUEST_ID_PATH,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
     zone_id: str | None = _LEGACY_ZONE_QUERY,
@@ -453,15 +456,21 @@ async def reject_guest_request_message_feature(
             detail={"error_code": "NOT_FOUND", "message": "Owner not found"},
         )
 
-    effective_zone_id = _effective_zone_for_guest_admin_action(
-        db, guest_id=guest_id, zone_id_query=zone_id
-    )
+    session_row = db.get(GuestAccessSession, int(requestId)) if requestId.isdigit() else None
+    if not session_row:
+        session_row = guest_access_service.get_guest_access_session_by_guest_id(db, requestId)
+    if not session_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "ACCESS_REQUEST_NOT_FOUND", "message": "Guest access request not found."},
+        )
+    effective_zone_id = _effective_zone_for_guest_admin_action(db, guest_id=session_row.guest_id, zone_id_query=zone_id)
 
     result = guest_access_service.reject_guest(
         db,
         acting_owner=owner,
         zone_id=effective_zone_id,
-        guest_id=guest_id.strip(),
+        guest_id=session_row.guest_id.strip(),
     )
     if result.get("error"):
         raise HTTPException(
@@ -469,7 +478,14 @@ async def reject_guest_request_message_feature(
             detail={"error_code": result["error"], "message": result["message"]},
         )
     db.commit()
-    return GuestAdminDecisionResponse.model_validate(result["guest_response"])
+    return GuestRequestDecisionEnvelope(
+        data=GuestRequestDecisionData(
+            id=str(requestId),
+            status="REJECTED",
+            zone_id=effective_zone_id,
+            updated_at=datetime.utcnow(),
+        )
+    )
 
 
 @router.get("/messages/new")
@@ -510,25 +526,24 @@ async def list_new_feature_messages(
     "/access/permission",
     response_model=PermissionDecisionResponse,
     status_code=status.HTTP_200_OK,
-    summary="Process PERMISSION propagation (authenticated)",
+    summary="PERMISSION manual send disabled",
     description=(
-        "Requires JWT. **type** must be `PERMISSION`. Evaluates schedules for **payload.to** "
-        "(or sender zone), emits `ZoneMessageEvent`, and broadcasts **`PERMISSION_MESSAGE`** "
-        "to `delivered_owner_ids`. Public QR scans without login should call **`POST /api/access/permission`** instead."
+        "Manual authenticated PERMISSION propagation is disabled. "
+        "PERMISSION events are server-generated only for guest workflow transitions "
+        "(submit, approve, reject). Use **`POST /api/access/permission`** for guest submit and "
+        "**approve/reject** guest-request endpoints for decisions."
     ),
-    response_description="Decision bundle plus websocket fan-out targets.",
+    response_description="Always returns `PERMISSION_MANUAL_DISABLED`.",
 )
 async def process_permission(
     payload: PropagationMessageCreate,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if payload.type.value != "PERMISSION":
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="type must be PERMISSION")
-    sender = owner_crud.get_owner(db, current_user["user_id"])
-    if not sender:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sender owner not found")
-    result = permission_service.process_permission_message(db, sender, payload)
-    db.commit()
-    await ws_manager.broadcast_to_users(result["delivered_owner_ids"], "PERMISSION_MESSAGE", result)
-    return result
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={
+            "error_code": "PERMISSION_MANUAL_DISABLED",
+            "message": "PERMISSION messages are server-generated only for guest workflow transitions.",
+        },
+    )
