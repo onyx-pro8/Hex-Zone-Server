@@ -378,6 +378,16 @@ async def guest_post_message(
                 "error": {"message": "Recipient has blocked this message type."},
             },
         )
+    if created and created.get("__reject__") == "forbidden":
+        msg = str(created.get("message") or "Recipient is not an authorized peer for this zone.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": msg,
+                "error_code": "GUEST_NOT_AUTHORIZED_FOR_ZONE",
+                "error": {"message": msg},
+            },
+        )
     if created and created.get("__reject__") == "validation":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

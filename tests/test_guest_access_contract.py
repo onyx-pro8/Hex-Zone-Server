@@ -67,12 +67,33 @@ async def test_primary_qr_get_or_create_and_rotate(override_get_db):
         assert b.status_code == 200
         assert a.json()["status"] == "success"
         assert a.json()["data"]["id"] == b.json()["data"]["id"]
+        assert set(a.json()["data"].keys()) == {
+            "id",
+            "zone_id",
+            "token_suffix",
+            "url",
+            "path_with_query",
+            "revoked_at",
+            "created_at",
+            "updated_at",
+        }
         rot = await client.post(
             "/api/access/qr-tokens/primary/rotate",
             headers=headers,
             json={"zone_id": zone_id, "reason": "security"},
         )
         assert rot.status_code == 200
+        assert rot.json()["status"] == "success"
+        assert set(rot.json()["data"].keys()) == {
+            "id",
+            "zone_id",
+            "token_suffix",
+            "url",
+            "path_with_query",
+            "revoked_at",
+            "created_at",
+            "updated_at",
+        }
         assert rot.json()["data"]["id"] != a.json()["data"]["id"]
         assert rot.json()["data"]["revoked_at"] is None
         listed = await client.get(
@@ -190,6 +211,21 @@ async def test_permission_manual_disabled_and_guest_chat_only(override_get_db):
             "/messages",
             headers=headers,
             json={"message": "manual", "type": "PERMISSION", "visibility": "private", "guest_id": "x", "zone_id": zone_id},
+        )
+        assert perm_send.status_code == 422
+        assert perm_send.json()["error_code"] == "PERMISSION_MANUAL_DISABLED"
+
+
+@pytest.mark.asyncio
+async def test_message_feature_manual_permission_send_rejected(override_get_db):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = f"z-{uuid.uuid4().hex[:6]}"
+        admin_token = await _register_admin(client, zone_id)
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        perm_send = await client.post(
+            "/message-feature/messages/propagate",
+            headers=headers,
+            json={"type": "PERMISSION", "zone_id": zone_id, "text": "manual permission send"},
         )
         assert perm_send.status_code == 422
         assert perm_send.json()["error_code"] == "PERMISSION_MANUAL_DISABLED"
@@ -320,3 +356,51 @@ async def test_guest_history_includes_permission_system_events(override_get_db):
         items = hist.json()["data"]["items"]
         types = {i["type"] for i in items}
         assert "PERMISSION" in types
+
+
+@pytest.mark.asyncio
+async def test_guest_role_read_only_boundaries_for_admin_endpoints(override_get_db):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = f"z-{uuid.uuid4().hex[:6]}"
+        admin_token = await _register_admin(client, zone_id)
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        perm = await client.post("/api/access/permission", json={"zone_id": zone_id, "guest_name": "Read Only Guest"})
+        assert perm.status_code == 200
+        guest_id = perm.json()["data"]["guest_id"]
+
+        ap = await client.post(
+            "/api/access/approve",
+            headers=headers,
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        assert ap.status_code == 200
+        sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
+        exchange_code = sess.json()["data"]["exchange_code"]
+        guest_session = await client.post(
+            "/api/access/guest-session",
+            json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": exchange_code},
+        )
+        assert guest_session.status_code == 200
+        guest_jwt = guest_session.json()["data"]["access_token"]
+        guest_headers = {"Authorization": f"Bearer {guest_jwt}"}
+
+        # Guest must not access/administer QR token lifecycle endpoints.
+        primary = await client.get("/api/access/qr-tokens/primary", params={"zone_id": zone_id}, headers=guest_headers)
+        rotate = await client.post(
+            "/api/access/qr-tokens/primary/rotate",
+            json={"zone_id": zone_id, "reason": "nope"},
+            headers=guest_headers,
+        )
+        assert primary.status_code in {401, 403}
+        assert rotate.status_code in {401, 403}
+
+        # Guest cannot administer access requests.
+        req_list = await client.get("/api/access/guest-requests", params={"zone_id": zone_id}, headers=guest_headers)
+        decide = await client.post(
+            "/message-feature/access/guest-requests/does-not-matter/approve",
+            params={"zone_id": zone_id},
+            headers=guest_headers,
+        )
+        assert req_list.status_code in {401, 403}
+        assert decide.status_code in {401, 403}

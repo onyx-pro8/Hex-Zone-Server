@@ -15,6 +15,19 @@ Audience: backend team owning this repo. Frontend: Hex-Zone-Client (React/Vite).
 - `POST /message-feature/access/guest-requests/{requestId}/approve` (`zone_id` query optional legacy echo)
 - `POST /message-feature/access/guest-requests/{requestId}/reject` (`zone_id` query optional legacy echo)
 
+### API shapes (frontend contract lock)
+
+- `GET /api/access/qr-tokens/primary?zone_id={zone_id}` and `POST /api/access/qr-tokens/primary/rotate` both return:
+  - `{"status":"success","data":{"id","zone_id","token_suffix","url","path_with_query","revoked_at","created_at","updated_at"}}`
+- `POST /api/access/permission` returns:
+  - `{"status":"success","data":{"status":"EXPECTED|UNEXPECTED","message","guest_id","zone_id"}}`
+- `GET /api/access/session/{guest_id}?zone_id={zone_id}` returns:
+  - `{"status":"success","data":{"status":"PENDING|APPROVED|REJECTED","message","exchange_code?","exchange_expires_at?"}}`
+- `GET /api/access/guest-requests?zone_id={zone_id}` returns:
+  - `{"status":"success","data":[{"id","guest_id","zone_id","guest_name","status","expectation","created_at","hid"}]}`
+- `POST /message-feature/access/guest-requests/{requestId}/approve|reject` returns:
+  - `{"status":"success","data":{"id","status":"APPROVED|REJECTED","zone_id","updated_at"}}`
+
 ### Policy constraints
 
 - One `zone_id` has one active primary guest QR token (`is_primary=true`, `revoked_at is null`) at a time.
@@ -25,7 +38,11 @@ Audience: backend team owning this repo. Frontend: Hex-Zone-Client (React/Vite).
   - admin reject
 - Manual compose APIs reject `PERMISSION` with `PERMISSION_MANUAL_DISABLED`.
 - Guest write messaging is `CHAT` only; all non-`CHAT` types return `GUEST_MESSAGE_TYPE_NOT_ALLOWED`.
+- Guest may send `CHAT` only to zone host/administrator peers returned by `GET /api/guest/zones/{zone_id}/peers`.
 - For primary-token mode, `expires_at` / `expires_in_hours` are not accepted (`PRIMARY_TOKEN_EXPIRY_NOT_ALLOWED`).
+- Legacy `POST /api/access/qr-tokens` + `GET /api/access/qr-tokens` remain supported.
+  - For primary mode (`is_primary=true`), token never expires (`expires_at=null`).
+  - If caller provides `expires_at` or `expires_in_hours` with primary mode, API rejects with `PRIMARY_TOKEN_EXPIRY_NOT_ALLOWED`.
 
 ### Required error codes
 
@@ -55,13 +72,12 @@ Audience: backend team owning this repo. Frontend: Hex-Zone-Client (React/Vite).
 
 ### Server implementation (this codebase)
 
-Peers are built from **`zone_staff_owner_ids`** in `app/services/guest_access_service.py`:
+Peers are built in `app/services/guest_api_service.py` from:
 
-1. Active owners with **`owners.zone_id` == `{zone_id}`**
-2. Active **`zones`** rows with **`zones.zone_id` == `{zone_id}`** → include **`zones.owner_id`**
-3. **`resolve_primary_zone_admin_owner`** so a zone administrator is listed even when membership is split across **`owners`** vs **`zones`**
+1. Active administrators with **`owners.zone_id` == `{zone_id}`**
+2. Active **`zones`** rows with **`zones.zone_id` == `{zone_id}`** → include **`zones.owner_id`** (zone hosts)
 
-`list_zone_peers_for_guest` in `app/services/guest_api_service.py` turns those ids into the **`GuestPeerItem`** list.
+Guest `POST /api/guest/messages` enforces this same host/admin peer set.
 
 ---
 

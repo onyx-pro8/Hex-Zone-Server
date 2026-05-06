@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+import secrets
 
 import pytest
 from httpx import AsyncClient
@@ -10,6 +11,7 @@ from app.main import app
 from app.database import Base, get_db
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from app.models.owner import AccountType, Owner, OwnerRole
 
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -360,3 +362,64 @@ async def test_member_list_guest_requests_access_api(test_db, override_get_db):
         texts = {i.get("text") for i in items}
         assert "Welcome guest" in texts
         assert "message_type alias" in texts
+
+
+@pytest.mark.asyncio
+async def test_guest_messaging_restricted_to_host_admin_peers(test_db, override_get_db):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = f"zone-peer-{uuid.uuid4().hex[:8]}"
+        admin_id, admin_token = await _register_admin(client, zone_id=zone_id)
+
+        non_admin = Owner(
+            email=f"user-{uuid.uuid4().hex[:8]}@example.com",
+            zone_id=zone_id,
+            first_name="Zone",
+            last_name="User",
+            account_type=AccountType.PRIVATE,
+            role=OwnerRole.USER,
+            account_owner_id=None,
+            hashed_password="not-used-in-test",
+            api_key=secrets.token_urlsafe(24),
+            phone=None,
+            address="Addr",
+            active=True,
+            expired=False,
+        )
+        test_db.add(non_admin)
+        test_db.commit()
+        test_db.refresh(non_admin)
+
+        perm = await client.post("/api/access/permission", json={"zone_id": zone_id, "guest_name": "Peer Filter"})
+        assert perm.status_code == 200
+        guest_id = perm.json()["data"]["guest_id"]
+
+        approve = await client.post(
+            "/api/access/approve",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        assert approve.status_code == 200
+        sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
+        exchange_code = sess.json()["data"]["exchange_code"]
+        gs = await client.post(
+            "/api/access/guest-session",
+            json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": exchange_code},
+        )
+        guest_jwt = gs.json()["data"]["access_token"]
+
+        peers = await client.get(
+            f"/api/guest/zones/{zone_id}/peers",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+        )
+        assert peers.status_code == 200
+        peer_ids = {p["owner_id"] for p in peers.json()["data"]["peers"]}
+        assert admin_id in peer_ids
+        assert non_admin.id not in peer_ids
+
+        blocked = await client.post(
+            "/api/guest/messages",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+            json={"zone_id": zone_id, "type": "CHAT", "text": "Should fail", "to_owner_id": non_admin.id},
+        )
+        assert blocked.status_code == 403
+        assert blocked.json().get("error_code") == "GUEST_NOT_AUTHORIZED_FOR_ZONE"

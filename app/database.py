@@ -75,6 +75,71 @@ def init_db():
             )
             conn.execute(
                 text(
+                    "ALTER TABLE guest_access_qr_tokens "
+                    "ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_tokens_is_primary "
+                    "ON guest_access_qr_tokens (is_primary);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_guest_access_qr_tokens_active_primary_zone "
+                    "ON guest_access_qr_tokens (zone_id) "
+                    "WHERE revoked_at IS NULL AND is_primary IS TRUE;"
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS guest_access_qr_token_audits (
+                        id SERIAL PRIMARY KEY,
+                        token_id INTEGER NOT NULL REFERENCES guest_access_qr_tokens(id) ON DELETE CASCADE,
+                        zone_id VARCHAR(100) NOT NULL,
+                        action VARCHAR(32) NOT NULL,
+                        actor_owner_id INTEGER NULL REFERENCES owners(id) ON DELETE SET NULL,
+                        reason VARCHAR(255) NULL,
+                        metadata_json JSONB NULL,
+                        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+                    );
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_token_audits_token_id "
+                    "ON guest_access_qr_token_audits (token_id);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_token_audits_zone_id "
+                    "ON guest_access_qr_token_audits (zone_id);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_token_audits_action "
+                    "ON guest_access_qr_token_audits (action);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_token_audits_actor_owner_id "
+                    "ON guest_access_qr_token_audits (actor_owner_id);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_token_audits_created_at "
+                    "ON guest_access_qr_token_audits (created_at);"
+                )
+            )
+            conn.execute(
+                text(
                     "ALTER TABLE guest_access_sessions ADD COLUMN IF NOT EXISTS exchange_code VARCHAR(36);"
                 )
             )

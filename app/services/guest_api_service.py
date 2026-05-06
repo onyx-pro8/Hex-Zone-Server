@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session, defer
 from app.domain.message_types import CanonicalMessageType, normalize_message_type, type_category, type_scope
 from app.models import MessageBlock, Owner, Zone, ZoneMessageEvent
 from app.models.owner import OwnerRole
-from app.services import guest_access_service
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -23,6 +22,35 @@ GUEST_VISIBLE_TYPES = frozenset(
     }
 )
 GUEST_WRITABLE_TYPES = frozenset({CanonicalMessageType.CHAT.value})
+
+
+def _authorized_guest_peer_owner_ids(db: Session, *, zone_id: str) -> set[int]:
+    """Hosts/admins a guest may message after login."""
+    zid = zone_id.strip()
+    if not zid:
+        return set()
+    admin_ids = {
+        row[0]
+        for row in (
+            db.query(Owner.id)
+            .filter(
+                Owner.zone_id == zid,
+                Owner.role == OwnerRole.ADMINISTRATOR,
+                Owner.active.is_(True),
+            )
+            .all()
+        )
+    }
+    host_ids = {
+        row[0]
+        for row in (
+            db.query(Zone.owner_id)
+            .filter(Zone.zone_id == zid, Zone.active.is_(True))
+            .distinct()
+            .all()
+        )
+    }
+    return admin_ids | host_ids
 
 
 def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) -> bool:
@@ -39,7 +67,7 @@ def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) 
 
 
 def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
-    staff_ids = guest_access_service.zone_staff_owner_ids(db, zone_id)
+    staff_ids = _authorized_guest_peer_owner_ids(db, zone_id=zone_id)
     if not staff_ids:
         return []
     owners = (
@@ -184,6 +212,8 @@ def create_guest_zone_message(
     receiver = db.query(Owner).filter(Owner.id == to_owner_id, Owner.zone_id == zid, Owner.active.is_(True)).first()
     if not receiver:
         return None
+    if to_owner_id not in _authorized_guest_peer_owner_ids(db, zone_id=zid):
+        return {"__reject__": "forbidden", "message": "Recipient is not an authorized host/admin peer for this zone."}
 
     if msg_type not in GUEST_WRITABLE_TYPES:
         return {"__reject__": "forbidden_message_type"}
