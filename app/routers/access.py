@@ -74,6 +74,9 @@ then:
 - **UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`** to all active owners
   sharing **zone_id**, and record a PERMISSION zone event for request/decision history.
 
+Those **PERMISSION** rows live in **`zone_message_events`**; zone administrators see them merged into **`GET /messages/?owner_id=`**
+(member inbox) plus in **`GET /api/guest/messages`**/**`GET /api/access/guest-messages`** for the guest thread.
+
 **Response** includes **`guest_id`** (poll path) and **`zone_id`** (use as **`zone_id`** query on
 `GET /api/access/session/{guest_id}` when the client does not already have **`zid`** from the URL).
 Session polling also succeeds with **`guest_id`** only (**`zone_id`** query omitted).

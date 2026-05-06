@@ -5,7 +5,6 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, defer
 
 from app.domain.message_types import (
@@ -16,6 +15,7 @@ from app.domain.message_types import (
     type_scope,
 )
 from app.models import MessageBlock, Owner, Zone, ZoneMessageEvent
+from app.services.access_policy import zone_listing_owner_ids
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
 from app.websocket.manager import ws_manager
@@ -35,8 +35,13 @@ GUEST_WRITABLE_TYPES = frozenset({CanonicalMessageType.CHAT.value})
 _MEMBER_GUEST_THREAD_MAX_SCAN = 5000
 
 
-def _authorized_guest_peer_owner_ids(db: Session, *, zone_id: str) -> set[int]:
-    """Hosts/admins a guest may message after login."""
+def _guest_messaging_peer_owner_ids(db: Session, *, zone_id: str) -> set[int]:
+    """Staff a guest may address with **CHAT**: zone **ADMINISTRATOR** owners + **`zones.owner_id`** rows.
+
+    Also includes **`resolve_primary_zone_admin_owner`** so a primary admin appears when data is split
+    across **`owners`** vs **`zones`** (without granting every **`USER`** in the same **`zone_id`** string).
+    """
+
     zid = zone_id.strip()
     if not zid:
         return set()
@@ -61,7 +66,11 @@ def _authorized_guest_peer_owner_ids(db: Session, *, zone_id: str) -> set[int]:
             .all()
         )
     }
-    return admin_ids | host_ids
+    out = admin_ids | host_ids
+    primary = guest_access_service.resolve_primary_zone_admin_owner(db, zid)
+    if primary and primary.active:
+        out.add(primary.id)
+    return out
 
 
 def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) -> bool:
@@ -78,7 +87,7 @@ def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) 
 
 
 def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
-    staff_ids = _authorized_guest_peer_owner_ids(db, zone_id=zone_id)
+    staff_ids = _guest_messaging_peer_owner_ids(db, zone_id=zone_id)
     if not staff_ids:
         return []
     owners = (
@@ -159,15 +168,66 @@ def list_guest_access_thread_for_zone_member(
     for row in rows:
         if not belongs_to_guest_access_thread(row, gid):
             continue
-        if peer is not None:
-            if not (
-                row.sender_id == peer
-                or row.receiver_id == peer
-                or row.sender_id is None
-            ):
-                continue
+        if peer is not None and not _guest_thread_row_matches_peer(row, peer, gid):
+            continue
         filtered.append(row)
     return filtered[sk : sk + lim]
+
+
+def _guest_thread_row_matches_peer(row: ZoneMessageEvent, peer: int, viewer_guest_id: str) -> bool:
+    """Narrow admin/member guest-thread view to one staff peer while keeping PERMISSION audit lines."""
+    if row.type == CanonicalMessageType.PERMISSION.value:
+        return True
+    if row.sender_guest_id == viewer_guest_id and row.receiver_id == peer:
+        return True
+    if row.sender_id == peer and _body_guest_id_matches(row, viewer_guest_id):
+        return True
+    return False
+
+
+def manageable_zone_ids_for_permission_inbox(db: Session, owner: Owner) -> set[str]:
+    """Zone ids that may surface **PERMISSION** rows in **`GET /messages`** for this owner."""
+
+    ids: set[str] = set()
+    z0 = (owner.zone_id or "").strip()
+    if z0:
+        ids.add(z0)
+    allowed = zone_listing_owner_ids(db, owner)
+    if not allowed:
+        return ids
+    for (zid,) in db.query(Zone.zone_id).filter(Zone.owner_id.in_(allowed), Zone.active.is_(True)).distinct().all():
+        if zid:
+            ids.add(zid.strip())
+    return ids
+
+
+def list_zone_permission_events_for_owner_feed(
+    db: Session,
+    *,
+    owner: Owner,
+    max_scan: int = 3000,
+) -> list[ZoneMessageEvent]:
+    """Recent **`PERMISSION`** zone events for zones this owner may administer (guest access feed)."""
+
+    zonable = manageable_zone_ids_for_permission_inbox(db, owner)
+    if not zonable:
+        return []
+    chunk = tuple(sorted(zonable))
+    rows = (
+        db.query(ZoneMessageEvent)
+        .filter(
+            ZoneMessageEvent.zone_id.in_(chunk),
+            ZoneMessageEvent.type == CanonicalMessageType.PERMISSION.value,
+        )
+        .order_by(ZoneMessageEvent.created_at.desc())
+        .limit(max(1, min(int(max_scan), 8000)))
+        .all()
+    )
+    visible: list[ZoneMessageEvent] = []
+    for row in rows:
+        if guest_access_service.can_manage_zone_guest_requests(db, owner, row.zone_id):
+            visible.append(row)
+    return visible
 
 
 def zone_message_event_to_member_zone_message_response(row: ZoneMessageEvent):
@@ -193,23 +253,6 @@ def zone_message_event_to_member_zone_message_response(row: ZoneMessageEvent):
     )
 
 
-def _guest_visible_message_predicate(guest_id: str, with_owner_id: int | None):
-    body_guest = ZoneMessageEvent.body_json["guest_id"].as_string() == guest_id
-    parts = [
-        ZoneMessageEvent.sender_guest_id == guest_id,
-        body_guest,
-    ]
-    base = or_(*parts)
-    if with_owner_id is None:
-        return base
-    peer = with_owner_id
-    thread = or_(
-        and_(ZoneMessageEvent.sender_guest_id == guest_id, ZoneMessageEvent.receiver_id == peer),
-        and_(ZoneMessageEvent.sender_id == peer, body_guest),
-    )
-    return and_(base, thread)
-
-
 def list_guest_zone_messages(
     db: Session,
     *,
@@ -220,27 +263,46 @@ def list_guest_zone_messages(
     before_id: str | None,
     before_created_at: datetime | None,
 ) -> tuple[list[ZoneMessageEvent], str | None]:
+    """List guest-visible thread rows (PERMISSION + CHAT) with stable peer semantics.
+
+    PERMISSION audit lines for a guest are visible in every staff-peer thread for that guest
+    (same behavior as **GET /messages** + **guest_id** for members). Implements cursor paging
+    over a capped recent scan so SQLite/Postgres JSON differences do not drop rows.
+    """
     lim = max(1, min(int(limit), 200))
-    q = (
+    zid = zone_id.strip()
+    gid = (guest_id or "").strip()
+    peer = with_owner_id
+
+    rows = (
         db.query(ZoneMessageEvent)
-        .filter(ZoneMessageEvent.zone_id == zone_id.strip())
+        .filter(ZoneMessageEvent.zone_id == zid)
         .filter(ZoneMessageEvent.type.in_(tuple(GUEST_VISIBLE_TYPES)))
-        .filter(_guest_visible_message_predicate(guest_id, with_owner_id))
+        .order_by(ZoneMessageEvent.created_at.desc(), ZoneMessageEvent.id.desc())
+        .limit(_MEMBER_GUEST_THREAD_MAX_SCAN)
+        .all()
     )
-    if before_created_at is not None and before_id:
-        q = q.filter(
-            or_(
-                ZoneMessageEvent.created_at < before_created_at,
-                and_(ZoneMessageEvent.created_at == before_created_at, ZoneMessageEvent.id < before_id),
-            )
-        )
-    rows = q.order_by(ZoneMessageEvent.created_at.desc(), ZoneMessageEvent.id.desc()).limit(lim + 1).all()
+
+    filtered: list[ZoneMessageEvent] = []
+    for row in rows:
+        if not belongs_to_guest_access_thread(row, gid):
+            continue
+        if peer is not None and not _guest_thread_row_matches_peer(row, peer, gid):
+            continue
+        if before_created_at is not None and before_id:
+            if row.created_at > before_created_at or (
+                row.created_at == before_created_at and row.id >= before_id
+            ):
+                continue
+        filtered.append(row)
+
+    page = filtered[: lim + 1]
     next_cursor = None
-    if len(rows) > lim:
-        tail = rows[lim]
+    if len(page) > lim:
+        tail = page[lim]
         next_cursor = f"{tail.created_at.isoformat()}|{tail.id}"
-        rows = rows[:lim]
-    return rows, next_cursor
+        page = page[:lim]
+    return page, next_cursor
 
 
 def _serialize_from(row: ZoneMessageEvent, viewer_guest_id: str) -> dict[str, Any]:
@@ -301,10 +363,10 @@ def create_guest_zone_message(
 ) -> dict[str, Any] | None:
     """Returns serialized message dict, or None if should reject with HTTP (caller maps)."""
     zid = zone_id.strip()
-    receiver = db.query(Owner).filter(Owner.id == to_owner_id, Owner.zone_id == zid, Owner.active.is_(True)).first()
+    receiver = db.query(Owner).filter(Owner.id == to_owner_id, Owner.active.is_(True)).first()
     if not receiver:
         return None
-    if to_owner_id not in _authorized_guest_peer_owner_ids(db, zone_id=zid):
+    if to_owner_id not in _guest_messaging_peer_owner_ids(db, zone_id=zid):
         return {"__reject__": "forbidden", "message": "Recipient is not an authorized host/admin peer for this zone."}
 
     if msg_type not in GUEST_WRITABLE_TYPES:
@@ -429,9 +491,58 @@ def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
     )
     label = z.name if z else zone_id
     welcome = "Welcome to the zone guest dashboard."
+
+    cells: list[str] = []
+    zoom_level = 14
+    center: dict[str, float] | None = None
+    geojson_fc: dict[str, Any] | None = None
+    bounds: dict[str, float] | None = None
+    if z:
+        hc = getattr(z, "h3_cells", None) or []
+        if isinstance(hc, list):
+            cells = [str(c) for c in hc if str(c)]
+        elif isinstance(hc, str):
+            cells = [hc]
+        params = z.parameters if isinstance(z.parameters, dict) else {}
+        guest_map = params.get("guest_map") if isinstance(params.get("guest_map"), dict) else {}
+        mz = guest_map.get("zoom")
+        if isinstance(mz, (int, float)) and mz > 0:
+            zoom_level = float(mz)
+        cen = guest_map.get("center") if isinstance(guest_map.get("center"), dict) else {}
+        lat, lng = cen.get("lat"), cen.get("lng")
+        if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+            center = {"lat": float(lat), "lng": float(lng)}
+        gj = guest_map.get("geojson")
+        if isinstance(gj, dict) and gj.get("type") == "FeatureCollection":
+            geojson_fc = gj
+        b = guest_map.get("bounds") if isinstance(guest_map.get("bounds"), dict) else {}
+        s, n, ew, ww = (
+            b.get("south"),
+            b.get("north"),
+            b.get("east"),
+            b.get("west"),
+        )
+        if all(isinstance(v, (int, float)) for v in (s, n, ew, ww)):
+            bounds = {
+                "south": float(s),
+                "north": float(n),
+                "east": float(ew),
+                "west": float(ww),
+            }
+
+    map_payload = {
+        "center": center,
+        "zoom": zoom_level,
+        "cells": cells,
+        **({"bounds": bounds} if bounds else {}),
+        **({"geojson": geojson_fc} if geojson_fc else {}),
+    }
+
     return {
         "zone_id": zone_id.strip(),
         "label": label,
         "welcome_text": welcome,
         "links": [],
+        "cells": cells,
+        "map": map_payload,
     }

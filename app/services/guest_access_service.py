@@ -241,12 +241,15 @@ def process_guest_arrival(
         perm_meta = {
             "flow": "qr_guest_arrival",
             "guest_id": guest_token,
+            "guest_access_session_db_id": session_row.id,
             "schedule_match": True,
             "websocket_events": [{"name": "guest_is_here", "targets": "schedule_owner_and_optional_assist"}],
+            "domain_event": "guest_expected_arrival",
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         }
         decision = "EXPECTED"
         msg_guest = "You are expected. Please proceed."
+        perm_line = f"Expected guest arrived: {guest_name.strip()}."
     else:
         admin = resolve_primary_zone_admin_owner(db, zone_id)
         if not admin:
@@ -286,27 +289,33 @@ def process_guest_arrival(
         perm_meta = {
             "flow": "qr_guest_arrival",
             "guest_id": guest_token,
+            "guest_access_session_db_id": session_row.id,
             "schedule_match": False,
             "websocket_events": [{"name": "unexpected_guest", "targets": "zone_members"}],
+            "domain_event": "guest_request_created",
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         }
         decision = "UNEXPECTED"
         msg_guest = "You are not scheduled. Please wait for approval."
+        perm_line = f"Guest access requested for {guest_name.strip()}. Awaiting approval."
 
     perm_event = ZoneMessageEvent(
         zone_id=zone_id,
         sender_id=permission_sender_owner_id,
+        guest_access_session_id=session_row.id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
-        text=msg_guest,
+        text=perm_line,
         body_json={
             "guest_name": guest_name.strip(),
             "zone_id": zone_id,
             "guest_id": guest_token,
+            "guest_request_id": session_row.id,
             "event_id": (event_id or "").strip() or None,
             "device_id": (device_id or "").strip() or None,
             "location": {"lat": latitude, "lng": longitude},
+            "guest_message": msg_guest,
         },
         metadata_json=perm_meta,
     )
@@ -491,14 +500,21 @@ def consume_guest_exchange_and_issue_context(
 
 
 def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: str) -> dict:
-    if acting_owner.zone_id != zone_id or acting_owner.role != OwnerRole.ADMINISTRATOR:
+    zid = zone_id.strip()
+    if acting_owner.role != OwnerRole.ADMINISTRATOR:
         return {"error": "FORBIDDEN", "message": "Administrator action required for this zone.", "http_status": 403}
+    if not can_manage_zone_guest_requests(db, acting_owner, zid):
+        return {
+            "error": "FORBIDDEN",
+            "message": "You are not allowed to approve guest requests for this zone.",
+            "http_status": 403,
+        }
 
     row = (
         db.query(GuestAccessSession)
         .filter(
             GuestAccessSession.guest_id == guest_id,
-            GuestAccessSession.zone_id == zone_id,
+            GuestAccessSession.zone_id == zid,
         )
         .first()
     )
@@ -516,31 +532,58 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
     row.exchange_consumed_at = None
     db.flush()
 
+    gname = (row.guest_name or "").strip() or "Guest"
     note = ZoneMessageEvent(
-        zone_id=zone_id,
+        zone_id=zid,
         sender_id=acting_owner.id,
+        guest_access_session_id=row.id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
-        text="Guest access approved.",
-        body_json={"guest_id": guest_id, "zone_id": zone_id, "resolution": "APPROVED"},
-        metadata_json={"flow": "guest_access_approve", "acting_owner_id": acting_owner.id},
+        text=f"Guest access approved for {gname}.",
+        body_json={
+            "guest_id": guest_id,
+            "guest_name": gname,
+            "guest_request_id": row.id,
+            "zone_id": zid,
+            "resolution": "APPROVED",
+        },
+        metadata_json={
+            "flow": "guest_access_approve",
+            "domain_event": "guest_request_approved",
+            "acting_owner_id": acting_owner.id,
+            "guest_access_session_db_id": row.id,
+        },
     )
     db.add(note)
     db.flush()
 
-    return {"ok": True, "guest_response": {"status": "APPROVED", "message": note.text, "guest_id": guest_id}}
+    return {
+        "ok": True,
+        "guest_response": {
+            "status": "APPROVED",
+            "message": "Your visit has been approved. Welcome.",
+            "guest_id": guest_id,
+        },
+    }
 
 
 def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: str) -> dict:
-    if acting_owner.zone_id != zone_id or acting_owner.role != OwnerRole.ADMINISTRATOR:
+    zid = zone_id.strip()
+    if acting_owner.role != OwnerRole.ADMINISTRATOR:
         return {"error": "FORBIDDEN", "message": "Administrator action required for this zone.", "http_status": 403}
+    if not can_manage_zone_guest_requests(db, acting_owner, zid):
+        return {
+            "error": "FORBIDDEN",
+            "message": "You are not allowed to reject guest requests for this zone.",
+            "http_status": 403,
+        }
 
     row = (
         db.query(GuestAccessSession)
         .filter(
             GuestAccessSession.guest_id == guest_id,
-            GuestAccessSession.zone_id == zone_id,
+            GuestAccessSession.zone_id == zid,
         )
         .first()
     )
@@ -554,17 +597,37 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
     row.resolution = "rejected"
     db.flush()
 
+    gname = (row.guest_name or "").strip() or "Guest"
     note = ZoneMessageEvent(
-        zone_id=zone_id,
+        zone_id=zid,
         sender_id=acting_owner.id,
+        guest_access_session_id=row.id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
-        text="Guest access rejected.",
-        body_json={"guest_id": guest_id, "zone_id": zone_id, "resolution": "REJECTED"},
-        metadata_json={"flow": "guest_access_reject", "acting_owner_id": acting_owner.id},
+        text=f"Guest access denied for {gname}.",
+        body_json={
+            "guest_id": guest_id,
+            "guest_name": gname,
+            "guest_request_id": row.id,
+            "zone_id": zid,
+            "resolution": "REJECTED",
+        },
+        metadata_json={
+            "flow": "guest_access_reject",
+            "domain_event": "guest_request_rejected",
+            "acting_owner_id": acting_owner.id,
+            "guest_access_session_db_id": row.id,
+        },
     )
     db.add(note)
     db.flush()
 
-    return {"ok": True, "guest_response": {"status": "REJECTED", "message": note.text, "guest_id": guest_id}}
+    return {
+        "ok": True,
+        "guest_response": {
+            "status": "REJECTED",
+            "message": "Access was not approved.",
+            "guest_id": guest_id,
+        },
+    }

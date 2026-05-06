@@ -14,8 +14,9 @@ class GuestApiHttpError(BaseModel):
     message: str = Field(description="Human-readable summary.")
     error_code: str = Field(
         description=(
-            "Stable code, e.g. `exchange_consumed`, `NOT_FOUND`, "
-            "`PERMISSION_MANUAL_DISABLED`, `GUEST_MESSAGE_TYPE_NOT_ALLOWED`."
+            "Stable code including `exchange_consumed`, `NOT_FOUND`, "
+            "`PERMISSION_MANUAL_DISABLED`, `GUEST_MESSAGE_TYPE_NOT_ALLOWED`, "
+            "`GUEST_NOT_AUTHORIZED_FOR_ZONE`, `PEERS_NOT_AVAILABLE`, `VALIDATION`, `FORBIDDEN`."
         )
     )
     error: dict[str, str] = Field(
@@ -63,7 +64,7 @@ class GuestSessionExchangeResponse(BaseModel):
                             "guest_id": "550e8400-e29b-41d4-a716-446655440000",
                             "display_name": "Walk-in Pat",
                             "zone_ids": ["ZN-DEMO"],
-                                "allowed_message_types": ["CHAT"],
+                            "allowed_message_types": ["CHAT"],
                         },
                     },
                 }
@@ -132,6 +133,8 @@ class GuestPeersData(BaseModel):
 
 
 class GuestPeersResponse(BaseModel):
+    """Success wrapper: **`data.peers`** (not a bare array — matches Hex-Zone client normalizers)."""
+
     status: Literal["success"] = "success"
     data: GuestPeersData
 
@@ -166,11 +169,46 @@ class GuestDashboardData(BaseModel):
     label: str
     welcome_text: str
     links: list[dict[str, Any]] = Field(default_factory=list, description="Safe v1 links; may be empty.")
+    cells: list[str] = Field(
+        default_factory=list,
+        description="Duplicate of **`map.cells`** (H3 cell ids) for clients that expect a flat list.",
+    )
+    map: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "**`map`** / **`cells`** for guest UI: **`{ center?, zoom, bounds?, geojson?, cells }`**. "
+            "Polygon geometry is intentionally omitted unless configured on **`zones.parameters.guest_map`**."
+        ),
+    )
 
 
 class GuestDashboardResponse(BaseModel):
     status: Literal["success"] = "success"
     data: GuestDashboardData
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "success",
+                    "data": {
+                        "zone_id": "ZN-DEMO",
+                        "label": "Demo HQ",
+                        "welcome_text": "Welcome to the zone guest dashboard.",
+                        "links": [],
+                        "cells": ["8928308280fffff"],
+                        "map": {
+                            "center": {"lat": 37.7749, "lng": -122.4194},
+                            "zoom": 14,
+                            "cells": ["8928308280fffff"],
+                            "bounds": {"south": 37.76, "north": 37.79, "east": -122.40, "west": -122.44},
+                            "geojson": {"type": "FeatureCollection", "features": []},
+                        },
+                    },
+                }
+            ]
+        }
+    )
 
 
 # --- GET /api/guest/messages ---
@@ -209,6 +247,46 @@ class GuestMessagesListData(BaseModel):
 class GuestMessagesListResponse(BaseModel):
     status: Literal["success"] = "success"
     data: GuestMessagesListData
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "success",
+                    "data": {
+                        "items": [
+                            {
+                                "id": "019b4c72-9000-7a00-a000-bbbbbbbbbbb1",
+                                "zone_id": "ZN-DEMO",
+                                "type": "PERMISSION",
+                                "created_at": "2026-05-06T14:00:00Z",
+                                "text": "Guest access approved for Pat Visitor.",
+                                "from": {"kind": "owner", "guest_id": None, "owner_id": 42},
+                                "to": {"kind": "zone_broadcast", "guest_id": None, "owner_id": None},
+                                "raw_payload": {
+                                    "guest_id": "550e8400-e29b-41d4-a716-446655440000",
+                                    "guest_request_id": 7,
+                                    "guest_name": "Pat Visitor",
+                                    "resolution": "APPROVED",
+                                },
+                            },
+                            {
+                                "id": "019b4c72-9000-7a00-a000-bbbbbbbbbbb2",
+                                "zone_id": "ZN-DEMO",
+                                "type": "CHAT",
+                                "created_at": "2026-05-06T14:05:00Z",
+                                "text": "Hello from guest",
+                                "from": {"kind": "guest", "guest_id": "550e8400-e29b-41d4-a716-446655440000", "owner_id": None},
+                                "to": {"kind": "owner", "guest_id": None, "owner_id": 42},
+                                "raw_payload": {},
+                            },
+                        ],
+                        "next_cursor": None,
+                    },
+                }
+            ]
+        }
+    )
 
 
 # --- POST /api/guest/messages ---
@@ -255,3 +333,23 @@ class GuestMessagePostRequest(BaseModel):
 class GuestMessageCreatedResponse(BaseModel):
     status: Literal["success"] = "success"
     data: GuestZoneMessageItem
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "success",
+                    "data": {
+                        "id": "019b4c72-9000-7a00-a000-cccccccccc01",
+                        "zone_id": "ZN-DEMO",
+                        "type": "CHAT",
+                        "created_at": "2026-05-06T14:05:30Z",
+                        "text": "Hello",
+                        "from": {"kind": "guest", "guest_id": "550e8400-e29b-41d4-a716-446655440000", "owner_id": None},
+                        "to": {"kind": "owner", "guest_id": None, "owner_id": 42},
+                        "raw_payload": {},
+                    },
+                }
+            ]
+        }
+    )

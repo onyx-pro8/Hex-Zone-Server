@@ -520,11 +520,18 @@ class ZoneMessageCreate(BaseModel):
 
 
 class ZoneMessageResponse(BaseModel):
-    """Created **`Message`** (numeric **`id`**) or **`ZoneMessageEvent`** (string UUID **`id`**) for guest threads."""
+    """**`messages`** row (**numeric `id`**) or **`ZoneMessageEvent`** (**UUID string `id`**).
+
+    Returned by **`POST /messages`**, **`GET /messages`** (member inbox merges **PERMISSION** zone events with integer-id messages),
+    and guest-thread listings.
+    """
 
     id: int | str = Field(
         ...,
-        description="**`messages.id`** (integer) for normal posts, or **`zone_message_events.id`** (UUID string) when **`guest_id`** was used.",
+        description=(
+            "**`messages.id`** (integer) for member-table posts; **UUID string** for **`ZoneMessageEvent`** "
+            "(guest thread, merged **PERMISSION** inbox, approve/reject audit lines)."
+        ),
     )
     zone_id: str = Field(..., description="Shared zone id string (**not** the internal **`zones.id`** PK).")
     sender_id: Optional[int] = Field(
@@ -545,7 +552,37 @@ class ZoneMessageResponse(BaseModel):
     message: str = Field(description="Body text stored for the message or zone event.")
     created_at: datetime = Field(description="Server **UTC** creation time.")
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "id": "019b4c72-9000-7a00-a000-aaaaaaaaaa01",
+                    "zone_id": "ZN-DEMO",
+                    "sender_id": 42,
+                    "receiver_id": None,
+                    "type": "PERMISSION",
+                    "category": "Access",
+                    "scope": "private",
+                    "visibility": "private",
+                    "message": "Guest access requested for Pat Visitor. Awaiting approval.",
+                    "created_at": "2026-05-06T14:30:00",
+                },
+                {
+                    "id": 91001,
+                    "zone_id": "ZN-DEMO",
+                    "sender_id": 42,
+                    "receiver_id": 43,
+                    "type": "PRIVATE",
+                    "category": "Alert",
+                    "scope": "private",
+                    "visibility": "private",
+                    "message": "Are you coming to briefing?",
+                    "created_at": "2026-05-06T14:29:45",
+                },
+            ]
+        },
+    )
 
 
 class MemberGuestAccessThreadMessagesData(BaseModel):
@@ -555,10 +592,36 @@ class MemberGuestAccessThreadMessagesData(BaseModel):
 
 
 class MemberGuestAccessThreadMessagesEnvelope(BaseModel):
-    """Member JWT success body for the guest access messaging thread (PERMISSION + CHAT)."""
+    """Member JWT: same **`ZoneMessageEvent`** history as **`GET /api/guest/messages`** (**PERMISSION** + **CHAT**)."""
 
     status: Literal["success"] = "success"
     data: MemberGuestAccessThreadMessagesData
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "success",
+                    "data": {
+                        "items": [
+                            {
+                                "id": "019b4c72-9000-7a00-a000-dddddddddd01",
+                                "zone_id": "ZN-DEMO",
+                                "sender_id": 42,
+                                "receiver_id": None,
+                                "type": "PERMISSION",
+                                "category": "Access",
+                                "scope": "private",
+                                "visibility": "private",
+                                "message": "Guest access approved for Pat Visitor.",
+                                "created_at": "2026-05-06T15:00:00",
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    )
 
 
 # Update forward references

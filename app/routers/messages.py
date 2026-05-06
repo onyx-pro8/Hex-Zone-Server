@@ -8,7 +8,13 @@ from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMe
 from app.crud import message as message_crud
 from app.crud import owner as owner_crud
 from app.core.security import get_current_user
-from app.domain.message_types import CanonicalMessageType, normalize_message_type, type_category, type_scope
+from app.domain.message_types import (
+    CanonicalMessageType,
+    MessageScope,
+    normalize_message_type,
+    type_category,
+    type_scope,
+)
 from app.models import GuestAccessSession
 from app.services import guest_api_service
 from app.services import guest_access_service
@@ -35,10 +41,9 @@ def _first_non_empty_str(*vals: str | None) -> str:
     description=(
         "**Member ↔ member (default):** requires **`type`** (or legacy **`visibility`** only). "
         "Persists **`Message`**; **`receiver_id`** required for private-scope types.\n\n"
-        "**Member → guest (Access channel):** Bearer **member** JWT only. Send **`guest_id`** (from **`GET /api/access/guest-requests`** "
-        "or **`POST /api/access/permission`**) and **`zone_id`** / **`zoneId`**. Body: **`message`**, **`message_type`** or **`type`**, "
-        "**`visibility`** (commonly **`private`**). Only **CHAT** is allowed with **`guest_id`**; "
-        "**PERMISSION** is server-generated only. "
+        "**Member → guest (Access channel):** Bearer **member** JWT only. Send **`guest_id`** + **`zone_id`**/**`zoneId`**. Body: **`message`**, **`type`**/**`message_type`**, "
+        "**`visibility`** (often **`private`**). Only **CHAT** is supported; **`PERMISSION`** for guests is server-only "
+        "(arrival submit / **`/api/access/approve|reject`**) — use **`422`** **`PERMISSION_MANUAL_DISABLED`** if a client sends it. "
         "Do **not** send **`receiver_id`**. Persists **`ZoneMessageEvent`**; guest reads via **`GET /api/guest/messages`** "
         "with **`with_owner_id`** = caller **`owners.id`**. Admins list the same thread with "
         "**`GET /api/access/guest-messages`** or **`GET /messages`** + **`guest_id`** + **`zone_id`** "
@@ -373,15 +378,38 @@ async def _list_zone_messages_for_owner(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="other_owner_id is not in the same zone",
             )
+        peer_rows = message_crud.list_visible_messages(
+            db,
+            owner_id=owner_id,
+            other_owner_id=other_owner_id,
+            skip=skip,
+            limit=limit,
+        )
+        return [
+            ZoneMessageResponse(
+                id=message.id,
+                zone_id=owner.zone_id,
+                sender_id=message.sender_id,
+                receiver_id=message.receiver_id,
+                type=message.message_type,
+                category=type_category(normalize_message_type(message.message_type)).value,
+                scope=type_scope(normalize_message_type(message.message_type)).value,
+                visibility=message.visibility,
+                message=message.message,
+                created_at=message.created_at,
+            )
+            for message in peer_rows
+        ]
 
-    rows = message_crud.list_visible_messages(
+    fetch_cap = min(max(skip + limit + 128, limit * 2), 2500)
+    inbox_rows = message_crud.list_visible_messages(
         db,
         owner_id=owner_id,
-        other_owner_id=other_owner_id,
-        skip=skip,
-        limit=limit,
+        other_owner_id=None,
+        skip=0,
+        limit=fetch_cap,
     )
-    return [
+    msg_responses = [
         ZoneMessageResponse(
             id=message.id,
             zone_id=owner.zone_id,
@@ -394,8 +422,20 @@ async def _list_zone_messages_for_owner(
             message=message.message,
             created_at=message.created_at,
         )
-        for message in rows
+        for message in inbox_rows
     ]
+    perm_events = guest_api_service.list_zone_permission_events_for_owner_feed(
+        db,
+        owner=owner,
+        max_scan=fetch_cap + 250,
+    )
+    perm_responses = [guest_api_service.zone_message_event_to_member_zone_message_response(e) for e in perm_events]
+    merged = sorted(
+        [*msg_responses, *perm_responses],
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    return merged[skip : skip + limit]
 
 
 @router.get(
@@ -403,7 +443,9 @@ async def _list_zone_messages_for_owner(
     response_model=list[ZoneMessageResponse],
     summary="List zone messages",
     description=(
-        "**Member ↔ member:** returns **`Message`** rows for **`owner_id`** (+ optional **`other_owner_id`**).\n\n"
+        "**Member ↔ member (no `other_owner_id`):** merges **`Message`** inbox rows with recent **`ZoneMessageEvent`** "
+        "**`PERMISSION`** lines for zones the caller may administer (guest access audit feed).\n\n"
+        "**Member ↔ member (with `other_owner_id`):** **`Message`** only between the two owners.\n\n"
         "**Guest access thread:** include any of **`guest_id`** / **`guestId`**, **`zone_id`** / **`zoneId`**, "
         "and/or **`request_id`** / **`requestId`** (**numeric **`guest_access_sessions.id`** from "
         "**`GET /api/access/guest-requests`**). **`zone_id`** may be omitted when **`guest_id`** or "
@@ -413,7 +455,50 @@ async def _list_zone_messages_for_owner(
         "This path (**`GET /messages`**, no trailing slash) remains the canonical list URL; **`GET /messages/`** "
         "is equivalent."
     ),
+    response_description=(
+        "Ordered by **`created_at`** descending after merge (**`skip`**/**`limit`** apply to the merged list). "
+        "Items mirror **`ZoneMessageResponse`** (**integer `id`** vs **UUID string** — see schema **Examples**)."
+    ),
     responses={
+        status.HTTP_200_OK: {
+            "description": "Merged inbox (**`Message`** + **`PERMISSION`**) or peer-only **`Message`** list or guest **`ZoneMessageEvent`** thread.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "merged_member_inbox": {
+                            "summary": "Owner inbox with guest PERMISSION audit",
+                            "description": "**`guest_id`** query params omitted — includes **`ZoneMessageResponse`** UUID rows.",
+                            "value": [
+                                {
+                                    "id": "019b4c72-9000-7a00-a000-aaaaaaaaaa01",
+                                    "zone_id": "ZN-DEMO",
+                                    "sender_id": 42,
+                                    "receiver_id": None,
+                                    "type": "PERMISSION",
+                                    "category": "Access",
+                                    "scope": "private",
+                                    "visibility": "private",
+                                    "message": "Guest access requested for Pat Visitor. Awaiting approval.",
+                                    "created_at": "2026-05-06T14:30:00",
+                                },
+                                {
+                                    "id": 91001,
+                                    "zone_id": "ZN-DEMO",
+                                    "sender_id": 40,
+                                    "receiver_id": 41,
+                                    "type": "PRIVATE",
+                                    "category": "Alert",
+                                    "scope": "private",
+                                    "visibility": "private",
+                                    "message": "Staff DM",
+                                    "created_at": "2026-05-06T14:29:45",
+                                },
+                            ],
+                        }
+                    }
+                }
+            },
+        },
         status.HTTP_403_FORBIDDEN: {
             "description": "owner_id does not match authenticated user or other_owner_id is unauthorized.",
         },
@@ -421,7 +506,6 @@ async def _list_zone_messages_for_owner(
             "description": "Requested owner or other_owner_id was not found.",
         },
     },
-    response_description="Caller-visible message list in zone scope.",
 )
 async def list_messages(
     owner_id: int = Query(..., ge=1),

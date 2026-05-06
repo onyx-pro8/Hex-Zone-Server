@@ -71,13 +71,16 @@ OPENAPI_TAGS = [
     {
         "name": "messages",
         "description": (
-            "Member zone messaging (Bearer **member** JWT — numeric `sub`). **`POST /messages`** creates **`Message`** rows "
-            "for member↔member chat, or **`ZoneMessageEvent`** when **`guest_id`** + **`zone_id`** are set (**Access** channel: "
-            "**PERMISSION** / **CHAT** to approved QR guests; same store as **`GET /api/guest/messages`**). "
-            "Member→guest: send **`message`**, **`type`** or **`message_type`**, **`visibility`** (often **`private`**), **`zone_id`**/**`zoneId`**, **`guest_id`**; omit **`receiver_id`**. "
-            "See schema **`ZoneMessageCreate`** (Swagger **Schemas**). **`GET /messages`** defaults to **`Message`** history; "
-            "with **`guest_id`**/**`guestId`**, **`zone_id`**/**`zoneId`**, and/or **`requestId`** (session **`id`** or guest UUID) "
-            "it lists the same **`ZoneMessageEvent`** access thread **`GET /api/guest/messages`** uses (**PERMISSION** + **CHAT**)."
+            "Member zone messaging (Bearer **member** JWT — numeric `sub`).\n\n"
+            "**`GET /messages?owner_id=`** (omit **`other_owner_id`**) returns a **merged inbox**: ordinary **`messages`** rows plus "
+            "recent **`zone_message_events`** rows with **`type=PERMISSION`** for guest-access audits on zones you may administer "
+            "(same feed admins need for Messages UI).\n\n"
+            "**`GET /messages?owner_id=&other_owner_id=`** returns only **`messages`** strictly between those two owners (no merged PERMISSION feed).\n\n"
+            "**`GET /messages`** + **`guest_id`** / **`zone_id`** / **`requestId`** lists the **`ZoneMessageEvent`** guest thread "
+            "(**PERMISSION** + **CHAT**) — aligned with **`GET /api/guest/messages`** and **`GET /api/access/guest-messages`**.\n\n"
+            "**`POST /messages`**: member↔member → **`messages`** table; **member→guest** with **`guest_id`** + **`zone_id`** "
+            "(**CHAT** only; **`PERMISSION`** must not be composed — server generates PERMISSION on guest submit / approve / reject). "
+            "See **`ZoneMessageCreate`** and **`ZoneMessageResponse`** examples."
         ),
     },
     {
@@ -115,7 +118,8 @@ OPENAPI_TAGS = [
             "**No JWT:** **`POST /api/access/permission`**, **`GET /api/access/session/{guest_id}`**, **`POST /api/access/guest-session`**. "
             "Poll response includes **`status`** (EXPECTED | UNEXPECTED | APPROVED | REJECTED) and **`approval_status`** "
             "(PENDING | APPROVED | REJECTED) for dashboards; when approved, **`exchange_code`** + **`exchange_expires_at`** enable the guest JWT exchange. "
-            "**Member JWT:** **`GET /api/access/guest-requests`** (operationId **`access_list_guest_requests`**), **`POST /api/access/approve|reject`**, QR helpers. "
+            "**Member JWT:** **`GET /api/access/guest-requests`** (**`access_list_guest_requests`**), **`POST /api/access/approve|reject`** (writes **PERMISSION** zone events; "
+            "guest sees them on **`GET /api/guest/messages`** and admins in **`GET /messages`** inbox merge), QR helpers. "
             "**Permission** response echoes **`zone_id`** when the invite had only **`gt`**. "
             "**Administrators** mint stored tokens (**`POST /api/access/qr-tokens`**, SPA **`/access?gt=&zid=`**) or static **`GET /api/access/qr-link`**. "
             "Legacy duplicate listing: **`GET /message-feature/access/guest-requests`** (raw array). "
@@ -126,16 +130,16 @@ OPENAPI_TAGS = [
         "name": "guest",
         "description": (
             "**Guest JWT only** (`Authorization: Bearer`; claim **`token_use`=`guest_access`**, subject **`guest:{guest_id}`**). "
-            "Obtain token from **`POST /api/access/guest-session`** using **`exchange_code`** from **`GET /api/access/session/{guest_id}`** after approval. "
-            "Do **not** send the member (zoneweaver) token on these routes.\n\n"
-            "| Endpoint | Purpose |\n"
-            "|----------|--------|\n"
-            "| **`GET /api/guest/me`** | Profile: **`guest_id`**, **`display_name`**, **`zone_ids`**, **`allowed_message_types`**, **`expires_at`** |\n"
-            "| **`GET /api/guest/zones/{zone_id}/peers`** | Hosts/staff (**`owner_id`**) available for guest CHAT |\n"
-            "| **`GET /api/guest/zones/{zone_id}/dashboard`** | Optional welcome copy and links |\n"
-            "| **`GET /api/guest/messages`** | Thread with **`with_owner_id`** (member **`owners.id`**) |\n"
-            "| **`POST /api/guest/messages`** | Guest → member **CHAT** only (**`to_owner_id`**) |\n\n"
-            "Allowed message types are **CHAT** only in the minted JWT. Errors use **`{ \"status\":\"error\", \"message\", \"error_code\" }`**."
+            "Mint via **`POST /api/access/guest-session`** (**`exchange_code`** from **`GET /api/access/session/{guest_id}`** after admin approval). "
+            "**Never** send the member (zoneweaver) Bearer on **`/api/guest/***.\n\n"
+            "| Route | Swagger summary |\n"
+            "|--------|----------------|\n"
+            "| **`GET /api/guest/me`** | JWT profile + expiry |\n"
+            "| **`GET /api/guest/zones/{zone_id}/peers`** | Staff peers (**ADMINISTRATOR** + **`zones.owner_id`** + primary admin): use **`owner_id`** as **`with_owner_id`** / **`to_owner_id`** |\n"
+            "| **`GET /api/guest/zones/{zone_id}/dashboard`** | Label, welcome text, **`map`** (**`cells`**, optional **`zones.parameters.guest_map`**) for guest map UI |\n"
+            "| **`GET /api/guest/messages`** | **`zone_id`** + optional **`with_owner_id`**: **PERMISSION** (server) + **CHAT**, ordered by **`created_at`** |\n"
+            "| **`POST /api/guest/messages`** | **CHAT** only to **`to_owner_id`**; errors **`GUEST_MESSAGE_TYPE_NOT_ALLOWED`**, **`GUEST_NOT_AUTHORIZED_FOR_ZONE`**, **`PEERS_NOT_AVAILABLE`** (see route **Responses**) |\n\n"
+            "Swagger **Schemas**: **`GuestMessagePostRequest`**, **`GuestPeersResponse`**, **`GuestDashboardData`**, **`GuestMessagesListResponse`** carry copy-paste examples."
         ),
     },
 ]
@@ -171,7 +175,7 @@ app = FastAPI(
         "guest submits name → `POST /api/access/permission` (response includes **`zone_id`**). "
         "Poll **`GET /api/access/session/{guest_id}`** — response includes **`status`**, **`approval_status`**, and when approved **`exchange_code`** → **`POST /api/access/guest-session`**. "
         "Administrators mint tokens with **`POST /api/access/qr-tokens`** or static **`GET /api/access/qr-link`**. "
-        "**Members** list arrivals with **`GET /api/access/guest-requests?zone_id=`** (Bearer); use returned **`guest_id`** on **`POST /messages`** (**PERMISSION**/**CHAT**, **`type`** or **`message_type`**). "
+        "**Members** list arrivals with **`GET /api/access/guest-requests?zone_id=`** (Bearer); see **`guest_id`** in **`POST /messages`** for **member→guest CHAT** only (**PERMISSION** is server-generated). "
         "Members create expectations via `/message-feature/access/schedules`; unexpected visits notify "
         "via WebSocket `unexpected_guest` / `guest_is_here`. "
         "Admins resolve pending unexpected visits with **`POST /api/access/approve|reject`** or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`**. "

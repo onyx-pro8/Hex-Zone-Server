@@ -194,6 +194,21 @@ def init_db():
                     "ON zone_message_events (sender_guest_id);"
                 )
             )
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE zone_message_events
+                    ADD COLUMN IF NOT EXISTS guest_access_session_id INTEGER
+                    REFERENCES guest_access_sessions(id) ON DELETE SET NULL;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_zone_message_events_guest_access_session_id "
+                    "ON zone_message_events (guest_access_session_id);"
+                )
+            )
 
         with engine.begin() as conn:
             # Backward-compatible schema patch for older deployments missing owners.zone_id.

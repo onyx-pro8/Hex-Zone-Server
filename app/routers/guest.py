@@ -113,9 +113,10 @@ async def guest_me(
     response_model_by_alias=True,
     summary="List zone members (peers)",
     description=(
-        "Active **owners** in **`zone_id`** (hosts/staff the guest may message). **`zone_id`** must appear in the guest JWT **`zone_ids`** claim. "
-        "Each **`owner_id`** is **`owners.id`** — use as **`with_owner_id`** / **`to_owner_id`** on **`/api/guest/messages`**. "
-        "**`can_receive_chat`** reflects whether the member has blocked **CHAT**-type delivery."
+        "**Staff peers only** (not every user in the zone): active **ADMINISTRATOR** owners with matching **`owners.zone_id`**, "
+        "**`zones.owner_id`** for active zone rows, plus the **primary zone admin** fallback. "
+        "**`zone_id`** must appear in the JWT **`zone_ids`** claim. Each **`owner_id`** is **`owners.id`** — use as "
+        "**`with_owner_id`** (GET thread) or **`to_owner_id`** (POST CHAT). **`can_receive_chat`** is false when the member blocked **CHAT**."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
@@ -143,8 +144,12 @@ async def guest_zone_peers(
     "/zones/{zone_id}/dashboard",
     response_model=GuestDashboardResponse,
     response_model_by_alias=True,
-    summary="Minimal zone dashboard (optional)",
-    description="Safe read-only copy for guest UI: label, welcome text, links. **zone_id** must be JWT-allowed.",
+    summary="Guest zone dashboard + map hints (optional)",
+    description=(
+        "Read-only guest UI payload: **`label`**, **`welcome_text`**, **`links`**, **`cells`** (H3 from **`zones.h3_cells`**), "
+        "and **`map`** (`center`, `zoom`, `cells`, optional `bounds` / `geojson` from **`zones.parameters.guest_map`**). "
+        "**`zone_id`** must be JWT-allowed. See Swagger **Example** on **`GuestDashboardResponse`**."
+    ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
         status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError},
@@ -167,10 +172,10 @@ async def guest_zone_dashboard(
     response_model_by_alias=True,
     summary="List guest-visible zone messages",
     description=(
-        "Returns **PERMISSION** and **CHAT** **`ZoneMessageEvent`** rows involving this guest "
-        "(by **`sender_guest_id`** / persistence rules). Use **`with_owner_id`** = **`owners.id`** to narrow a DM thread "
-        "with one member. Events are created when members post **`POST /messages`** with **`guest_id`** + **`zone_id`** "
-        "(**`type`** or **`message_type`** **PERMISSION**/**CHAT**)."
+        "Returns **`ZoneMessageEvent`** rows: **PERMISSION** (server-only: submit / approve / reject) and **CHAT** (guest or member). "
+        "Query **`zone_id`** (required, must be in JWT) and optional **`with_owner_id`** = staff **`owners.id`**. "
+        "**PERMISSION** audit lines appear for **every** **`with_owner_id`** thread (canonical guest↔staff view). "
+        "Pagination: **`limit`**, **`cursor`** (opaque), optional **`before_id`**. See **`GuestMessagesListResponse`** example."
     ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
@@ -189,7 +194,7 @@ async def guest_list_messages(
     with_owner_id: int | None = Query(
         default=None,
         ge=1,
-        description="If set, only messages in a thread with this **owners.id**.",
+        description="Staff **`owners.id`** from **`GET …/peers`**. Narrows **CHAT** DM; **PERMISSION** rows remain visible for this peer context.",
     ),
     limit: int = Query(default=50, ge=1, le=200, description="Page size (default 50, max 200)."),
     cursor: str | None = Query(
@@ -235,19 +240,28 @@ async def guest_list_messages(
     summary="Send CHAT to a zone member",
     description=(
         "JSON body: **`zone_id`**, **`type`**, **`to_owner_id`**, and **`text`**. "
-        "Only **CHAT** is allowed. PERMISSION and all other types are rejected."
+        "Only **CHAT** is allowed. **PERMISSION** and other types → **`422`** with **`PERMISSION_MANUAL_DISABLED`** or "
+        "**`GUEST_MESSAGE_TYPE_NOT_ALLOWED`**. Recipient must be **`GET …/peers`** staff: wrong target → **`403`** **`GUEST_NOT_AUTHORIZED_FOR_ZONE`** "
+        "(or **`PEERS_NOT_AVAILABLE`** if no peers). See **`GuestMessageCreatedResponse`** example."
     ),
     responses={
-        status.HTTP_201_CREATED: {"description": "Created message (same item shape as **GET /messages**)."},
-        status.HTTP_400_BAD_REQUEST: {"model": GuestApiHttpError, "description": "Validation (missing **zone_id**, **text**, etc.)."},
+        status.HTTP_201_CREATED: {"description": "Created **CHAT** zone event (**`GuestZoneMessageItem`**)."},
+        status.HTTP_400_BAD_REQUEST: {
+            "model": GuestApiHttpError,
+            "description": "**`VALIDATION`** (missing **text**, bad body).",
+        },
         status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
-        status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError, "description": "Blocked recipient or forbidden zone access."},
-        status.HTTP_404_NOT_FOUND: {"model": GuestApiHttpError, "description": "Guest session or recipient not in zone."},
+        status.HTTP_403_FORBIDDEN: {
+            "model": GuestApiHttpError,
+            "description": "**`GUEST_NOT_AUTHORIZED_FOR_ZONE`**, **`PEERS_NOT_AVAILABLE`**, **`FORBIDDEN`** (chat block), …",
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "model": GuestApiHttpError,
+            "description": "**`NOT_FOUND`** — unknown guest session or inactive recipient.",
+        },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": (
-                "Business validation errors such as **`PERMISSION_MANUAL_DISABLED`** or "
-                "**`GUEST_MESSAGE_TYPE_NOT_ALLOWED`**."
-            )
+            "description": "**`PERMISSION_MANUAL_DISABLED`** or **`GUEST_MESSAGE_TYPE_NOT_ALLOWED`**.",
+            "model": GuestApiHttpError,
         },
     },
 )
@@ -309,7 +323,7 @@ async def guest_post_message(
         )
 
     receiver = owner_crud.get_owner(db, to_owner_id)
-    if not receiver or receiver.zone_id != zone_id or not receiver.active:
+    if not receiver or not receiver.active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -322,12 +336,23 @@ async def guest_post_message(
     peers = guest_api_service.list_zone_peers_for_guest(db, zone_id=zone_id)
     peer = next((p for p in peers if p["owner_id"] == to_owner_id), None)
     if not peer:
+        err_code = "PEERS_NOT_AVAILABLE" if len(peers) == 0 else "GUEST_NOT_AUTHORIZED_FOR_ZONE"
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
-                "message": "Recipient is not an authorized host/admin peer for this zone.",
-                "error_code": "GUEST_NOT_AUTHORIZED_FOR_ZONE",
-                "error": {"message": "Recipient is not an authorized host/admin peer for this zone."},
+                "message": (
+                    "No zone staff are configured for messaging."
+                    if err_code == "PEERS_NOT_AVAILABLE"
+                    else "Recipient is not an authorized host/admin peer for this zone."
+                ),
+                "error_code": err_code,
+                "error": {
+                    "message": (
+                        "No zone staff are configured for messaging."
+                        if err_code == "PEERS_NOT_AVAILABLE"
+                        else "Recipient is not an authorized host/admin peer for this zone."
+                    ),
+                },
             },
         )
     if msg_type == CanonicalMessageType.CHAT.value:

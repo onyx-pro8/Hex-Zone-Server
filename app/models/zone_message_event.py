@@ -15,6 +15,11 @@ class ZoneMessageEvent(Base):
     zone_id = Column(String(100), nullable=False, index=True)
     sender_id = Column(ForeignKey("owners.id", ondelete="SET NULL"), nullable=True, index=True)
     sender_guest_id = Column(String(36), nullable=True, index=True)
+    guest_access_session_id = Column(
+        ForeignKey("guest_access_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     receiver_id = Column(ForeignKey("owners.id", ondelete="SET NULL"), nullable=True, index=True)
     type = Column(String(32), nullable=False, index=True)
     category = Column(Enum(MessageCategory), nullable=False, index=True)
