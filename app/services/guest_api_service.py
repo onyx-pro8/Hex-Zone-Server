@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, defer
 from app.domain.message_types import CanonicalMessageType, normalize_message_type, type_category, type_scope
 from app.models import MessageBlock, Owner, Zone, ZoneMessageEvent
 from app.models.owner import OwnerRole
+from app.services import guest_access_service
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -277,13 +278,6 @@ def create_member_to_guest_zone_message(
     if not zid or not gid:
         return {"__reject__": "validation", "message": "zone_id and guest_id are required."}
 
-    if not guest_access_service.can_manage_zone_guest_requests(db, sender, zid):
-        return {"__reject__": "forbidden", "message": "You cannot message guests for this zone."}
-
-    row = guest_access_service.get_guest_access_session_by_guest_id(db, gid)
-    if not row or row.zone_id != zid:
-        return {"__reject__": "not_found", "message": "Guest session not found for this zone."}
-
     try:
         canonical = normalize_message_type(msg_type)
     except ValueError:
@@ -296,6 +290,16 @@ def create_member_to_guest_zone_message(
         }
     if canonical.value not in GUEST_WRITABLE_TYPES:
         return {"__reject__": "invalid_type", "message": "Only CHAT is allowed for guest threads."}
+
+    # Local import guards against partial module initialization edge cases.
+    from app.services import guest_access_service as _guest_access_service
+
+    if not _guest_access_service.can_manage_zone_guest_requests(db, sender, zid):
+        return {"__reject__": "forbidden", "message": "You cannot message guests for this zone."}
+
+    row = _guest_access_service.get_guest_access_session_by_guest_id(db, gid)
+    if not row or row.zone_id != zid:
+        return {"__reject__": "not_found", "message": "Guest session not found for this zone."}
 
     display_text = (text or "").strip()
     if canonical == CanonicalMessageType.CHAT and not display_text:

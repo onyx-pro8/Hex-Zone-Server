@@ -622,6 +622,16 @@ async def post_messages(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={"error_code": "GUEST_NOT_FOUND", "message": msg},
                 )
+            if code == "permission_manual_disabled":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"error_code": "PERMISSION_MANUAL_DISABLED", "message": msg},
+                )
+            if code == "invalid_type":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"error_code": "GUEST_MESSAGE_TYPE_NOT_ALLOWED", "message": msg},
+                )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"error_code": "INVALID_GUEST_MESSAGE", "message": msg},

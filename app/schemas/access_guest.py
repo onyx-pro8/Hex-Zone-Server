@@ -321,6 +321,7 @@ class GuestQrTokenListItem(BaseModel):
     event_id: str | None = None
     label: str | None = None
     expires_at: datetime | None
+    is_primary: bool = False
     revoked_at: datetime | None = None
     max_uses: int | None = None
     use_count: int = 0

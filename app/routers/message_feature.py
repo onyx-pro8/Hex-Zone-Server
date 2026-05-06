@@ -16,6 +16,8 @@ from app.schemas.access_guest import (
     GuestRequestDecisionData,
     GuestRequestDecisionEnvelope,
 )
+from pydantic import ValidationError
+
 from app.schemas.message_feature import (
     AccessScheduleCreate,
     AccessScheduleResponse,
@@ -54,15 +56,12 @@ async def update_member_location(
 
 @router.post("/messages/propagate", response_model=PropagationMessageResponse, status_code=status.HTTP_201_CREATED)
 async def create_geo_message(
-    payload: PropagationMessageCreate,
+    payload: dict,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    sender = owner_crud.get_owner(db, current_user["user_id"])
-    if not sender:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sender owner not found")
-
-    if payload.type.value == "PERMISSION":
+    msg_type = str(payload.get("type") or "").strip().upper()
+    if msg_type == "PERMISSION":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
@@ -72,7 +71,23 @@ async def create_geo_message(
         )
 
     try:
-        result = message_feature_service.create_geo_propagated_message(db, sender, payload)
+        parsed_payload = PropagationMessageCreate.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "VALIDATION_ERROR",
+                "message": "Invalid propagation payload.",
+                "details": exc.errors(),
+            },
+        ) from exc
+
+    sender = owner_crud.get_owner(db, current_user["user_id"])
+    if not sender:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sender owner not found")
+
+    try:
+        result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -94,15 +109,12 @@ async def create_geo_message(
     summary="Device ingest endpoint using API key",
 )
 async def create_geo_message_with_api_key(
-    payload: PropagationMessageCreate,
+    payload: dict,
     x_api_key: str = Header(..., alias="x-api-key"),
     db: Session = Depends(get_db),
 ):
-    sender = owner_crud.get_owner_by_api_key(db, x_api_key)
-    if not sender:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
-
-    if payload.type.value == "PERMISSION":
+    msg_type = str(payload.get("type") or "").strip().upper()
+    if msg_type == "PERMISSION":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
@@ -112,7 +124,23 @@ async def create_geo_message_with_api_key(
         )
 
     try:
-        result = message_feature_service.create_geo_propagated_message(db, sender, payload)
+        parsed_payload = PropagationMessageCreate.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "VALIDATION_ERROR",
+                "message": "Invalid propagation payload.",
+                "details": exc.errors(),
+            },
+        ) from exc
+
+    sender = owner_crud.get_owner_by_api_key(db, x_api_key)
+    if not sender:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+    try:
+        result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
