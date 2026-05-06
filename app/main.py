@@ -75,7 +75,9 @@ OPENAPI_TAGS = [
             "for member↔member chat, or **`ZoneMessageEvent`** when **`guest_id`** + **`zone_id`** are set (**Access** channel: "
             "**PERMISSION** / **CHAT** to approved QR guests; same store as **`GET /api/guest/messages`**). "
             "Member→guest: send **`message`**, **`type`** or **`message_type`**, **`visibility`** (often **`private`**), **`zone_id`**/**`zoneId`**, **`guest_id`**; omit **`receiver_id`**. "
-            "See schema **`ZoneMessageCreate`** (Swagger **Schemas**). **`GET /messages`** lists the caller’s **`Message`** history only (not guest-thread rows)."
+            "See schema **`ZoneMessageCreate`** (Swagger **Schemas**). **`GET /messages`** defaults to **`Message`** history; "
+            "with **`guest_id`**/**`guestId`**, **`zone_id`**/**`zoneId`**, and/or **`requestId`** (session **`id`** or guest UUID) "
+            "it lists the same **`ZoneMessageEvent`** access thread **`GET /api/guest/messages`** uses (**PERMISSION** + **CHAT**)."
         ),
     },
     {

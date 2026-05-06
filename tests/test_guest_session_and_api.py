@@ -417,6 +417,28 @@ async def test_admin_can_see_access_permission_and_chat_messages(test_db, overri
         assert any(i["type"] == "PERMISSION" for i in items)
         assert any(i["type"] == "CHAT" and i["message"] == "Welcome from admin" for i in items)
 
+        gr = await client.get("/api/access/guest-requests", params={"zone_id": zone_id}, headers=headers)
+        assert gr.status_code == 200
+        session_row_id = next(x["id"] for x in gr.json()["data"] if x["guest_id"] == guest_id)
+
+        by_session_id_only = await client.get(
+            "/messages",
+            headers=headers,
+            params={"owner_id": admin_id, "requestId": session_row_id, "limit": 50},
+        )
+        assert by_session_id_only.status_code == 200, by_session_id_only.text
+        rows_sess = by_session_id_only.json()
+        assert any(r["type"] == "PERMISSION" for r in rows_sess)
+
+        camel = await client.get(
+            "/messages",
+            headers=headers,
+            params={"owner_id": admin_id, "guestId": guest_id, "zoneId": zone_id, "limit": 50},
+        )
+        assert camel.status_code == 200, camel.text
+        rows_camel = camel.json()
+        assert any(r["type"] == "CHAT" for r in rows_camel)
+
 
 @pytest.mark.asyncio
 async def test_guest_messaging_restricted_to_host_admin_peers(test_db, override_get_db):

@@ -9,12 +9,21 @@ from app.crud import message as message_crud
 from app.crud import owner as owner_crud
 from app.core.security import get_current_user
 from app.domain.message_types import CanonicalMessageType, normalize_message_type, type_category, type_scope
+from app.models import GuestAccessSession
 from app.services import guest_api_service
 from app.services import guest_access_service
 from app.services.access_policy import can_message_owner
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 logger = logging.getLogger(__name__)
+
+
+def _first_non_empty_str(*vals: str | None) -> str:
+    for v in vals:
+        s = (v or "").strip()
+        if s:
+            return s
+    return ""
 
 
 @router.post(
@@ -247,6 +256,12 @@ async def _list_zone_messages_for_owner(
     other_owner_id: int | None,
     guest_id: str | None,
     zone_id: str | None,
+    guest_id_camel: str | None,
+    zone_id_camel: str | None,
+    permission_request_id: str | None,
+    request_id: str | None,
+    request_id_camel: str | None,
+    access_session_id: str | None,
     skip: int,
     limit: int,
     current_user: dict,
@@ -265,8 +280,49 @@ async def _list_zone_messages_for_owner(
             detail="Owner not found",
         )
 
-    gid = (guest_id or "").strip()
-    zid = (zone_id or "").strip()
+    gid = _first_non_empty_str(guest_id, guest_id_camel, permission_request_id)
+    zid = _first_non_empty_str(zone_id, zone_id_camel)
+    req_hint = _first_non_empty_str(request_id, request_id_camel, access_session_id)
+
+    # Clients often send **`requestId`** = numeric **`guest_access_sessions.id`** from
+    # **`GET /api/access/guest-requests`**, not the opaque **guest_id** UUID (camelCase **`guestId`**
+    # **`zoneId`** are accepted too).
+    if not gid and req_hint:
+        if req_hint.isdigit():
+            sess_by_pk = db.get(GuestAccessSession, int(req_hint))
+            if not sess_by_pk:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "error_code": "GUEST_NOT_FOUND",
+                        "message": "Guest access session not found for this request id.",
+                    },
+                )
+            if not guest_access_service.can_manage_zone_guest_requests(db, owner, sess_by_pk.zone_id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "error_code": "FORBIDDEN",
+                        "message": "You are not allowed to view guest access thread for this zone.",
+                    },
+                )
+            gid = sess_by_pk.guest_id
+            zid = zid or sess_by_pk.zone_id
+        else:
+            gid = req_hint
+
+    if gid and not zid:
+        sess = guest_access_service.get_guest_access_session_by_guest_id(db, gid)
+        if not sess:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error_code": "GUEST_NOT_FOUND",
+                    "message": "Guest session not found for this zone.",
+                },
+            )
+        zid = sess.zone_id
+
     if gid:
         if not zid:
             raise HTTPException(
@@ -348,10 +404,12 @@ async def _list_zone_messages_for_owner(
     summary="List zone messages",
     description=(
         "**Member ↔ member:** returns **`Message`** rows for **`owner_id`** (+ optional **`other_owner_id`**).\n\n"
-        "**Guest access thread:** when **`guest_id`** and **`zone_id`** are sent, returns **`ZoneMessageEvent`** "
-        "**PERMISSION** + **CHAT** for that guest (same persistence as **`GET /api/guest/messages`**). "
-        "Prefer **`GET /api/access/guest-messages`** for SPA guest threads if you want the "
-        "**`{ \"status\": \"success\", \"data\": { \"items\": … } }`** envelope.\n\n"
+        "**Guest access thread:** include any of **`guest_id`** / **`guestId`**, **`zone_id`** / **`zoneId`**, "
+        "and/or **`request_id`** / **`requestId`** (**numeric **`guest_access_sessions.id`** from "
+        "**`GET /api/access/guest-requests`**). **`zone_id`** may be omitted when **`guest_id`** or "
+        "**`requestId`** resolves a session.\n\n"
+        "Returns **`ZoneMessageEvent`** **PERMISSION** + **CHAT** (same persistence as **`GET /api/guest/messages`**). "
+        "Optional **`GET /api/access/guest-messages`** returns the same items in **`{ \"data\": { \"items\": … } }`** form.\n\n"
         "This path (**`GET /messages`**, no trailing slash) remains the canonical list URL; **`GET /messages/`** "
         "is equivalent."
     ),
@@ -369,7 +427,21 @@ async def list_messages(
     owner_id: int = Query(..., ge=1),
     other_owner_id: int | None = Query(None, ge=1),
     guest_id: str | None = Query(None, max_length=36),
+    guestId: str | None = Query(None, max_length=36, description="camelCase alias of **guest_id**."),
     zone_id: str | None = Query(None, min_length=1, max_length=100),
+    zoneId: str | None = Query(None, min_length=1, max_length=100, description="camelCase alias of **zone_id**."),
+    permission_request_id: str | None = Query(
+        None,
+        max_length=36,
+        description="Usually same opaque id as **`guest_id`** when clients use alternate naming.",
+    ),
+    request_id: str | None = Query(None, max_length=36),
+    requestId: str | None = Query(
+        None,
+        max_length=36,
+        description="Often **numeric **`guest_access_sessions.id`** OR opaque **guest_id** UUID**.",
+    ),
+    access_session_id: str | None = Query(None, max_length=36, description="Alias of **`request_id`**."),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     current_user: dict = Depends(get_current_user),
@@ -380,6 +452,12 @@ async def list_messages(
         other_owner_id=other_owner_id,
         guest_id=guest_id,
         zone_id=zone_id,
+        guest_id_camel=guestId,
+        zone_id_camel=zoneId,
+        permission_request_id=permission_request_id,
+        request_id=request_id,
+        request_id_camel=requestId,
+        access_session_id=access_session_id,
         skip=skip,
         limit=limit,
         current_user=current_user,
@@ -396,7 +474,13 @@ async def list_messages_trailing_slash(
     owner_id: int = Query(..., ge=1),
     other_owner_id: int | None = Query(None, ge=1),
     guest_id: str | None = Query(None, max_length=36),
+    guestId: str | None = Query(None, max_length=36),
     zone_id: str | None = Query(None, min_length=1, max_length=100),
+    zoneId: str | None = Query(None, min_length=1, max_length=100),
+    permission_request_id: str | None = Query(None, max_length=36),
+    request_id: str | None = Query(None, max_length=36),
+    requestId: str | None = Query(None, max_length=36),
+    access_session_id: str | None = Query(None, max_length=36),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     current_user: dict = Depends(get_current_user),
@@ -408,6 +492,12 @@ async def list_messages_trailing_slash(
         other_owner_id=other_owner_id,
         guest_id=guest_id,
         zone_id=zone_id,
+        guest_id_camel=guestId,
+        zone_id_camel=zoneId,
+        permission_request_id=permission_request_id,
+        request_id=request_id,
+        request_id_camel=requestId,
+        access_session_id=access_session_id,
         skip=skip,
         limit=limit,
         current_user=current_user,

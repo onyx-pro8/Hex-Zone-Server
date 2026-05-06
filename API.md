@@ -244,7 +244,12 @@ Response `200`:
 
 Optional query `with_owner_id={owners.id}` narrows to messages involving that peer (aligned with the guest’s `with_owner_id` filter).
 
-Legacy alternative: `GET /messages?owner_id={member_owner_id}&guest_id={guest_id}&zone_id={zone_id}` returns the same **items** as a bare array (no envelope).
+Legacy-compatible listing (no separate frontend routes required):
+
+- `GET /messages?owner_id={member_owner_id}&guest_id={guest_id}&zone_id={zone_id}`
+- CamelCase aliases: **`guestId`**, **`zoneId`**, **`requestId`** (numeric **`guest_access_sessions.id`** from **`GET /api/access/guest-requests`**, matching **`data[].id`**)
+
+These return the same **PERMISSION** + **CHAT** **items** as a bare JSON array (`ZoneMessageResponse` shape).
 
 ## Guest Role Boundaries
 
