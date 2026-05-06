@@ -81,6 +81,24 @@ def init_db():
             )
             conn.execute(
                 text(
+                    "ALTER TABLE guest_access_qr_tokens "
+                    "ADD COLUMN IF NOT EXISTS use_count INTEGER NOT NULL DEFAULT 0;"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE guest_access_qr_tokens "
+                    "ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW();"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE guest_access_qr_tokens "
+                    "ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP WITHOUT TIME ZONE;"
+                )
+            )
+            conn.execute(
+                text(
                     "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_tokens_is_primary "
                     "ON guest_access_qr_tokens (is_primary);"
                 )
