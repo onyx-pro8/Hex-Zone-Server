@@ -593,12 +593,20 @@ async def post_messages(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"error_code": "INVALID_MESSAGE_TYPE", "message": "Unsupported message type."},
             ) from exc
-        if guest_canonical not in (CanonicalMessageType.PERMISSION, CanonicalMessageType.CHAT):
+        if guest_canonical == CanonicalMessageType.PERMISSION:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={
-                    "error_code": "INVALID_MESSAGE_TYPE_FOR_GUEST",
-                    "message": "Only PERMISSION and CHAT may be sent with guest_id.",
+                    "error_code": "PERMISSION_MANUAL_DISABLED",
+                    "message": "PERMISSION messages are server-generated only for guest workflow transitions.",
+                },
+            )
+        if guest_canonical != CanonicalMessageType.CHAT:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error_code": "GUEST_MESSAGE_TYPE_NOT_ALLOWED",
+                    "message": "Guest thread messaging supports only CHAT.",
                 },
             )
         guest_result = guest_api_service.create_member_to_guest_zone_message(

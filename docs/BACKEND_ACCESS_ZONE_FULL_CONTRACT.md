@@ -57,7 +57,7 @@ Audience: backend team owning this repo. Frontend: Hex-Zone-Client (React/Vite).
 
 **Auth:** `Authorization: Bearer <guest_jwt>` (guest access token from `POST /api/access/guest-session`).
 
-**Purpose:** Enumerate zone **hosts / staff** (`owners.id`) the guest may use for PERMISSION or CHAT threads (match PDF “administrator communicates with sender”). The React app blocks messaging when this list is empty.
+**Purpose:** Enumerate zone **hosts / staff** (`owners.id`) the guest may use for CHAT threads. The React app blocks messaging when this list is empty.
 
 **Success:** HTTP **200** when the guest JWT allows `zone_id` (zone appears in JWT `zone_ids`).
 
