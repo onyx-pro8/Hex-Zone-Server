@@ -12,8 +12,10 @@ _engine_kwargs = {
 }
 
 if _db_url.startswith("postgresql"):
-    # Avoid long startup hangs when DB is unreachable in managed deploys.
     _engine_kwargs["connect_args"] = {"connect_timeout": 10}
+    _engine_kwargs["pool_recycle"] = 270
+    _engine_kwargs["pool_size"] = 5
+    _engine_kwargs["max_overflow"] = 10
 
 # Create sync engine
 engine = create_engine(_db_url, **_engine_kwargs)
