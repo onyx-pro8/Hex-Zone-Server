@@ -1,6 +1,7 @@
 """Main FastAPI application."""
 import logging
 import threading
+import time
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -14,14 +15,30 @@ from app.websocket.routes import router as websocket_router
 
 logging.basicConfig(level=logging.INFO)
 
+_MAX_INIT_RETRIES = 5
+_INIT_RETRY_BASE_DELAY = 3
+
 
 def _init_db_background() -> None:
-    """Run DB bootstrap without blocking app startup."""
-    try:
-        init_db()
-        logging.info("Database initialized")
-    except Exception as exc:
-        logging.exception("Database initialization failed in background: %s", exc)
+    """Run DB bootstrap without blocking app startup, retrying on transient failures."""
+    for attempt in range(1, _MAX_INIT_RETRIES + 1):
+        try:
+            init_db()
+            logging.info("Database initialized (attempt %d)", attempt)
+            return
+        except Exception as exc:
+            if attempt < _MAX_INIT_RETRIES:
+                delay = _INIT_RETRY_BASE_DELAY * attempt
+                logging.warning(
+                    "Database init attempt %d/%d failed: %s — retrying in %ds",
+                    attempt, _MAX_INIT_RETRIES, exc, delay,
+                )
+                time.sleep(delay)
+            else:
+                logging.exception(
+                    "Database initialization failed after %d attempts: %s",
+                    _MAX_INIT_RETRIES, exc,
+                )
 
 # Lifespan context
 @asynccontextmanager
