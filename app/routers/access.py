@@ -471,7 +471,9 @@ async def reject_guest_pass(
         "before it expires, setting status to **REVOKED**.\n\n"
         "If the pass has already been consumed (`used_by_guest_id` is set), the revocation "
         "still succeeds but does **not** invalidate the guest's existing session — the guest "
-        "who already arrived retains access."
+        "who already arrived retains access.\n\n"
+        "A **`PERMISSION_MESSAGE`** WebSocket event with code **`GUEST_PASS_REVOKED`** is broadcast "
+        "to all zone members. The member message includes: *\"This Event ID will no longer auto-approve guests.\"*"
     ),
     response_description="Updated guest pass with REVOKED status.",
     responses={
@@ -514,6 +516,13 @@ async def revoke_guest_pass(
     row = result["row"]
     db.commit()
     db.refresh(row)
+
+    ws_payload = guest_pass_service.build_guest_pass_ws_payload(
+        db, guest_pass=row, code="GUEST_PASS_REVOKED", zone_id=row.zone_id,
+    )
+    member_ids = ws_payload["data"]["delivered_owner_ids"]
+    if member_ids:
+        await ws_manager.broadcast_to_users(member_ids, "PERMISSION_MESSAGE", ws_payload["data"])
 
     return GuestPassDecisionEnvelope(
         data=GuestPassDecisionData(

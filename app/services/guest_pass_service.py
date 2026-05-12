@@ -247,7 +247,7 @@ def build_guest_pass_ws_payload(
     """Build a PERMISSION_MESSAGE WebSocket payload for guest pass lifecycle events."""
     requester = db.query(Owner).filter(Owner.id == guest_pass.requested_by).first()
     requester_name = _owner_display_name(requester) if requester else f"Owner #{guest_pass.requested_by}"
-    guest_name = guest_pass.guest_name or "a guest"
+    guest_name_raw = (guest_pass.guest_name or "").strip()
     event_id = guest_pass.event_id
     status_val = guest_pass.status.value if isinstance(guest_pass.status, GuestPassStatus) else guest_pass.status
 
@@ -255,21 +255,43 @@ def build_guest_pass_ws_payload(
     if guest_pass.expires_at:
         expires_label = guest_pass.expires_at.strftime("%b %d, %Y %H:%M UTC")
 
+    for_guest = f" for {guest_name_raw}" if guest_name_raw else ""
+
     if code == "GUEST_PASS_CREATED":
-        decision = "NOT_EXPECTED_GUEST"
+        decision = "EXPECTED_GUEST"
         schedule_match = False
-        sender_text = f"Your guest pass request ({event_id}) for {guest_name} has been submitted."
-        member_text = f"{requester_name} requested a guest pass ({event_id}) for {guest_name}, expires {expires_label}."
+        sender_text = "Your guest pass request has been submitted and is pending admin review."
+        if guest_name_raw:
+            member_text = (
+                f"{requester_name} requested a guest pass (Event ID: {event_id}) "
+                f"for {guest_name_raw}, expires {expires_label}."
+            )
+        else:
+            member_text = (
+                f"{requester_name} requested a guest pass (Event ID: {event_id}), "
+                f"expires {expires_label}."
+            )
     elif code == "GUEST_PASS_ACCEPTED":
         decision = "EXPECTED_GUEST"
         schedule_match = True
-        sender_text = f"Your guest pass ({event_id}) for {guest_name} has been approved."
-        member_text = f"Admin approved guest pass {event_id} for {guest_name}."
+        sender_text = f"Guest pass {event_id} has been approved."
+        member_text = (
+            f"Admin approved guest pass (Event ID: {event_id}){for_guest}. "
+            f"Guests with this Event ID will be auto-approved until {expires_label}."
+        )
     elif code == "GUEST_PASS_REJECTED":
         decision = "NOT_EXPECTED_GUEST"
         schedule_match = False
-        sender_text = f"Your guest pass ({event_id}) for {guest_name} has been rejected."
-        member_text = f"Admin rejected guest pass {event_id}."
+        sender_text = f"Guest pass {event_id} has been rejected."
+        member_text = f"Admin rejected guest pass (Event ID: {event_id}){for_guest}."
+    elif code == "GUEST_PASS_REVOKED":
+        decision = "NOT_EXPECTED_GUEST"
+        schedule_match = False
+        sender_text = f"Guest pass {event_id} has been revoked."
+        member_text = (
+            f"Admin revoked guest pass (Event ID: {event_id}){for_guest}. "
+            f"This Event ID will no longer auto-approve guests."
+        )
     else:
         decision = "NOT_EXPECTED_GUEST"
         schedule_match = False
