@@ -44,7 +44,8 @@ def _first_non_empty_str(*vals: str | None) -> str:
         "Persists **`Message`**; **`receiver_id`** required for private-scope types.\n\n"
         "**Member → guest (Access channel):** Bearer **member** JWT only. Send **`guest_id`** + **`zone_id`**/**`zoneId`**. Body: **`message`**, **`type`**/**`message_type`**, "
         "**`visibility`** (often **`private`**). Only **CHAT** is supported; **`PERMISSION`** for guests is server-only "
-        "(arrival submit / **`/api/access/approve|reject`**) — use **`422`** **`PERMISSION_MANUAL_DISABLED`** if a client sends it. "
+        "(guest arrival, **`/api/access/approve|reject`**, **guest pass** create/accept/reject/revoke via **`/api/access/guest-passes`**) — "
+        "use **`422`** **`PERMISSION_MANUAL_DISABLED`** if a client sends it. "
         "Do **not** send **`receiver_id`**. Persists **`ZoneMessageEvent`**.\n\n"
         "**Responses:** **`ZoneMessageResponse`** includes **`guest_id`** (opaque guest UUID) when the event is tied to Access; "
         "**`sender_id`** = caller, **`receiver_id`** usually **`null`** for outbound member→guest **CHAT**.\n\n"
@@ -482,6 +483,9 @@ async def _list_zone_messages_for_owner(
     description=(
         "**Member ↔ member (no `other_owner_id`):** merges **`Message`** inbox rows with recent **`ZoneMessageEvent`** "
         "**`PERMISSION`** lines plus **Access-channel `CHAT`** for zones the caller may administer. "
+        "**`PERMISSION`** includes unexpected-guest arrival/approve/deny, guest-pass arrival verification, and **guest pass** "
+        "lifecycle rows (`metadata.flow` **`guest_pass_lifecycle`**, **`body.code`** one of **`GUEST_PASS_CREATED`**, "
+        "**`GUEST_PASS_ACCEPTED`**, **`GUEST_PASS_REJECTED`**, **`GUEST_PASS_REVOKED`**). "
         "**`CHAT`** merge follows a **peer-party** rule aligned with **`GET /api/guest/messages`** + **`with_owner_id`**: "
         "guest→staff rows where **`receiver_id`** is the caller **`and`** the row is guest-authored; "
         "staff→guest rows where **`sender_id`** is the caller and a **`guest_id`** marker exists on the event. "
@@ -516,7 +520,8 @@ async def _list_zone_messages_for_owner(
                             "summary": "Merged inbox: Access CHAT + PERMISSION + member messages",
                             "description": (
                                 "**`GET /messages?owner_id=42&skip=0&limit=100`** shape when **`guest_id`** query params omitted: "
-                                "integer‑id **`Message`** rows + UUID **`ZoneMessageEvent`** (**PERMISSION** + peer‑scoped Access **CHAT**). "
+                                "integer‑id **`Message`** rows + UUID **`ZoneMessageEvent`** (**PERMISSION** includes guest access "
+                                "arrival/approve/deny, guest-pass arrival, and **guest pass** lifecycle **`GUEST_PASS_*`**) + peer‑scoped Access **CHAT**. "
                                 "Requires **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT=true`** for **CHAT** merge."
                             ),
                             "value": [

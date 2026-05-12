@@ -1,4 +1,8 @@
-"""Pydantic schemas for the guest pass feature (/api/access/guest-passes)."""
+"""Pydantic schemas for the guest pass feature (`/api/access/guest-passes`).
+
+Successful create/accept/reject/revoke responses correlate with persisted **`PERMISSION`** **`ZoneMessageEvent`**
+rows (`metadata.flow` **`guest_pass_lifecycle`**) merged into **`GET /messages`** for eligible owners; see each model docstring.
+"""
 from datetime import datetime
 from typing import Literal
 
@@ -44,7 +48,11 @@ class GuestPassCreateRequest(BaseModel):
 
 
 class GuestPassCreatedData(BaseModel):
-    """Successful response data from **`POST /api/access/guest-passes`**."""
+    """Successful response data from **`POST /api/access/guest-passes`**.
+
+    The server also persists a **`ZoneMessageEvent`** with **`type`** **`PERMISSION`** (`metadata.flow` **`guest_pass_lifecycle`**,
+    **`body.code`** **`GUEST_PASS_CREATED`**) for the merged **`GET /messages`** inbox (same transaction as this row).
+    """
 
     id: str = Field(description="UUID primary key of the new guest pass.")
     zone_id: str = Field(description="Zone the pass belongs to.")
@@ -147,7 +155,11 @@ class GuestPassListEnvelope(BaseModel):
 
 
 class GuestPassDecisionData(BaseModel):
-    """Response data from accept/reject/revoke endpoints."""
+    """Response data from **`POST …/accept`**, **`…/reject`**, or **`…/revoke`**.
+
+    Each successful decision persists a **`ZoneMessageEvent`** **`PERMISSION`** (`metadata.flow` **`guest_pass_lifecycle`**;
+    **`body.code`** **`GUEST_PASS_ACCEPTED`**, **`GUEST_PASS_REJECTED`**, or **`GUEST_PASS_REVOKED`**; revoke may set **`body.revoked_by`**).
+    """
 
     id: str = Field(description="UUID of the guest pass.")
     status: Literal["ACCEPTED", "REJECTED", "REVOKED"] = Field(description="Updated status.")

@@ -7,6 +7,8 @@ from datetime import datetime
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.domain.message_types import CanonicalMessageType, type_category, type_scope
+from app.models import ZoneMessageEvent
 from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import Owner, OwnerRole
 from app.services.guest_access_service import zone_exists, zone_member_owner_ids, zone_staff_owner_ids
@@ -76,6 +78,8 @@ def create_guest_pass(
     db.flush()
 
     logger.info("guest_pass_created id=%s zone_id=%s event_id=%s by=%d", row.id, zid, eid, owner.id)
+
+    _record_guest_pass_permission_zone_event(db, guest_pass=row, code="GUEST_PASS_CREATED")
 
     return {
         "ok": True,
@@ -156,6 +160,7 @@ def accept_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
     db.flush()
 
     logger.info("guest_pass_accepted id=%s by=%d", pass_id, owner.id)
+    _record_guest_pass_permission_zone_event(db, guest_pass=row, code="GUEST_PASS_ACCEPTED")
     return {"ok": True, "row": row}
 
 
@@ -181,6 +186,7 @@ def reject_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
     db.flush()
 
     logger.info("guest_pass_rejected id=%s by=%d", pass_id, owner.id)
+    _record_guest_pass_permission_zone_event(db, guest_pass=row, code="GUEST_PASS_REJECTED")
     return {"ok": True, "row": row}
 
 
@@ -205,6 +211,9 @@ def revoke_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
     db.flush()
 
     logger.info("guest_pass_revoked id=%s by=%d", pass_id, owner.id)
+    _record_guest_pass_permission_zone_event(
+        db, guest_pass=row, code="GUEST_PASS_REVOKED", acting_owner_id=owner.id,
+    )
     return {"ok": True, "row": row}
 
 
@@ -319,3 +328,57 @@ def build_guest_pass_ws_payload(
             },
         },
     }
+
+
+def _record_guest_pass_permission_zone_event(
+    db: Session,
+    *,
+    guest_pass: GuestPass,
+    code: str,
+    acting_owner_id: int | None = None,
+) -> None:
+    """Persist a PERMISSION zone row so guest pass lifecycle appears in merged message feeds."""
+    payload = build_guest_pass_ws_payload(db, guest_pass=guest_pass, code=code, zone_id=guest_pass.zone_id)
+    member_text = payload["data"]["member_message"]["text"]
+    status_val = guest_pass.status.value if isinstance(guest_pass.status, GuestPassStatus) else guest_pass.status
+
+    if code == "GUEST_PASS_CREATED":
+        sender_id = guest_pass.requested_by
+    elif code in ("GUEST_PASS_ACCEPTED", "GUEST_PASS_REJECTED"):
+        sender_id = guest_pass.reviewed_by
+    elif code == "GUEST_PASS_REVOKED":
+        sender_id = acting_owner_id
+    else:
+        sender_id = guest_pass.reviewed_by or guest_pass.requested_by
+
+    body: dict = {
+        "guest_pass_id": guest_pass.id,
+        "event_id": guest_pass.event_id,
+        "code": code,
+        "status": status_val,
+        "requested_by": guest_pass.requested_by,
+        "guest_name": guest_pass.guest_name,
+        "zone_id": guest_pass.zone_id,
+        "expires_at": guest_pass.expires_at.isoformat() + "Z" if guest_pass.expires_at else None,
+    }
+    if guest_pass.reviewed_by is not None:
+        body["reviewed_by"] = guest_pass.reviewed_by
+    if code == "GUEST_PASS_REVOKED" and acting_owner_id is not None:
+        body["revoked_by"] = acting_owner_id
+
+    perm = ZoneMessageEvent(
+        zone_id=guest_pass.zone_id,
+        sender_id=sender_id,
+        guest_access_session_id=None,
+        type=CanonicalMessageType.PERMISSION.value,
+        category=type_category(CanonicalMessageType.PERMISSION),
+        scope=type_scope(CanonicalMessageType.PERMISSION),
+        text=member_text,
+        body_json=body,
+        metadata_json={
+            "flow": "guest_pass_lifecycle",
+            "domain_event": code,
+        },
+    )
+    db.add(perm)
+    db.flush()

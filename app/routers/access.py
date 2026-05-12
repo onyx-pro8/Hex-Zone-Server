@@ -95,8 +95,10 @@ Outcomes:
 - **UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`** to all active owners
   sharing **zone_id**, and record a PERMISSION zone event for request/decision history.
 
-Those **PERMISSION** rows live in **`zone_message_events`**; zone administrators see them merged into **`GET /messages/?owner_id=`**
-(member inbox) plus in **`GET /api/guest/messages`**/**`GET /api/access/guest-messages`** for the guest thread.
+Those **PERMISSION** rows live in **`zone_message_events`**. **Guest pass** create/accept/reject/revoke also appends
+**`PERMISSION`** rows (`metadata.flow` **`guest_pass_lifecycle`**, **`body.code`** one of **`GUEST_PASS_*`**).
+Eligible owners see merged **`PERMISSION`** lines on **`GET /messages?owner_id=`**; guest-facing threads use
+**`GET /api/guest/messages`** / **`GET /api/access/guest-messages`** where a session or guest id applies.
 
 **Response** includes **`guest_id`** (poll path) and **`zone_id`** (use as **`zone_id`** query on
 `GET /api/access/session/{guest_id}` when the client does not already have **`zid`** from the URL).
@@ -194,7 +196,11 @@ def _primary_token_contract_payload(row) -> PrimaryGuestQrTokenData:
         "(**`POST /api/access/guest-passes/{id}/accept`**) before it becomes active for auto-approval.\n\n"
         "When a guest later arrives at **`POST /api/access/permission`** with the same **`event_id`**, "
         "the server automatically approves the guest if a valid accepted pass exists.\n\n"
-        "A **`PERMISSION_MESSAGE`** WebSocket event is broadcast to all zone members on creation."
+        "**Side effects** (same DB transaction as this response): a **`ZoneMessageEvent`** row with **`type`** "
+        "**`PERMISSION`** is persisted (`metadata.flow` = **`guest_pass_lifecycle`**, **`body.code`** = **`GUEST_PASS_CREATED`**). "
+        "Callers who receive merged guest-access **`PERMISSION`** lines will see it on **`GET /messages?owner_id=...`**.\n\n"
+        "A **`PERMISSION_MESSAGE`** WebSocket payload (same codes and copy) is also sent to **zone staff** "
+        "(see `delivered_owner_ids` in the server implementation)."
     ),
     response_description="Created guest pass with PENDING status.",
     responses={
@@ -333,8 +339,9 @@ async def list_guest_passes(
         "**Bearer** JWT; **zone administrator** only. Accepts a **PENDING** guest pass, "
         "setting its status to **ACCEPTED**. Once accepted, the pass is active for auto-approval "
         "when a guest arrives at **`POST /api/access/permission`** with the matching **`event_id`**.\n\n"
-        "A **`PERMISSION_MESSAGE`** WebSocket event with code **`GUEST_PASS_ACCEPTED`** is broadcast "
-        "to all zone members."
+        "**Side effects:** a persisted **`ZoneMessageEvent`** **`PERMISSION`** row (`metadata.flow` = **`guest_pass_lifecycle`**, "
+        "**`body.code`** = **`GUEST_PASS_ACCEPTED`**) merged into **`GET /messages`** for eligible owners, plus a "
+        "**`PERMISSION_MESSAGE`** WebSocket to **zone staff**."
     ),
     response_description="Updated guest pass with ACCEPTED status.",
     responses={
@@ -401,8 +408,9 @@ async def accept_guest_pass(
     description=(
         "**Bearer** JWT; **zone administrator** only. Rejects a **PENDING** guest pass, "
         "setting its status to **REJECTED**. A rejected pass cannot be used for auto-approval.\n\n"
-        "A **`PERMISSION_MESSAGE`** WebSocket event with code **`GUEST_PASS_REJECTED`** is broadcast "
-        "to all zone members."
+        "**Side effects:** a persisted **`ZoneMessageEvent`** **`PERMISSION`** row (`metadata.flow` = **`guest_pass_lifecycle`**, "
+        "**`body.code`** = **`GUEST_PASS_REJECTED`**) merged into **`GET /messages`** for eligible owners, plus a "
+        "**`PERMISSION_MESSAGE`** WebSocket to **zone staff**."
     ),
     response_description="Updated guest pass with REJECTED status.",
     responses={
@@ -472,8 +480,10 @@ async def reject_guest_pass(
         "If the pass has already been consumed (`used_by_guest_id` is set), the revocation "
         "still succeeds but does **not** invalidate the guest's existing session — the guest "
         "who already arrived retains access.\n\n"
-        "A **`PERMISSION_MESSAGE`** WebSocket event with code **`GUEST_PASS_REVOKED`** is broadcast "
-        "to all zone members. The member message includes: *\"This Event ID will no longer auto-approve guests.\"*"
+        "**Side effects:** a persisted **`ZoneMessageEvent`** **`PERMISSION`** row (`metadata.flow` = **`guest_pass_lifecycle`**, "
+        "**`body.code`** = **`GUEST_PASS_REVOKED`**, **`body.revoked_by`** = revoking admin **`owners.id`**) merged into "
+        "**`GET /messages`** for eligible owners, plus a **`PERMISSION_MESSAGE`** WebSocket to **zone staff**. "
+        "The stored **`message`** text includes that this Event ID will no longer auto-approve guests."
     ),
     response_description="Updated guest pass with REVOKED status.",
     responses={
