@@ -171,6 +171,90 @@ def process_guest_arrival(
     if not zone_exists(db, zone_id):
         return {"error": "INVALID_ZONE", "message": "Unknown or inactive zone.", "http_status": 404}
 
+    # Guest pass lookup: if event_id provided, check for a valid ACCEPTED guest pass first.
+    ev_id = (event_id or "").strip()
+    if ev_id:
+        from app.services import guest_pass_service as _gp_service  # deferred to avoid circular import
+
+        guest_pass = _gp_service.find_accepted_guest_pass_for_event(db, zone_id=zone_id, event_id=ev_id)
+        if guest_pass:
+            guest_token = str(uuid.uuid4())
+            _gp_service.consume_guest_pass(db, guest_pass, guest_token)
+
+            session_row = GuestAccessSession(
+                guest_id=guest_token,
+                zone_id=zone_id,
+                guest_name=guest_name.strip(),
+                event_id=ev_id,
+                device_id=(device_id or "").strip() or None,
+                latitude=latitude,
+                longitude=longitude,
+                kind="expected",
+                resolution=None,
+                schedule_id=None,
+                admin_owner_id=None,
+                qr_token_id=qr_token_db_id,
+            )
+            db.add(session_row)
+            db.flush()
+
+            broadcast_ids = zone_member_owner_ids(db, zone_id)
+            ws_guest_is_here: list[tuple[list[int], dict]] = []
+            payload_here = {
+                "type": "guest_is_here",
+                "guest_name": guest_name.strip(),
+                "zone_id": zone_id,
+                "guest_id": guest_token,
+                "event_id": ev_id,
+                "guest_pass_id": guest_pass.id,
+            }
+            if broadcast_ids:
+                ws_guest_is_here.append((broadcast_ids, payload_here))
+
+            permission_sender_owner_id = guest_pass.requested_by
+            perm_event = ZoneMessageEvent(
+                zone_id=zone_id,
+                sender_id=permission_sender_owner_id,
+                guest_access_session_id=session_row.id,
+                type=CanonicalMessageType.PERMISSION.value,
+                category=type_category(CanonicalMessageType.PERMISSION),
+                scope=type_scope(CanonicalMessageType.PERMISSION),
+                text=f"Guest pass verified for {guest_name.strip()} (event {ev_id}).",
+                body_json={
+                    "guest_name": guest_name.strip(),
+                    "zone_id": zone_id,
+                    "guest_id": guest_token,
+                    "guest_request_id": session_row.id,
+                    "event_id": ev_id,
+                    "device_id": (device_id or "").strip() or None,
+                    "location": {"lat": latitude, "lng": longitude},
+                    "guest_message": "You are expected. Guest pass verified.",
+                    "guest_pass_id": guest_pass.id,
+                },
+                metadata_json={
+                    "flow": "guest_pass_arrival",
+                    "guest_id": guest_token,
+                    "guest_access_session_db_id": session_row.id,
+                    "guest_pass_id": guest_pass.id,
+                    "schedule_match": True,
+                    "domain_event": "guest_pass_arrival",
+                    **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
+                },
+            )
+            db.add(perm_event)
+            db.flush()
+
+            return {
+                "guest_response": {
+                    "status": "EXPECTED",
+                    "message": "You are expected. Guest pass verified.",
+                    "guest_id": guest_token,
+                    "zone_id": zone_id,
+                },
+                "ws_guest_is_here": ws_guest_is_here,
+                "ws_unexpected_guest": [],
+            }
+
     schedule = find_matching_schedule_for_arrival(db, zone_id, guest_name=guest_name, event_id=event_id)
     guest_token = str(uuid.uuid4())
 

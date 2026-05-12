@@ -500,6 +500,53 @@ def init_db():
                 )
             )
 
+            # Guest pass pre-registration table
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS guest_passes (
+                        id VARCHAR(36) PRIMARY KEY,
+                        zone_id VARCHAR(100) NOT NULL,
+                        event_id VARCHAR(100) NOT NULL,
+                        requested_by INTEGER NOT NULL REFERENCES owners(id) ON DELETE SET NULL,
+                        guest_name VARCHAR(255),
+                        notes VARCHAR(1000),
+                        status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+                        reviewed_by INTEGER REFERENCES owners(id) ON DELETE SET NULL,
+                        used_by_guest_id VARCHAR(36),
+                        expires_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                        CONSTRAINT uq_guest_passes_zone_event UNIQUE (zone_id, event_id)
+                    );
+                    """
+                )
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_guest_passes_zone_id ON guest_passes (zone_id);")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_guest_passes_event_id ON guest_passes (event_id);")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_guest_passes_status ON guest_passes (status);")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_guest_passes_requested_by ON guest_passes (requested_by);")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_guest_passes_zone_event ON guest_passes (zone_id, event_id);")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_guest_passes_zone_status ON guest_passes (zone_id, status);")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_guest_passes_used_by_guest_id ON guest_passes (used_by_guest_id);")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_guest_passes_created_at ON guest_passes (created_at);")
+            )
+
 
 def drop_db():
     """Drop all database tables."""

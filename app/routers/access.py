@@ -44,6 +44,16 @@ from app.schemas.access_guest import (
     GuestSessionPollResponse,
     GuestZoneActionRequest,
 )
+from app.schemas.guest_pass import (
+    GuestPassAdminRequest,
+    GuestPassCreateRequest,
+    GuestPassCreatedData,
+    GuestPassCreatedEnvelope,
+    GuestPassDecisionData,
+    GuestPassDecisionEnvelope,
+    GuestPassListEnvelope,
+    GuestPassListItem,
+)
 from app.schemas.guest_api import (
     GuestApiHttpError,
     GuestSessionExchangeData,
@@ -51,7 +61,7 @@ from app.schemas.guest_api import (
     GuestSessionGuestProfile,
 )
 from app.schemas.schemas import MemberGuestAccessThreadMessagesData, MemberGuestAccessThreadMessagesEnvelope
-from app.services import guest_access_qr, guest_access_qr_token_service, guest_access_service, guest_api_service
+from app.services import guest_access_qr, guest_access_qr_token_service, guest_access_service, guest_api_service, guest_pass_service
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -65,12 +75,23 @@ No authentication. Supply either **`zone_id`** (static SPA / QR: **`/access?zid=
 (opaque **`gt`** from an issued invite). Server-mint links use **`/access?gt=…&zid=…`** (optional **`eid`** when the token binds an event);
 legacy **`/access?gt=…`** without **`zid`** is still accepted in the SPA, but **`zone_id`** in this body is omitted in that case.
 
-Validates that **zone_id** exists (explicit or resolved from token), finds an **active access schedule**
-whose window contains server time and matches **event_id** (if sent) **or** **guest_name**,
-then:
+Validates that **zone_id** exists (explicit or resolved from token), then resolves the arrival in priority order:
 
-- **EXPECTED**: persist a guest session, write a PERMISSION zone event, push WebSocket **`guest_is_here`**
-  to the schedule creator (and optionally all zone administrators when `notify_member_assist` is set on the schedule).
+1. **Guest Pass match** (new): when **`event_id`** is submitted, the server looks up
+   **`guest_passes`** where `zone_id` + `event_id` (case-insensitive) match an **ACCEPTED**,
+   non-expired, unconsumed pass. If found, the pass is consumed (`used_by_guest_id` is set),
+   the guest is auto-approved as **EXPECTED**, and a `guest_is_here` WebSocket event is
+   broadcast to all zone members. Guest passes are created via **`POST /api/access/guest-passes`**
+   and accepted by an admin via **`POST /api/access/guest-passes/{id}/accept`**.
+2. **Access Schedule match**: finds an active schedule whose time window contains server time
+   and matches **`event_id`** or **`guest_name`**.
+3. **No match → UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`**
+   to all active owners sharing **zone_id**, and record a PERMISSION zone event.
+
+Outcomes:
+
+- **EXPECTED** (schedule or guest pass match): persist a guest session, write a PERMISSION zone event,
+  push WebSocket **`guest_is_here`** to the schedule creator / zone members.
 - **UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`** to all active owners
   sharing **zone_id**, and record a PERMISSION zone event for request/decision history.
 
@@ -152,6 +173,352 @@ def _primary_token_contract_payload(row) -> PrimaryGuestQrTokenData:
         revoked_at=row.revoked_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Guest Pass endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/guest-passes",
+    response_model=GuestPassCreatedEnvelope,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="access_create_guest_pass",
+    summary="Create a guest pass request",
+    description=(
+        "**Bearer** member JWT. Any authenticated zone member can pre-register an expected guest by "
+        "submitting a guest pass with a unique **`event_id`** and an **`expires_at`** datetime.\n\n"
+        "The pass is created in **PENDING** status. A zone administrator must accept it "
+        "(**`POST /api/access/guest-passes/{id}/accept`**) before it becomes active for auto-approval.\n\n"
+        "When a guest later arrives at **`POST /api/access/permission`** with the same **`event_id`**, "
+        "the server automatically approves the guest if a valid accepted pass exists.\n\n"
+        "A **`PERMISSION_MESSAGE`** WebSocket event is broadcast to all zone members on creation."
+    ),
+    response_description="Created guest pass with PENDING status.",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not a member of the specified zone (**FORBIDDEN**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Owner not found or unknown zone (**INVALID_ZONE**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": "**`event_id`** already exists for this zone (**DUPLICATE_EVENT_ID**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            "description": "**`expires_at`** is in the past (**INVALID_EXPIRY**) or validation failure.",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def create_guest_pass(
+    payload: GuestPassCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+
+    result = guest_pass_service.create_guest_pass(
+        db,
+        owner=owner,
+        zone_id=payload.zone_id,
+        event_id=payload.event_id,
+        guest_name=payload.guest_name,
+        notes=payload.notes,
+        expires_at=payload.expires_at,
+    )
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+
+    ws_payload = guest_pass_service.build_guest_pass_ws_payload(
+        db, guest_pass=row, code="GUEST_PASS_CREATED", zone_id=row.zone_id,
+    )
+    member_ids = ws_payload["data"]["delivered_owner_ids"]
+    if member_ids:
+        await ws_manager.broadcast_to_users(member_ids, "PERMISSION_MESSAGE", ws_payload["data"])
+
+    return GuestPassCreatedEnvelope(
+        data=GuestPassCreatedData(
+            id=row.id,
+            zone_id=row.zone_id,
+            event_id=row.event_id,
+            guest_name=row.guest_name,
+            notes=row.notes,
+            status="PENDING",
+            requested_by=row.requested_by,
+            expires_at=row.expires_at,
+            created_at=row.created_at,
+        )
+    )
+
+
+@router.get(
+    "/guest-passes",
+    response_model=GuestPassListEnvelope,
+    status_code=status.HTTP_200_OK,
+    operation_id="access_list_guest_passes",
+    summary="List guest passes for a zone",
+    description=(
+        "**Bearer** member JWT. Returns all guest passes for the specified **`zone_id`**, "
+        "sorted by **`created_at`** descending (newest first).\n\n"
+        "Each item includes a computed **`is_expired`** boolean (`true` when `now > expires_at`) "
+        "and **`requested_by_name`** (display name of the member who created the pass).\n\n"
+        "**Query params:**\n"
+        "- **`zone_id`** (required): the zone to list passes for.\n"
+        "- **`status`** (optional): filter by **PENDING**, **ACCEPTED**, **REJECTED**, **REVOKED**, or **ALL** (default)."
+    ),
+    response_description="List of guest passes for the zone.",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not a member of the specified zone (**FORBIDDEN**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Owner not found.",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def list_guest_passes(
+    zone_id: str = Query(..., min_length=1, max_length=100, description="Hex zone id; required."),
+    filter_status: str | None = Query(
+        default=None,
+        alias="status",
+        max_length=16,
+        description="Filter: **PENDING**, **ACCEPTED**, **REJECTED**, **REVOKED**, or **ALL** (default).",
+    ),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+
+    result = guest_pass_service.list_guest_passes(
+        db, owner=owner, zone_id=zone_id, status_filter=filter_status,
+    )
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+
+    items = [GuestPassListItem.model_validate(i) for i in result["items"]]
+    return GuestPassListEnvelope(data=items)
+
+
+@router.post(
+    "/guest-passes/{pass_id}/accept",
+    response_model=GuestPassDecisionEnvelope,
+    status_code=status.HTTP_200_OK,
+    operation_id="access_accept_guest_pass",
+    summary="Accept a guest pass (admin only)",
+    description=(
+        "**Bearer** JWT; **zone administrator** only. Accepts a **PENDING** guest pass, "
+        "setting its status to **ACCEPTED**. Once accepted, the pass is active for auto-approval "
+        "when a guest arrives at **`POST /api/access/permission`** with the matching **`event_id`**.\n\n"
+        "A **`PERMISSION_MESSAGE`** WebSocket event with code **`GUEST_PASS_ACCEPTED`** is broadcast "
+        "to all zone members."
+    ),
+    response_description="Updated guest pass with ACCEPTED status.",
+    responses={
+        status.HTTP_400_BAD_REQUEST: {
+            "description": "Guest pass has expired (**EXPIRED**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not an administrator for this zone (**FORBIDDEN**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Guest pass not found (**NOT_FOUND**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": "Guest pass is not in PENDING status (**INVALID_STATE**).",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def accept_guest_pass(
+    pass_id: str = Path(..., min_length=1, max_length=36, description="UUID of the guest pass to accept."),
+    payload: GuestPassAdminRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+
+    result = guest_pass_service.accept_guest_pass(db, owner=owner, pass_id=pass_id)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+
+    ws_payload = guest_pass_service.build_guest_pass_ws_payload(
+        db, guest_pass=row, code="GUEST_PASS_ACCEPTED", zone_id=row.zone_id,
+    )
+    member_ids = ws_payload["data"]["delivered_owner_ids"]
+    if member_ids:
+        await ws_manager.broadcast_to_users(member_ids, "PERMISSION_MESSAGE", ws_payload["data"])
+
+    return GuestPassDecisionEnvelope(
+        data=GuestPassDecisionData(
+            id=row.id, status="ACCEPTED", reviewed_by=row.reviewed_by, updated_at=row.updated_at,
+        )
+    )
+
+
+@router.post(
+    "/guest-passes/{pass_id}/reject",
+    response_model=GuestPassDecisionEnvelope,
+    status_code=status.HTTP_200_OK,
+    operation_id="access_reject_guest_pass",
+    summary="Reject a guest pass (admin only)",
+    description=(
+        "**Bearer** JWT; **zone administrator** only. Rejects a **PENDING** guest pass, "
+        "setting its status to **REJECTED**. A rejected pass cannot be used for auto-approval.\n\n"
+        "A **`PERMISSION_MESSAGE`** WebSocket event with code **`GUEST_PASS_REJECTED`** is broadcast "
+        "to all zone members."
+    ),
+    response_description="Updated guest pass with REJECTED status.",
+    responses={
+        status.HTTP_400_BAD_REQUEST: {
+            "description": "Guest pass has expired (**EXPIRED**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not an administrator for this zone (**FORBIDDEN**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Guest pass not found (**NOT_FOUND**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": "Guest pass is not in PENDING status (**INVALID_STATE**).",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def reject_guest_pass(
+    pass_id: str = Path(..., min_length=1, max_length=36, description="UUID of the guest pass to reject."),
+    payload: GuestPassAdminRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+
+    result = guest_pass_service.reject_guest_pass(db, owner=owner, pass_id=pass_id)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+
+    ws_payload = guest_pass_service.build_guest_pass_ws_payload(
+        db, guest_pass=row, code="GUEST_PASS_REJECTED", zone_id=row.zone_id,
+    )
+    member_ids = ws_payload["data"]["delivered_owner_ids"]
+    if member_ids:
+        await ws_manager.broadcast_to_users(member_ids, "PERMISSION_MESSAGE", ws_payload["data"])
+
+    return GuestPassDecisionEnvelope(
+        data=GuestPassDecisionData(
+            id=row.id, status="REJECTED", reviewed_by=row.reviewed_by, updated_at=row.updated_at,
+        )
+    )
+
+
+@router.post(
+    "/guest-passes/{pass_id}/revoke",
+    response_model=GuestPassDecisionEnvelope,
+    status_code=status.HTTP_200_OK,
+    operation_id="access_revoke_guest_pass",
+    summary="Revoke an accepted guest pass (admin only)",
+    description=(
+        "**Bearer** JWT; **zone administrator** only. Revokes an already-**ACCEPTED** pass "
+        "before it expires, setting status to **REVOKED**.\n\n"
+        "If the pass has already been consumed (`used_by_guest_id` is set), the revocation "
+        "still succeeds but does **not** invalidate the guest's existing session — the guest "
+        "who already arrived retains access."
+    ),
+    response_description="Updated guest pass with REVOKED status.",
+    responses={
+        status.HTTP_400_BAD_REQUEST: {
+            "description": "Guest pass has expired (**EXPIRED**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not an administrator for this zone (**FORBIDDEN**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Guest pass not found (**NOT_FOUND**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": "Guest pass is not in ACCEPTED status (**INVALID_STATE**).",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def revoke_guest_pass(
+    pass_id: str = Path(..., min_length=1, max_length=36, description="UUID of the guest pass to revoke."),
+    payload: GuestPassAdminRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+
+    result = guest_pass_service.revoke_guest_pass(db, owner=owner, pass_id=pass_id)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+
+    return GuestPassDecisionEnvelope(
+        data=GuestPassDecisionData(
+            id=row.id, status="REVOKED", reviewed_by=row.reviewed_by, updated_at=row.updated_at,
+        )
     )
 
 

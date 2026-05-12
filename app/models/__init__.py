@@ -14,6 +14,7 @@ from app.models.access_schedule import AccessSchedule
 from app.models.guest_access_session import GuestAccessSession
 from app.models.guest_access_qr_token import GuestAccessQrToken
 from app.models.guest_access_qr_token_audit import GuestAccessQrTokenAudit
+from app.models.guest_pass import GuestPass
 
 __all__ = [
     "Owner",
@@ -31,4 +32,5 @@ __all__ = [
     "GuestAccessSession",
     "GuestAccessQrToken",
     "GuestAccessQrTokenAudit",
+    "GuestPass",
 ]
