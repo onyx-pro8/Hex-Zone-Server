@@ -48,7 +48,8 @@ def create_guest_pass(
         return {"error": "INVALID_ZONE", "message": "Unknown or inactive zone.", "http_status": 404}
 
     now = datetime.utcnow()
-    if expires_at <= now:
+    exp = expires_at.replace(tzinfo=None) if expires_at.tzinfo else expires_at
+    if exp <= now:
         return {"error": "INVALID_EXPIRY", "message": "expires_at must be in the future.", "http_status": 422}
 
     existing = (
@@ -69,7 +70,7 @@ def create_guest_pass(
         guest_name=(guest_name or "").strip() or None,
         notes=(notes or "").strip() or None,
         status=GuestPassStatus.PENDING,
-        expires_at=expires_at,
+        expires_at=exp,
     )
     db.add(row)
     db.flush()
