@@ -585,6 +585,7 @@ async def rotate_primary_guest_qr_token(
 @router.post(
     "/permission",
     response_model=AccessPermissionResponseEnvelope,
+    response_model_exclude_none=True,
     status_code=status.HTTP_200_OK,
     summary=_PERM_SUMMARY,
     description=_PERM_DESCRIPTION.strip(),
@@ -1105,11 +1106,12 @@ async def guest_access_qr_token_png(
         "when omitted the server resolves **guest_id** alone (opaque UUID).\n\n"
         "Each response includes tri-state **`status`** only: **PENDING** | **APPROVED** | **REJECTED**. "
         "Unexpected + pending maps to **PENDING**; expected or approved maps to **APPROVED**.\n\n"
-        "When **status** is **APPROVED** (unexpected guest approved by an administrator), a valid unused "
-        "**`exchange_code`** plus **`exchange_expires_at`** may appear — single-use for **`POST /api/access/guest-session`** "
-        "(TTL from **`GUEST_ACCESS_EXCHANGE_TTL_MINUTES`**). Omitted if consumed, expired, or not approved."
+        "When **status** is **APPROVED** (expected guest, guest pass, schedule match, or admin-approved unexpected), "
+        "the body includes a valid unused **`exchange_code`** and **`exchange_expires_at`** until the guest completes "
+        "**`POST /api/access/guest-session`** (single-use; TTL from **`GUEST_ACCESS_EXCHANGE_TTL_MINUTES`**). "
+        "Those fields are omitted after a successful exchange (**`exchange_consumed`**) or if the session is not cleared."
     ),
-    response_description="Guest-visible status; optional one-time exchange when APPROVED.",
+    response_description="Guest-visible status; one-time exchange when APPROVED and JWT exchange is still pending.",
     responses={
         status.HTTP_404_NOT_FOUND: {
             "description": "No matching guest session (unknown guest_id or wrong zone_id).",
@@ -1145,6 +1147,8 @@ async def guest_session_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error_code": "NOT_FOUND", "message": "Unknown guest session."},
         )
+    if guest_access_service.ensure_active_guest_exchange_for_poll(db, row):
+        db.commit()
     view = guest_access_service.guest_session_public_view(row)
     if view["status"] == "UNEXPECTED":
         mapped_status = "PENDING"

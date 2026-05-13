@@ -468,6 +468,14 @@ class AccessPermissionResponseData(BaseModel):
     message: str
     guest_id: str
     zone_id: str
+    exchange_code: str | None = Field(
+        default=None,
+        description="When **status** is **EXPECTED**, one-time code for **`POST /api/access/guest-session`** (same as session poll).",
+    )
+    exchange_expires_at: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC expiry for **exchange_code** when present.",
+    )
 
 
 class AccessPermissionResponseEnvelope(BaseModel):

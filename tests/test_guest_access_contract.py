@@ -190,8 +190,14 @@ async def test_access_permission_contract_and_token_zone_validation(override_get
         )
         assert ok.status_code == 200
         assert ok.json()["status"] == "success"
-        assert ok.json()["data"]["status"] in {"EXPECTED", "UNEXPECTED"}
-        assert set(ok.json()["data"].keys()) == {"status", "message", "guest_id", "zone_id"}
+        data = ok.json()["data"]
+        assert data["status"] in {"EXPECTED", "UNEXPECTED"}
+        assert {"status", "message", "guest_id", "zone_id"}.issubset(data.keys())
+        if data["status"] == "EXPECTED":
+            assert data.get("exchange_code")
+            assert data.get("exchange_expires_at")
+        else:
+            assert set(data.keys()) == {"status", "message", "guest_id", "zone_id"}
 
         mismatch = await client.post(
             "/api/access/permission",

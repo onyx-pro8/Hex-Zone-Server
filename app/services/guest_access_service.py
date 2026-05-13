@@ -18,6 +18,37 @@ from app.services.access_policy import zone_listing_owner_ids
 logger = logging.getLogger(__name__)
 
 
+def mint_guest_exchange_for_session(row: GuestAccessSession) -> None:
+    """Issue a fresh one-time JWT exchange secret for this session row (not flushed)."""
+    ttl = max(1, int(settings.GUEST_ACCESS_EXCHANGE_TTL_MINUTES))
+    row.exchange_code = str(uuid.uuid4())
+    row.exchange_expires_at = datetime.utcnow() + timedelta(minutes=ttl)
+    row.exchange_consumed_at = None
+
+
+def guest_exchange_expires_at_iso(row: GuestAccessSession) -> str:
+    exp = row.exchange_expires_at
+    assert exp is not None
+    return exp.replace(microsecond=0).isoformat() + "Z"
+
+
+def ensure_active_guest_exchange_for_poll(db: Session, row: GuestAccessSession) -> bool:
+    """If the guest is cleared for the guest app but has no usable code, mint one. Returns True if DB was mutated."""
+    cleared = row.kind == "expected" or (row.kind == "unexpected" and row.resolution == "approved")
+    if not cleared or row.exchange_consumed_at is not None:
+        return False
+    now = datetime.utcnow()
+    if (
+        row.exchange_code
+        and row.exchange_expires_at
+        and row.exchange_expires_at > now
+    ):
+        return False
+    mint_guest_exchange_for_session(row)
+    db.flush()
+    return True
+
+
 def zone_exists(db: Session, zone_id: str) -> bool:
     z = db.query(Zone.id).filter(Zone.zone_id == zone_id, Zone.active.is_(True)).first()
     if z:
@@ -197,6 +228,8 @@ def process_guest_arrival(
             )
             db.add(session_row)
             db.flush()
+            mint_guest_exchange_for_session(session_row)
+            db.flush()
 
             broadcast_ids = zone_member_owner_ids(db, zone_id)
             ws_guest_is_here: list[tuple[list[int], dict]] = []
@@ -250,6 +283,8 @@ def process_guest_arrival(
                     "message": "You are expected. Guest pass verified.",
                     "guest_id": guest_token,
                     "zone_id": zone_id,
+                    "exchange_code": session_row.exchange_code,
+                    "exchange_expires_at": guest_exchange_expires_at_iso(session_row),
                 },
                 "ws_guest_is_here": ws_guest_is_here,
                 "ws_unexpected_guest": [],
@@ -279,6 +314,8 @@ def process_guest_arrival(
             qr_token_id=qr_token_db_id,
         )
         db.add(session_row)
+        db.flush()
+        mint_guest_exchange_for_session(session_row)
         db.flush()
 
         notify_ids: list[int] = []
@@ -406,13 +443,18 @@ def process_guest_arrival(
     db.add(perm_event)
     db.flush()
 
+    guest_response: dict = {
+        "status": decision,
+        "message": msg_guest,
+        "guest_id": guest_token,
+        "zone_id": zone_id,
+    }
+    if decision == "EXPECTED":
+        guest_response["exchange_code"] = session_row.exchange_code
+        guest_response["exchange_expires_at"] = guest_exchange_expires_at_iso(session_row)
+
     return {
-        "guest_response": {
-            "status": decision,
-            "message": msg_guest,
-            "guest_id": guest_token,
-            "zone_id": zone_id,
-        },
+        "guest_response": guest_response,
         "ws_guest_is_here": ws_guest_is_here,
         "ws_unexpected_guest": ws_unexpected,
     }
@@ -507,14 +549,12 @@ def guest_session_public_view(row: GuestAccessSession) -> dict:
         "approval_status": approval_status,
         "message": message,
     }
-    if status == "APPROVED":
+    ready_for_exchange = (row.kind == "expected") or (
+        row.kind == "unexpected" and row.resolution == "approved"
+    )
+    if ready_for_exchange and row.exchange_consumed_at is None:
         now = datetime.utcnow()
-        if (
-            row.exchange_code
-            and row.exchange_expires_at
-            and row.exchange_expires_at > now
-            and row.exchange_consumed_at is None
-        ):
+        if row.exchange_code and row.exchange_expires_at and row.exchange_expires_at > now:
             out["exchange_code"] = row.exchange_code
             out["exchange_expires_at"] = row.exchange_expires_at.replace(microsecond=0).isoformat() + "Z"
     return out
@@ -554,7 +594,8 @@ def consume_guest_exchange_and_issue_context(
     if row.zone_id != zid:
         return {"error": "zone_mismatch", "message": "zone_id does not match this guest session.", "http_status": 403}
 
-    if not (row.kind == "unexpected" and row.resolution == "approved"):
+    cleared = row.kind == "expected" or (row.kind == "unexpected" and row.resolution == "approved")
+    if not cleared:
         return {"error": "guest_not_approved", "message": "Guest access is not approved.", "http_status": 403}
 
     if row.exchange_consumed_at is not None:
@@ -610,10 +651,7 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
         return {"error": "INVALID_STATE", "message": "Guest session already resolved.", "http_status": 422}
 
     row.resolution = "approved"
-    ttl = max(1, int(settings.GUEST_ACCESS_EXCHANGE_TTL_MINUTES))
-    row.exchange_code = str(uuid.uuid4())
-    row.exchange_expires_at = datetime.utcnow() + timedelta(minutes=ttl)
-    row.exchange_consumed_at = None
+    mint_guest_exchange_for_session(row)
     db.flush()
 
     gname = (row.guest_name or "").strip() or "Guest"

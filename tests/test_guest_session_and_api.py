@@ -621,3 +621,56 @@ async def test_guest_messaging_restricted_to_host_admin_peers(test_db, override_
         )
         assert blocked.status_code == 403
         assert blocked.json().get("error_code") == "GUEST_NOT_AUTHORIZED_FOR_ZONE"
+
+
+@pytest.mark.asyncio
+async def test_expected_schedule_guest_permission_poll_and_guest_session(test_db, override_get_db):
+    """EXPECTED (schedule) arrivals expose exchange on permission and poll; guest-session accepts."""
+    from datetime import datetime, timedelta
+
+    from app.models import AccessSchedule
+
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = "zone-sched-exch-1"
+        await _register_admin(client, zone_id=zone_id)
+        sched = AccessSchedule(
+            zone_id=zone_id,
+            guest_name="Sched Pat",
+            event_id=None,
+            starts_at=datetime.utcnow() - timedelta(hours=1),
+            ends_at=datetime.utcnow() + timedelta(hours=1),
+            active=True,
+            notify_member_assist=False,
+        )
+        test_db.add(sched)
+        test_db.commit()
+
+        perm = await client.post(
+            "/api/access/permission",
+            json={"zone_id": zone_id, "guest_name": "Sched Pat"},
+        )
+        assert perm.status_code == 200
+        pj = perm.json()["data"]
+        assert pj["status"] == "EXPECTED"
+        assert pj.get("exchange_code")
+        assert pj.get("exchange_expires_at")
+        guest_id = pj["guest_id"]
+
+        sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
+        sd = sess.json()["data"]
+        assert sd["status"] == "APPROVED"
+        assert sd["exchange_code"] == pj["exchange_code"]
+        assert sd["exchange_expires_at"] == pj["exchange_expires_at"]
+
+        gs = await client.post(
+            "/api/access/guest-session",
+            json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": pj["exchange_code"]},
+        )
+        assert gs.status_code == 200
+        assert gs.json()["data"]["guest"]["guest_id"] == guest_id
+
+        gs2 = await client.post(
+            "/api/access/guest-session",
+            json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": pj["exchange_code"]},
+        )
+        assert gs2.status_code == 409
