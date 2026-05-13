@@ -29,4 +29,6 @@ class GuestAccessSession(Base):
     exchange_code = Column(String(36), nullable=True, unique=True, index=True)
     exchange_expires_at = Column(DateTime, nullable=True)
     exchange_consumed_at = Column(DateTime, nullable=True)
+    # Set when admin revokes an active session (expected arrivals) or when a consumed guest pass is revoked.
+    access_revoked_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

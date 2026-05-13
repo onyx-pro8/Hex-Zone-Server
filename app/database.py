@@ -77,6 +77,17 @@ def init_db():
             )
             conn.execute(
                 text(
+                    "ALTER TABLE guest_access_sessions ADD COLUMN IF NOT EXISTS access_revoked_at TIMESTAMP;"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_sessions_access_revoked_at "
+                    "ON guest_access_sessions (access_revoked_at);"
+                )
+            )
+            conn.execute(
+                text(
                     "ALTER TABLE guest_access_qr_tokens "
                     "ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;"
                 )

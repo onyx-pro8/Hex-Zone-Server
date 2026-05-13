@@ -8,20 +8,40 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class GuestApiHttpError(BaseModel):
-    """Error body produced by the global HTTP exception handler (typical shape)."""
+    """Error body produced by the global HTTP exception handler (typical shape).
+
+    For **`/api/guest/*`**, **`401`** often carries **`error_code`** = **`GUEST_ACCESS_INVALIDATED`** when the JWT is
+    still cryptographically valid but the backing **`guest_access_sessions`** / guest pass / QR state no longer
+    allows access (admin revoke, reject, guest-pass revoke, QR revoke, or pass expiry).
+    """
 
     status: Literal["error"] = "error"
     message: str = Field(description="Human-readable summary.")
     error_code: str = Field(
         description=(
-            "Stable code including `exchange_consumed`, `NOT_FOUND`, "
-            "`PERMISSION_MANUAL_DISABLED`, `GUEST_MESSAGE_TYPE_NOT_ALLOWED`, "
-            "`GUEST_NOT_AUTHORIZED_FOR_ZONE`, `PEERS_NOT_AVAILABLE`, `VALIDATION`, `FORBIDDEN`."
+            "Stable code. Guest routes: **`GUEST_ACCESS_INVALIDATED`** (server-side revoke/deny/expired pass), "
+            "**`INVALID_GUEST_TOKEN`** (wrong `token_use` / subject), or **`HTTP_401`** when detail was a plain string "
+            "(e.g. expired signature from **`verify_token`**). Other codes: `exchange_consumed`, `NOT_FOUND`, "
+            "`PERMISSION_MANUAL_DISABLED`, `GUEST_MESSAGE_TYPE_NOT_ALLOWED`, `GUEST_NOT_AUTHORIZED_FOR_ZONE`, "
+            "`PEERS_NOT_AVAILABLE`, `VALIDATION`, `FORBIDDEN`."
         )
     )
     error: dict[str, str] = Field(
         default_factory=dict,
         description="Always includes at least `message` mirroring the top-level summary.",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "error",
+                    "message": "Guest access has been revoked.",
+                    "error_code": "GUEST_ACCESS_INVALIDATED",
+                    "error": {"message": "Guest access has been revoked."},
+                }
+            ]
+        }
     )
 
 
@@ -39,7 +59,13 @@ class GuestSessionGuestProfile(BaseModel):
 
 
 class GuestSessionExchangeData(BaseModel):
-    access_token: str = Field(description="JWT: use as `Authorization: Bearer …` on **/api/guest/*** only.")
+    access_token: str = Field(
+        description=(
+            "JWT: use as `Authorization: Bearer …` on **`/api/guest/*`** only. Lifetime = **`expires_in`**. "
+            "The server re-validates **`guest_access_sessions`** (and linked guest pass / QR) on **every** guest request; "
+            "admin revoke yields **`401`** **`GUEST_ACCESS_INVALIDATED`** even before **`exp`**."
+        )
+    )
     token_type: Literal["Bearer"] = "Bearer"
     expires_in: int = Field(description="Access token lifetime in seconds (see server `GUEST_ACCESS_TOKEN_EXPIRE_MINUTES`).")
     guest: GuestSessionGuestProfile

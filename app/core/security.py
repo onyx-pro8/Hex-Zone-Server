@@ -100,10 +100,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials | None = De
     return {"user_id": uid}
 
 
-async def get_current_guest(
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-) -> dict:
-    """Bearer JWT from **`POST /api/access/guest-session`** (`token_use` **guest_access**)."""
+def decode_guest_access_bearer(credentials: HTTPAuthorizationCredentials | None) -> dict:
+    """Parse **`Authorization: Bearer`** guest JWT from **`POST /api/access/guest-session`** (`token_use` **guest_access**).
+
+    Cryptographic validity only — callers must enforce DB-backed revocation via
+    **`guest_access_service.require_guest_bearer_session_active`**.
+    """
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

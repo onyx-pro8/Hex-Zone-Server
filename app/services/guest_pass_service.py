@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_values
 
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
-from app.models import ZoneMessageEvent
+from app.models import GuestAccessSession, ZoneMessageEvent
 from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import Owner, OwnerRole
 from app.services.guest_access_service import zone_exists, zone_member_owner_ids, zone_staff_owner_ids
@@ -213,6 +213,17 @@ def revoke_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
     row.status = GuestPassStatus.REVOKED
     row.updated_at = now
     db.flush()
+
+    gid = (row.used_by_guest_id or "").strip()
+    if gid:
+        sess = (
+            db.query(GuestAccessSession)
+            .filter(GuestAccessSession.guest_id == gid, GuestAccessSession.zone_id == row.zone_id)
+            .first()
+        )
+        if sess is not None:
+            sess.access_revoked_at = now
+            db.flush()
 
     logger.info("guest_pass_revoked id=%s by=%d", pass_id, owner.id)
     _record_guest_pass_permission_zone_event(

@@ -393,7 +393,9 @@ _GUEST_ID_PATH = Path(
             ),
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Session not **`unexpected`** or not **`pending`** (`INVALID_STATE`).",
+            "description": (
+                "Session not **`unexpected`**, not **`pending`**, or **`access_revoked_at`** already set (`INVALID_STATE`)."
+            ),
             "model": GuestAccessHttpError,
         },
     },
@@ -444,10 +446,12 @@ async def approve_guest_request_message_feature(
     "/access/guest-requests/{requestId}/reject",
     response_model=GuestRequestDecisionEnvelope,
     status_code=status.HTTP_200_OK,
-    summary="Reject unexpected guest (dashboard path)",
+    summary="Reject or revoke guest access (dashboard path)",
     description=(
         "**Bearer** JWT. Same semantics as **`POST /api/access/reject`**: **zone** inferred from the "
-        "**requestId** session row and **`?zone_id=`** is required (must match that row)."
+        "**requestId** session row and **`?zone_id=`** is required (must match that row). "
+        "Supports denying **pending** guests, revoking **approved** unexpected guests (invalidates guest JWT), "
+        "and revoking **expected** sessions (**`access_revoked_at`**)."
     ),
     response_description=(
         "`REJECTED` decision envelope with request id and zone metadata."
@@ -466,7 +470,7 @@ async def approve_guest_request_message_feature(
             "model": GuestAccessHttpError,
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Session not **`unexpected`** or already resolved (`INVALID_STATE`).",
+            "description": "Unexpected session already **`rejected`** (`INVALID_STATE`), or other invalid state.",
             "model": GuestAccessHttpError,
         },
     },

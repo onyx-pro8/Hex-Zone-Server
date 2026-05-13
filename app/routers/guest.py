@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.security import get_current_guest
+from app.core.security import decode_guest_access_bearer, security
 from app.crud import owner as owner_crud
 from app.database import get_db
 from app.domain.message_types import CanonicalMessageType
@@ -28,12 +29,36 @@ from app.schemas.guest_api import (
     GuestPeersResponse,
     GuestZoneMessageItem,
 )
-from app.services import guest_api_service
+from app.services import guest_api_service, guest_access_service
+
+# OpenAPI: shared **401** documentation for all **`/api/guest/*`** routes (dependency runs before handler body).
+_GUEST_API_UNAUTHORIZED: dict[str, Any] = {
+    "model": GuestApiHttpError,
+    "description": (
+        "Missing **`Authorization`**, unreadable JWT, or **`exp`** in the past (handler may use **`error_code`** "
+        "**`HTTP_401`** when **`detail`** was a plain string from legacy **`verify_token`**). "
+        "Wrong guest token shape → **`INVALID_GUEST_TOKEN`**. "
+        "Server-side loss of access while JWT is still within **`exp`** → **`GUEST_ACCESS_INVALIDATED`** "
+        "(revoked/denied **`guest_access_sessions`**, revoked/rejected/expired consumed **guest pass**, or revoked "
+        "**`guest_access_qr_tokens`** row linked to the session). **Client:** clear stored guest token and return to "
+        "**`POST /api/access/permission`** → poll **`GET /api/access/session/{guest_id}`** → **`POST /api/access/guest-session`**."
+    ),
+}
 
 router = APIRouter(
     prefix="/api/guest",
     tags=["guest"],
 )
+
+
+async def get_current_guest(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Guest JWT + live **`guest_access_sessions`** / guest-pass / QR revocation check."""
+    ctx = decode_guest_access_bearer(credentials)
+    guest_access_service.require_guest_bearer_session_active(db, guest_id=ctx["guest_id"])
+    return ctx
 
 
 def _zone_message_item(raw: dict) -> GuestZoneMessageItem:
@@ -62,11 +87,11 @@ def _guest_zone_allowed(guest_ctx: dict, zone_id: str) -> None:
     description=(
         "Returns profile and JWT expiry for the **guest_access** bearer issued by "
         "**`POST /api/access/guest-session`**. Use **`Authorization: Bearer <access_token>`**. "
+        "Each call re-checks the database (session row, guest pass, QR token); revoked access fails here first. "
         "**`allowed_message_types`** mirrors the JWT claim (defaults to CHAT-only)."
     ),
     responses={
-        status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError, "description": "Missing/invalid token or wrong `token_use`."},
-        status.HTTP_404_NOT_FOUND: {"model": GuestApiHttpError, "description": "Guest row missing (stale token)."},
+        status.HTTP_401_UNAUTHORIZED: _GUEST_API_UNAUTHORIZED,
     },
 )
 async def guest_me(
@@ -117,10 +142,11 @@ async def guest_me(
         "**Staff peers only** (not every user in the zone): active **ADMINISTRATOR** owners with matching **`owners.zone_id`**, "
         "**`zones.owner_id`** for active zone rows, plus the **primary zone admin** fallback. "
         "**`zone_id`** must appear in the JWT **`zone_ids`** claim. Each **`owner_id`** is **`owners.id`** — use as "
-        "**`with_owner_id`** (GET thread) or **`to_owner_id`** (POST CHAT). **`can_receive_chat`** is false when the member blocked **CHAT**."
+        "**`with_owner_id`** (GET thread) or **`to_owner_id`** (POST CHAT). **`can_receive_chat`** is false when the member blocked **CHAT**.\n\n"
+        "Same **`401`** semantics as **`GET /api/guest/me`** (see **`GuestApiHttpError`** example **`GUEST_ACCESS_INVALIDATED`**)."
     ),
     responses={
-        status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
+        status.HTTP_401_UNAUTHORIZED: _GUEST_API_UNAUTHORIZED,
         status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError, "description": "`GUEST_NOT_AUTHORIZED_FOR_ZONE` if zone not in token."},
     },
 )
@@ -149,10 +175,11 @@ async def guest_zone_peers(
     description=(
         "Read-only guest UI payload: **`label`**, **`welcome_text`**, **`links`**, **`cells`** (H3 from **`zones.h3_cells`**), "
         "and **`map`** (`center`, `zoom`, `cells`, optional `bounds` / `geojson` from **`zones.parameters.guest_map`**). "
-        "**`zone_id`** must be JWT-allowed. See Swagger **Example** on **`GuestDashboardResponse`**."
+        "**`zone_id`** must be JWT-allowed. See Swagger **Example** on **`GuestDashboardResponse`**.\n\n"
+        "Same **`401`** semantics as **`GET /api/guest/me`**."
     ),
     responses={
-        status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
+        status.HTTP_401_UNAUTHORIZED: _GUEST_API_UNAUTHORIZED,
         status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError},
     },
 )
@@ -177,10 +204,11 @@ async def guest_zone_dashboard(
         "Query **`zone_id`** (required, must be in JWT) and optional **`with_owner_id`** = staff **`owners.id`**. "
         "**PERMISSION** audit lines appear for **every** **`with_owner_id`** thread (canonical guest↔staff view). "
         "**CHAT** lines are peer-scoped the same way staff **`GET /messages`** merged inbox uses **party** filters for Access **CHAT**.\n\n"
-        "**Pagination:** **`limit`**, **`cursor`** (opaque), optional **`before_id`**. See **`GuestMessagesListResponse`** example."
+        "**Pagination:** **`limit`**, **`cursor`** (opaque), optional **`before_id`**. See **`GuestMessagesListResponse`** example.\n\n"
+        "Same **`401`** semantics as **`GET /api/guest/me`**."
     ),
     responses={
-        status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
+        status.HTTP_401_UNAUTHORIZED: _GUEST_API_UNAUTHORIZED,
         status.HTTP_403_FORBIDDEN: {"model": GuestApiHttpError},
     },
 )
@@ -247,7 +275,8 @@ async def guest_list_messages(
         "(or **`PEERS_NOT_AVAILABLE`** if no peers).\n\n"
         "**Side effects:** persists **`ZoneMessageEvent`** (**`guest_id`** in body/metadata). Recipient staff see the same chat in **`GET /messages?owner_id={to_owner_id}`** merged "
         "inbox (**`skip`/`limit`**) when **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT`** is **true** (default)—**`ZoneMessageResponse`** mirrors **`guest_id`**, **`type`:** **`CHAT`**. "
-        "Optional **`NEW_MESSAGE`** WebSocket (**same JSON shape**) to participant **`owners.id`**. See **`GuestMessageCreatedResponse`** example."
+        "Optional **`NEW_MESSAGE`** WebSocket (**same JSON shape**) to participant **`owners.id`**. See **`GuestMessageCreatedResponse`** example.\n\n"
+        "Same **`401`** semantics as **`GET /api/guest/me`**."
     ),
     responses={
         status.HTTP_201_CREATED: {"description": "Created **CHAT** zone event (**`GuestZoneMessageItem`**)."},
@@ -255,7 +284,7 @@ async def guest_list_messages(
             "model": GuestApiHttpError,
             "description": "**`VALIDATION`** (missing **text**, bad body).",
         },
-        status.HTTP_401_UNAUTHORIZED: {"model": GuestApiHttpError},
+        status.HTTP_401_UNAUTHORIZED: _GUEST_API_UNAUTHORIZED,
         status.HTTP_403_FORBIDDEN: {
             "model": GuestApiHttpError,
             "description": "**`GUEST_NOT_AUTHORIZED_FOR_ZONE`**, **`PEERS_NOT_AVAILABLE`**, **`FORBIDDEN`** (chat block), …",

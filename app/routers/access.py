@@ -486,8 +486,8 @@ async def reject_guest_pass(
         "**Bearer** JWT; **zone administrator** only. Revokes an already-**ACCEPTED** pass "
         "before it expires, setting status to **REVOKED**.\n\n"
         "If the pass has already been consumed (`used_by_guest_id` is set), the revocation "
-        "still succeeds but does **not** invalidate the guest's existing session — the guest "
-        "who already arrived retains access.\n\n"
+        "also invalidates the guest's **guest_access** Bearer: **`/api/guest/*`** returns **401** with "
+        "**`error_code`** **`GUEST_ACCESS_INVALIDATED`** until the client obtains a new session.\n\n"
         "**Side effects:** a persisted **`ZoneMessageEvent`** **`PERMISSION`** row (`metadata.flow` = **`guest_pass_lifecycle`**, "
         "**`body.code`** = **`GUEST_PASS_REVOKED`**, **`body.revoked_by`** = revoking admin **`owners.id`**) merged into "
         "**`GET /messages`** for eligible owners, plus a **`PERMISSION_MESSAGE`** WebSocket to **zone staff**. "
@@ -495,6 +495,14 @@ async def reject_guest_pass(
     ),
     response_description="Updated guest pass with REVOKED status.",
     responses={
+        status.HTTP_200_OK: {
+            "description": (
+                "Pass **REVOKED**. If **`used_by_guest_id`** was set, the matching **`guest_access_sessions`** row "
+                "receives **`access_revoked_at`** so **`/api/guest/*`** returns **401** with **`GuestApiHttpError`** "
+                "**`GUEST_ACCESS_INVALIDATED`**."
+            ),
+            "model": GuestPassDecisionEnvelope,
+        },
         status.HTTP_400_BAD_REQUEST: {
             "description": "Guest pass has expired (**EXPIRED**).",
             "model": GuestAccessHttpError,
@@ -944,7 +952,10 @@ async def list_guest_access_qr_tokens(
     "/qr-tokens/{qr_token_id}/revoke",
     response_model=GuestQrTokenListItem,
     summary="Revoke a stored guest QR token",
-    description="Token stops accepting new arrivals immediately.",
+    description=(
+        "Token stops accepting new arrivals immediately. Sessions already linked via **`guest_access_sessions.qr_token_id`** "
+        "lose **`/api/guest/*`** access on the next request (**`401`** **`GUEST_ACCESS_INVALIDATED`**) until the guest re-authenticates."
+    ),
     responses={
         status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
         status.HTTP_403_FORBIDDEN: {"model": GuestAccessHttpError},
@@ -1113,7 +1124,9 @@ async def guest_access_qr_token_png(
         "**`zone_id`** should match arrival (invite **`zid`**, **`gt`** QR `zid`, or **`zone_id`** in the permission response); "
         "when omitted the server resolves **guest_id** alone (opaque UUID).\n\n"
         "Each response includes tri-state **`status`** only: **PENDING** | **APPROVED** | **REJECTED**. "
-        "Unexpected + pending maps to **PENDING**; expected or approved maps to **APPROVED**.\n\n"
+        "Unexpected + pending maps to **PENDING**; expected or approved maps to **APPROVED**. "
+        "**REJECTED** includes admin deny (**`resolution`** **`rejected`**), session revoke (**`access_revoked_at`**), "
+        "and equivalent guest-facing states after **`POST /api/access/reject`** on expected arrivals.\n\n"
         "When **status** is **APPROVED** (expected guest, guest pass, schedule match, or admin-approved unexpected), "
         "the body includes a valid unused **`exchange_code`** and **`exchange_expires_at`** until the guest completes "
         "**`POST /api/access/guest-session`** (single-use; TTL from **`GUEST_ACCESS_EXCHANGE_TTL_MINUTES`**). "
@@ -1183,7 +1196,9 @@ async def guest_session_status(
         "**`GET /api/access/session/{guest_id}`** when **status** is **APPROVED**) together with "
         "**`guest_id`** and **`zone_id`**. The code is **consumed** on success and cannot be reused.\n\n"
         "Returns a short-lived JWT: use **`Authorization: Bearer <access_token>`** only on **`/api/guest/*`**. "
-        "JWT lifetime: **`expires_in`** seconds (from env **`GUEST_ACCESS_TOKEN_EXPIRE_MINUTES`**).\n\n"
+        "JWT lifetime: **`expires_in`** seconds (from env **`GUEST_ACCESS_TOKEN_EXPIRE_MINUTES`**). "
+        "The server may return **`401`** **`GUEST_ACCESS_INVALIDATED`** on guest routes **before** natural **`exp`** "
+        "if an admin revokes access (see **`POST /api/access/reject`**, guest-pass **`…/revoke`**, QR token revoke).\n\n"
         "Optional **`device_id`**: if the arrival session stored **`device_id`** from **POST /api/access/permission** "
         "and the client sends a different non-empty value, the server responds **403** **`device_mismatch`**."
     ),
@@ -1194,7 +1209,11 @@ async def guest_session_status(
             "model": GuestApiHttpError,
         },
         status.HTTP_403_FORBIDDEN: {
-            "description": "`guest_not_approved`, `zone_mismatch`, or `device_mismatch`.",
+            "description": (
+                "**`guest_not_approved`** — session not cleared for exchange, exchange already consumed with invalid retry, "
+                "or **`access_revoked_at`** set (admin revoked expected session). "
+                "**`zone_mismatch`** or **`device_mismatch`** as documented."
+            ),
             "model": GuestApiHttpError,
         },
         status.HTTP_404_NOT_FOUND: {
@@ -1378,7 +1397,12 @@ async def list_guest_requests_for_access_api(
     )
     data = []
     for r in rows:
-        row_status = "ARRIVED" if r.kind == "expected" else ("PENDING" if r.resolution == "pending" else str(r.resolution or "").upper())
+        if r.access_revoked_at is not None:
+            row_status = "REJECTED"
+        else:
+            row_status = "ARRIVED" if r.kind == "expected" else (
+                "PENDING" if r.resolution == "pending" else str(r.resolution or "").upper()
+            )
         data.append(
             GuestRequestListItemContract(
                 id=str(r.id),
@@ -1496,7 +1520,9 @@ async def list_guest_access_messages_for_member(
             "model": GuestAccessHttpError,
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Session not unexpected or already resolved (`INVALID_STATE`).",
+            "description": (
+                "Session not **`unexpected`**, already resolved, or **`access_revoked_at`** already set (`INVALID_STATE`)."
+            ),
             "model": GuestAccessHttpError,
         },
     },
@@ -1529,9 +1555,12 @@ async def approve_guest(
     "/reject",
     response_model=GuestAdminDecisionResponse,
     status_code=status.HTTP_200_OK,
-    summary="Reject unexpected guest",
+    summary="Reject or revoke guest access",
     description=(
-        "Same authorization rules as **approve**. Sets resolution to **`rejected`**; guest observes "
+        "Same authorization rules as **approve**. Denies a **pending** unexpected guest (**`resolution`** → **`rejected`**). "
+        "Also revokes an **approved** unexpected guest after they may have exchanged a JWT, and revokes **expected** "
+        "(schedule / auto-approved) sessions by setting **`access_revoked_at`** — in all cases the guest's "
+        "**`/api/guest/*`** Bearer then returns **401** **`GUEST_ACCESS_INVALIDATED`**. Guest observes "
         "via **`GET /api/access/session/{guest_id}`**.\n\n"
         "**Dashboard SPA alternative:** **`POST /message-feature/access/guest-requests/{requestId}/reject`** "
         "(path request row **id**, inferred zone; optional **`?zone_id=`** legacy)."
@@ -1548,7 +1577,7 @@ async def approve_guest(
             "model": GuestAccessHttpError,
         },
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
-            "description": "Session not unexpected or already resolved (`INVALID_STATE`).",
+            "description": "Session **`unexpected`** already **`rejected`**, or **`access_revoked_at`** already set (`INVALID_STATE`).",
             "model": GuestAccessHttpError,
         },
     },

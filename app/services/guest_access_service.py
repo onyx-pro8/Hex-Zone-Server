@@ -5,6 +5,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 
+from fastapi import HTTPException, status
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
@@ -12,11 +13,56 @@ from app.core.config import settings
 
 from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_values
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
-from app.models import AccessSchedule, GuestAccessSession, Owner, Zone, ZoneMessageEvent
+from app.models import AccessSchedule, GuestAccessQrToken, GuestAccessSession, Owner, Zone, ZoneMessageEvent
+from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import OwnerRole
 from app.services.access_policy import zone_listing_owner_ids
 
 logger = logging.getLogger(__name__)
+
+
+def _guest_access_invalidated_exc(message: str) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={
+            "message": message,
+            "error_code": "GUEST_ACCESS_INVALIDATED",
+            "error": {"message": message},
+        },
+    )
+
+
+def require_guest_bearer_session_active(db: Session, *, guest_id: str) -> None:
+    """Ensure **guest_access_sessions** (and linked guest pass / QR token) still authorize this JWT."""
+    gid = (guest_id or "").strip()
+    if not gid:
+        _guest_access_invalidated_exc("Guest session is no longer valid.")
+
+    row = db.query(GuestAccessSession).filter(GuestAccessSession.guest_id == gid).first()
+    if row is None:
+        _guest_access_invalidated_exc("Guest session is no longer valid.")
+
+    if row.access_revoked_at is not None:
+        _guest_access_invalidated_exc("Guest access has been revoked.")
+
+    if row.kind == "unexpected" and row.resolution == "rejected":
+        _guest_access_invalidated_exc("Guest access was denied or revoked.")
+
+    if row.kind == "unexpected" and row.resolution == "pending":
+        _guest_access_invalidated_exc("Guest access is not active.")
+
+    gp = db.query(GuestPass).filter(GuestPass.used_by_guest_id == gid).first()
+    if gp is not None:
+        if gp.status in (GuestPassStatus.REVOKED, GuestPassStatus.REJECTED):
+            _guest_access_invalidated_exc("Guest pass is no longer valid.")
+        if gp.status == GuestPassStatus.ACCEPTED and gp.expires_at is not None:
+            if gp.expires_at <= datetime.utcnow():
+                _guest_access_invalidated_exc("Guest pass has expired.")
+
+    if row.qr_token_id is not None:
+        tok = db.get(GuestAccessQrToken, row.qr_token_id)
+        if tok is not None and tok.revoked_at is not None:
+            _guest_access_invalidated_exc("Guest QR link has been revoked.")
 
 
 def mint_guest_exchange_for_session(row: GuestAccessSession) -> None:
@@ -35,6 +81,8 @@ def guest_exchange_expires_at_iso(row: GuestAccessSession) -> str:
 
 def ensure_active_guest_exchange_for_poll(db: Session, row: GuestAccessSession) -> bool:
     """If the guest is cleared for the guest app but has no usable code, mint one. Returns True if DB was mutated."""
+    if row.access_revoked_at is not None:
+        return False
     cleared = row.kind == "expected" or (row.kind == "unexpected" and row.resolution == "approved")
     if not cleared or row.exchange_consumed_at is not None:
         return False
@@ -90,6 +138,8 @@ def can_manage_zone_guest_requests(db: Session, viewer: Owner, zone_id: str) -> 
 
 def _guest_row_client_status(row: GuestAccessSession) -> str:
     """PENDING / APPROVED / REJECTED for dashboard approval UI."""
+    if row.access_revoked_at is not None:
+        return "REJECTED"
     if row.kind == "expected":
         return "APPROVED"
     if row.resolution == "approved":
@@ -519,17 +569,31 @@ def list_guest_sessions_for_zone(
             )
         elif st in ("APPROVED", "GRANTED"):
             q = q.filter(
+                GuestAccessSession.access_revoked_at.is_(None),
                 or_(
                     GuestAccessSession.kind == "expected",
                     and_(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "approved"),
-                )
+                ),
             )
         elif st in ("REJECTED", "DENIED"):
-            q = q.filter(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "rejected")
+            q = q.filter(
+                or_(
+                    GuestAccessSession.access_revoked_at.isnot(None),
+                    and_(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "rejected"),
+                )
+            )
     return q.order_by(GuestAccessSession.created_at.desc()).offset(sk).limit(lim).all()
 
 
 def guest_session_public_view(row: GuestAccessSession) -> dict:
+    if row.access_revoked_at is not None:
+        return {
+            "guest_id": row.guest_id,
+            "zone_id": row.zone_id,
+            "status": "REJECTED",
+            "approval_status": "REJECTED",
+            "message": "Access has been revoked.",
+        }
     if row.kind == "expected":
         status = "EXPECTED"
         message = "You are expected. Please proceed."
@@ -553,8 +617,12 @@ def guest_session_public_view(row: GuestAccessSession) -> dict:
         "approval_status": approval_status,
         "message": message,
     }
-    ready_for_exchange = (row.kind == "expected") or (
-        row.kind == "unexpected" and row.resolution == "approved"
+    ready_for_exchange = (
+        row.access_revoked_at is None
+        and (
+            (row.kind == "expected")
+            or (row.kind == "unexpected" and row.resolution == "approved")
+        )
     )
     if ready_for_exchange and row.exchange_consumed_at is None:
         now = datetime.utcnow()
@@ -597,6 +665,9 @@ def consume_guest_exchange_and_issue_context(
 
     if row.zone_id != zid:
         return {"error": "zone_mismatch", "message": "zone_id does not match this guest session.", "http_status": 403}
+
+    if row.access_revoked_at is not None:
+        return {"error": "guest_not_approved", "message": "Guest access is not approved.", "http_status": 403}
 
     cleared = row.kind == "expected" or (row.kind == "unexpected" and row.resolution == "approved")
     if not cleared:
@@ -649,6 +720,8 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
     )
     if not row:
         return {"error": "NOT_FOUND", "message": "Guest session not found.", "http_status": 404}
+    if row.access_revoked_at is not None:
+        return {"error": "INVALID_STATE", "message": "Guest session is no longer active.", "http_status": 422}
     if row.kind != "unexpected":
         return {"error": "INVALID_STATE", "message": "Guest does not require approval.", "http_status": 422}
     if row.resolution != "pending":
@@ -715,45 +788,125 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
     )
     if not row:
         return {"error": "NOT_FOUND", "message": "Guest session not found.", "http_status": 404}
+    if row.access_revoked_at is not None:
+        return {"error": "INVALID_STATE", "message": "Guest session is no longer active.", "http_status": 422}
+
+    if row.kind == "expected":
+        row.access_revoked_at = datetime.utcnow()
+        db.flush()
+        gname = (row.guest_name or "").strip() or "Guest"
+        note = ZoneMessageEvent(
+            zone_id=zid,
+            sender_id=acting_owner.id,
+            guest_access_session_id=row.id,
+            type=CanonicalMessageType.PERMISSION.value,
+            category=type_category(CanonicalMessageType.PERMISSION),
+            scope=type_scope(CanonicalMessageType.PERMISSION),
+            text=f"Guest access revoked for {gname}.",
+            body_json={
+                "guest_id": guest_id,
+                "guest_name": gname,
+                "guest_request_id": row.id,
+                "zone_id": zid,
+                "resolution": "REVOKED",
+            },
+            metadata_json={
+                "flow": "guest_access_revoke",
+                "domain_event": "guest_access_revoked",
+                "acting_owner_id": acting_owner.id,
+                "guest_access_session_db_id": row.id,
+            },
+        )
+        db.add(note)
+        db.flush()
+        return {
+            "ok": True,
+            "guest_response": {
+                "status": "REJECTED",
+                "message": "Access has been revoked.",
+                "guest_id": guest_id,
+            },
+        }
+
     if row.kind != "unexpected":
         return {"error": "INVALID_STATE", "message": "Guest does not require approval.", "http_status": 422}
-    if row.resolution != "pending":
-        return {"error": "INVALID_STATE", "message": "Guest session already resolved.", "http_status": 422}
 
-    row.resolution = "rejected"
-    db.flush()
+    if row.resolution == "pending":
+        row.resolution = "rejected"
+        db.flush()
 
-    gname = (row.guest_name or "").strip() or "Guest"
-    note = ZoneMessageEvent(
-        zone_id=zid,
-        sender_id=acting_owner.id,
-        guest_access_session_id=row.id,
-        type=CanonicalMessageType.PERMISSION.value,
-        category=type_category(CanonicalMessageType.PERMISSION),
-        scope=type_scope(CanonicalMessageType.PERMISSION),
-        text=f"Guest access denied for {gname}.",
-        body_json={
-            "guest_id": guest_id,
-            "guest_name": gname,
-            "guest_request_id": row.id,
-            "zone_id": zid,
-            "resolution": "REJECTED",
-        },
-        metadata_json={
-            "flow": "guest_access_reject",
-            "domain_event": "guest_request_rejected",
-            "acting_owner_id": acting_owner.id,
-            "guest_access_session_db_id": row.id,
-        },
-    )
-    db.add(note)
-    db.flush()
+        gname = (row.guest_name or "").strip() or "Guest"
+        note = ZoneMessageEvent(
+            zone_id=zid,
+            sender_id=acting_owner.id,
+            guest_access_session_id=row.id,
+            type=CanonicalMessageType.PERMISSION.value,
+            category=type_category(CanonicalMessageType.PERMISSION),
+            scope=type_scope(CanonicalMessageType.PERMISSION),
+            text=f"Guest access denied for {gname}.",
+            body_json={
+                "guest_id": guest_id,
+                "guest_name": gname,
+                "guest_request_id": row.id,
+                "zone_id": zid,
+                "resolution": "REJECTED",
+            },
+            metadata_json={
+                "flow": "guest_access_reject",
+                "domain_event": "guest_request_rejected",
+                "acting_owner_id": acting_owner.id,
+                "guest_access_session_db_id": row.id,
+            },
+        )
+        db.add(note)
+        db.flush()
 
-    return {
-        "ok": True,
-        "guest_response": {
-            "status": "REJECTED",
-            "message": "Access was not approved.",
-            "guest_id": guest_id,
-        },
-    }
+        return {
+            "ok": True,
+            "guest_response": {
+                "status": "REJECTED",
+                "message": "Access was not approved.",
+                "guest_id": guest_id,
+            },
+        }
+
+    if row.resolution == "approved":
+        row.resolution = "rejected"
+        db.flush()
+
+        gname = (row.guest_name or "").strip() or "Guest"
+        note = ZoneMessageEvent(
+            zone_id=zid,
+            sender_id=acting_owner.id,
+            guest_access_session_id=row.id,
+            type=CanonicalMessageType.PERMISSION.value,
+            category=type_category(CanonicalMessageType.PERMISSION),
+            scope=type_scope(CanonicalMessageType.PERMISSION),
+            text=f"Guest access revoked for {gname}.",
+            body_json={
+                "guest_id": guest_id,
+                "guest_name": gname,
+                "guest_request_id": row.id,
+                "zone_id": zid,
+                "resolution": "REVOKED",
+            },
+            metadata_json={
+                "flow": "guest_access_revoke",
+                "domain_event": "guest_access_revoked",
+                "acting_owner_id": acting_owner.id,
+                "guest_access_session_db_id": row.id,
+            },
+        )
+        db.add(note)
+        db.flush()
+
+        return {
+            "ok": True,
+            "guest_response": {
+                "status": "REJECTED",
+                "message": "Access has been revoked.",
+                "guest_id": guest_id,
+            },
+        }
+
+    return {"error": "INVALID_STATE", "message": "Guest session already resolved.", "http_status": 422}

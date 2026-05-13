@@ -180,6 +180,23 @@ async def test_guest_exchange_consumed_and_guest_apis(test_db, override_get_db):
         items = lst.json()["data"]["items"]
         assert any(i["text"] == "Hello admin" for i in items)
 
+        rv = await client.post(
+            "/api/access/reject",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        assert rv.status_code == 200, rv.text
+
+        me2 = await client.get("/api/guest/me", headers={"Authorization": f"Bearer {guest_jwt}"})
+        assert me2.status_code == 401
+        assert me2.json().get("error_code") == "GUEST_ACCESS_INVALIDATED"
+
+        peers2 = await client.get(
+            f"/api/guest/zones/{zone_id}/peers",
+            headers={"Authorization": f"Bearer {guest_jwt}"},
+        )
+        assert peers2.status_code == 401
+
 
 @pytest.mark.asyncio
 async def test_guest_chat_visible_to_recipient_row(test_db, override_get_db):

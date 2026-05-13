@@ -147,6 +147,7 @@ OPENAPI_TAGS = [
             "the server auto-approves the guest if an accepted, unexpired, unconsumed guest pass exists. "
             "Guest pass lifecycle events are broadcast as **`PERMISSION_MESSAGE`** WebSocket events to zone members.\n\n"
             "**Member JWT:** **`GET /api/access/guest-requests`** (**`access_list_guest_requests`**), **`POST /api/access/approve|reject`** (writes **PERMISSION** zone events; "
+            "**`reject`** can also revoke an already-approved unexpected guest or an **expected** session — active **`/api/guest/*`** tokens then return **`401`** **`GUEST_ACCESS_INVALIDATED`**; "
             "guest sees them on **`GET /api/guest/messages`**; admins see **PERMISSION** + peer-scoped Access **CHAT** in **`GET /messages?owner_id=&skip=&limit=`** merge—disable **CHAT** merge with **`MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT=false`**), QR helpers. "
             "**Permission** response echoes **`zone_id`** when the invite had only **`gt`**. "
             "**Administrators** mint stored tokens (**`POST /api/access/qr-tokens`**, SPA **`/access?gt=&zid=`**) or static **`GET /api/access/qr-link`**. "
@@ -159,6 +160,7 @@ OPENAPI_TAGS = [
         "description": (
             "**Guest JWT only** (`Authorization: Bearer`; claim **`token_use`=`guest_access`**, subject **`guest:{guest_id}`**). "
             "Mint via **`POST /api/access/guest-session`** (**`exchange_code`** from **`GET /api/access/session/{guest_id}`** after admin approval). "
+            "Each request reloads **`guest_access_sessions`** (and linked guest pass / QR token): revoked or denied access → **`401`** **`GUEST_ACCESS_INVALIDATED`** (same handling as clearing an expired guest token). "
             "**Never** send the member (zoneweaver) Bearer on **`/api/guest/***.\n\n"
             "| Route | Swagger summary |\n"
             "|--------|----------------|\n"
@@ -167,6 +169,7 @@ OPENAPI_TAGS = [
             "| **`GET /api/guest/zones/{zone_id}/dashboard`** | Label, welcome text, **`map`** (**`cells`**, optional **`zones.parameters.guest_map`**) for guest map UI |\n"
             "| **`GET /api/guest/messages`** | **`zone_id`** + optional **`with_owner_id`**: **PERMISSION** (server) + **CHAT**, ordered by **`created_at`** |\n"
             "| **`POST /api/guest/messages`** | **CHAT** only to **`to_owner_id`**; mirrors into **`to_owner_id`** **`GET /messages`** merged inbox (with **`guest_id`** on **`ZoneMessageResponse`**); errors **`GUEST_MESSAGE_TYPE_NOT_ALLOWED`**, **`GUEST_NOT_AUTHORIZED_FOR_ZONE`**, **`PEERS_NOT_AVAILABLE`** |\n\n"
+            "**`401` (guest):** see schema **`GuestApiHttpError`** — revocation uses **`GUEST_ACCESS_INVALIDATED`** (example in Schemas). Cryptographic JWT expiry may surface as **`HTTP_401`**.\n\n"
             "Swagger **Schemas**: **`GuestMessagePostRequest`**, **`GuestPeersResponse`**, **`GuestDashboardData`**, **`GuestMessagesListResponse`** carry copy-paste examples."
         ),
     },
@@ -207,10 +210,12 @@ app = FastAPI(
         "See **`guest_id`** in **`POST /messages`** for **member→guest CHAT** only (**PERMISSION** is server-generated). "
         "Members create expectations via `/message-feature/access/schedules`; unexpected visits notify "
         "via WebSocket `unexpected_guest` / `guest_is_here`. "
-        "Admins resolve pending unexpected visits with **`POST /api/access/approve|reject`** or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`**.\n"
+        "Admins resolve pending unexpected visits with **`POST /api/access/approve|reject`** or **`POST /message-feature/access/guest-requests/{guest_id}/approve|reject`** "
+        "(**`reject`** also revokes active guest API access for approved unexpected or expected sessions — guest **`/api/guest/*`** JWT returns **`401`** **`GUEST_ACCESS_INVALIDATED`**).\n"
         "- **Guest Pass pre-registration:** members create guest passes with "
         "`POST /api/access/guest-passes` (event_id + expiry); admins accept/reject/revoke via "
-        "`POST /api/access/guest-passes/{id}/accept|reject|revoke`. When a guest arrives with a matching "
+        "`POST /api/access/guest-passes/{id}/accept|reject|revoke`. **`revoke`** on a consumed pass invalidates that guest's **`/api/guest/*`** Bearer (**`401`** **`GUEST_ACCESS_INVALIDATED`**). "
+        "When a guest arrives with a matching "
         "event_id, they are auto-approved. List passes: `GET /api/access/guest-passes?zone_id=`.\n"
         "- **Member invite QR** is separate: `POST /utils/qr/generate`."
         f"{_ACCESS_ZONE_CLIENT_DOC}"

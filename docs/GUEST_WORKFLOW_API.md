@@ -83,6 +83,35 @@ Returns **`access_token`** (Bearer) with `token_use=guest_access` — **only** f
 
 ---
 
+## Guest JWT invalidation (revocation)
+
+Every **`/api/guest/*`** request re-checks the database. If access was revoked, denied, or the backing guest pass / QR token no longer allows the session, the API returns **`401 Unauthorized`** with body:
+
+```json
+{
+  "status": "error",
+  "message": "<human-readable reason>",
+  "error_code": "GUEST_ACCESS_INVALIDATED",
+  "error": { "message": "<same as message>" }
+}
+```
+
+Treat **`401`** + **`GUEST_ACCESS_INVALIDATED`** like an expired or invalid token: clear stored guest JWT and return the guest to the permission / exchange flow.
+
+**Admin actions that invalidate an existing guest Bearer**
+
+| Action | Route / behavior |
+|--------|------------------|
+| Revoke accepted guest pass (after arrival) | **`POST /api/access/guest-passes/{pass_id}/revoke`** — sets pass **`REVOKED`** and **`guest_access_sessions.access_revoked_at`** for the consumed session when **`used_by_guest_id`** is set. |
+| Reject pending unexpected guest | **`POST /api/access/reject`** (or message-feature **`…/reject`**) — **`resolution`** → **`rejected`** (guest never had a valid exchange if still pending; if race, JWT check fails on **`rejected`**). |
+| Revoke approved unexpected guest (after JWT issued) | Same **`POST /api/access/reject`** — allowed when **`resolution`** was **`approved`**; sets **`rejected`** and invalidates Bearer. |
+| Revoke expected session (schedule / guest-pass auto-expected) | Same **`POST /api/access/reject`** on an **`expected`** session — sets **`access_revoked_at`**. |
+| Revoke guest QR token used at arrival | **`POST /api/access/qr-tokens/{id}/revoke`** — if the session row’s **`qr_token_id`** points at a revoked token, guest APIs return **`GUEST_ACCESS_INVALIDATED`**. |
+
+Expired **cryptographic** JWT (`exp` in the past) still yields **`401`** with **`Invalid authentication credentials`** (existing **`verify_token`** behavior). An **ACCEPTED** guest pass past **`expires_at`** also yields **`GUEST_ACCESS_INVALIDATED`** for sessions tied to **`used_by_guest_id`**.
+
+---
+
 ## `GET /api/guest/me`
 
 ```json
