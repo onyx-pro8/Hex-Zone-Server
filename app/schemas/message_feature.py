@@ -82,7 +82,10 @@ class AccessScheduleCreate(BaseModel):
     event_id: str | None = Field(
         default=None,
         max_length=100,
-        description="Optional event id matched on guest arrival together with guest_name.",
+        description=(
+            "Optional event id matched on guest arrival with **POST /api/access/permission**. "
+            "Uses the same canonical rules as guest passes (EVT-numeric vs bare digits, case-insensitive otherwise)."
+        ),
     )
     guest_id: str | None = Field(default=None, max_length=100, description="Optional pre-provisioned guest id.")
     guest_name: str | None = Field(default=None, max_length=255, description="Expected guest display name.")

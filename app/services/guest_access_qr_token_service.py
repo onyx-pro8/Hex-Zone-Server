@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from app.domain.event_id import event_ids_equivalent
 from app.models.guest_access_qr_token_audit import GuestAccessQrTokenAudit
 from app.models.guest_access_qr_token import GuestAccessQrToken
 from app.models.owner import Owner, OwnerRole
@@ -237,7 +238,7 @@ def validate_locked_guest_qr_token(row: GuestAccessQrToken | None) -> dict | Non
 def merge_event_id_for_arrival(*, token_event_id: str | None, payload_event_id: str | None) -> tuple[str | None, dict | None]:
     te = (token_event_id or "").strip()
     pe = (payload_event_id or "").strip()
-    if te and pe and te != pe:
+    if te and pe and not event_ids_equivalent(te, pe):
         return None, {
             "error": "EVENT_MISMATCH",
             "message": "event_id does not match the QR token.",

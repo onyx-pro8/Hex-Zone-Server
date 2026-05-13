@@ -7,6 +7,8 @@ from datetime import datetime
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_values
+
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
 from app.models import ZoneMessageEvent
 from app.models.guest_pass import GuestPass, GuestPassStatus
@@ -54,16 +56,18 @@ def create_guest_pass(
     if exp <= now:
         return {"error": "INVALID_EXPIRY", "message": "expires_at must be in the future.", "http_status": 422}
 
-    existing = (
-        db.query(GuestPass)
-        .filter(
-            GuestPass.zone_id == zid,
-            func.lower(GuestPass.event_id) == eid.lower(),
+    c_new = canonical_event_id(eid)
+    if c_new:
+        dup = (
+            db.query(GuestPass.id)
+            .filter(
+                GuestPass.zone_id == zid,
+                func.lower(GuestPass.event_id).in_(event_id_lowercase_sql_in_values(c_new)),
+            )
+            .first()
         )
-        .first()
-    )
-    if existing:
-        return {"error": "DUPLICATE_EVENT_ID", "message": f"event_id '{eid}' already exists for this zone.", "http_status": 409}
+        if dup:
+            return {"error": "DUPLICATE_EVENT_ID", "message": f"event_id '{eid}' already exists for this zone.", "http_status": 409}
 
     row = GuestPass(
         zone_id=zid,
@@ -223,13 +227,17 @@ def find_accepted_guest_pass_for_event(
     zone_id: str,
     event_id: str,
 ) -> GuestPass | None:
-    """Look up a valid accepted guest pass for event_id (case-insensitive)."""
+    """Look up a valid accepted guest pass for event_id (canonical match; see **app.domain.event_id**)."""
     now = datetime.utcnow()
+    canon = canonical_event_id(event_id)
+    if not canon:
+        return None
+    variants = event_id_lowercase_sql_in_values(canon)
     return (
         db.query(GuestPass)
         .filter(
             GuestPass.zone_id == zone_id,
-            func.lower(GuestPass.event_id) == event_id.strip().lower(),
+            func.lower(GuestPass.event_id).in_(variants),
             GuestPass.status == GuestPassStatus.ACCEPTED,
             GuestPass.expires_at > now,
             GuestPass.used_by_guest_id.is_(None),

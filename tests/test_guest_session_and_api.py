@@ -674,3 +674,38 @@ async def test_expected_schedule_guest_permission_poll_and_guest_session(test_db
             json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": pj["exchange_code"]},
         )
         assert gs2.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_schedule_evt_event_id_matches_bare_digits_on_permission(test_db, override_get_db):
+    """Schedule stored as EVT-1234; guest sends event_id 1234 → same EXPECTED outcome."""
+    from datetime import datetime, timedelta
+
+    from app.models import AccessSchedule
+
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = "zone-evt-canonical-1"
+        await _register_admin(client, zone_id=zone_id)
+        sched = AccessSchedule(
+            zone_id=zone_id,
+            guest_name="Other Person",
+            event_id="EVT-1234",
+            starts_at=datetime.utcnow() - timedelta(hours=1),
+            ends_at=datetime.utcnow() + timedelta(hours=1),
+            active=True,
+            notify_member_assist=False,
+        )
+        test_db.add(sched)
+        test_db.commit()
+
+        perm = await client.post(
+            "/api/access/permission",
+            json={
+                "zone_id": zone_id,
+                "guest_name": "Walk-in",
+                "event_id": "1234",
+            },
+        )
+        assert perm.status_code == 200
+        assert perm.json()["data"]["status"] == "EXPECTED"
+        assert perm.json()["data"]["guest_id"]

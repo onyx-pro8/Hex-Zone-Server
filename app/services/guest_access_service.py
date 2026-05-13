@@ -5,11 +5,12 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 
+from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_values
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
 from app.models import AccessSchedule, GuestAccessSession, Owner, Zone, ZoneMessageEvent
 from app.models.owner import OwnerRole
@@ -133,12 +134,15 @@ def find_matching_schedule_for_arrival(
 ) -> AccessSchedule | None:
     """Schedule match: zone + time window + (event_id match OR guest_name match)."""
     gn = guest_name.strip()
-    ev = (event_id or "").strip()
+    ev_raw = (event_id or "").strip()
     conditions = []
     if gn:
         conditions.append(AccessSchedule.guest_name == gn)
-    if ev:
-        conditions.append(AccessSchedule.event_id == ev)
+    if ev_raw:
+        ev_canon = canonical_event_id(ev_raw)
+        if ev_canon:
+            variants = event_id_lowercase_sql_in_values(ev_canon)
+            conditions.append(func.lower(AccessSchedule.event_id).in_(variants))
     if not conditions:
         return None
 

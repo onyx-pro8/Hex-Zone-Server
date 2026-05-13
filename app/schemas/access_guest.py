@@ -37,7 +37,12 @@ class GuestArrivalRequest(BaseModel):
     event_id: str | None = Field(
         default=None,
         max_length=100,
-        description="Optional; matched against scheduled visits together with guest_name.",
+        description=(
+            "Optional; matched against **access_schedules** and **guest_passes** for this zone. "
+            "Send the same value as the invite **`eid`** (trimmed only). The server normalizes matching: "
+            "Unicode case-insensitive for general ids; **`EVT-1234`**, **`evt_1234`**, **`EVT1234`**, and **`1234`** "
+            "are equivalent when the suffix is all digits."
+        ),
     )
     device_id: str | None = Field(default=None, max_length=255, description="Optional client device fingerprint.")
     location: GuestArrivalLocation | None = Field(default=None, description="Optional coordinates.")

@@ -1,13 +1,14 @@
 """Permission message workflow with schedule checks."""
 from datetime import datetime
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models import AccessSchedule, Owner, ZoneMessageEvent
 from app.models.owner import OwnerRole
 from app.schemas.message_feature import PropagationMessageCreate
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
+from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_values
 
 
 def _build_schedule_query(db: Session, zone_id: str, payload: PropagationMessageCreate):
@@ -24,7 +25,10 @@ def _build_schedule_query(db: Session, zone_id: str, payload: PropagationMessage
     )
     filters = []
     if event_id:
-        filters.append(AccessSchedule.event_id == event_id)
+        canon = canonical_event_id(event_id)
+        if canon:
+            variants = event_id_lowercase_sql_in_values(canon)
+            filters.append(func.lower(AccessSchedule.event_id).in_(variants))
     if guest_id:
         filters.append(AccessSchedule.guest_id == guest_id)
     if guest_name:

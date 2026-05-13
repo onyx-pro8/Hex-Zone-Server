@@ -17,7 +17,11 @@ class GuestPassCreateRequest(BaseModel):
         ...,
         min_length=1,
         max_length=100,
-        description="Unique event identifier the guest will present on arrival. Case-insensitive matching.",
+        description=(
+            "Unique event identifier the guest will present on arrival. "
+            "Matching uses canonical rules (see **POST /api/access/permission**): "
+            "Unicode case-insensitive for general ids; **EVT-1234** and **1234** are equivalent when the suffix is all digits."
+        ),
     )
     guest_name: str | None = Field(
         default=None,

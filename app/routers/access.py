@@ -78,13 +78,16 @@ legacy **`/access?gt=…`** without **`zid`** is still accepted in the SPA, but 
 Validates that **zone_id** exists (explicit or resolved from token), then resolves the arrival in priority order:
 
 1. **Guest Pass match** (new): when **`event_id`** is submitted, the server looks up
-   **`guest_passes`** where `zone_id` + `event_id` (case-insensitive) match an **ACCEPTED**,
-   non-expired, unconsumed pass. If found, the pass is consumed (`used_by_guest_id` is set),
+   **`guest_passes`** where `zone_id` + **`event_id`** match an **ACCEPTED**,
+   non-expired, unconsumed pass. Matching uses the same **canonical event id** rules as schedules
+   (trim; Unicode case-insensitive for general ids; **`EVT-1234`**, **`evt_1234`**, **`EVT1234`**, and **`1234`**
+   are treated as the same numeric event when the suffix is all digits). If found, the pass is consumed
+   (`used_by_guest_id` is set),
    the guest is auto-approved as **EXPECTED**, and a `guest_is_here` WebSocket event is
    broadcast to all zone members. Guest passes are created via **`POST /api/access/guest-passes`**
    and accepted by an admin via **`POST /api/access/guest-passes/{id}/accept`**.
 2. **Access Schedule match**: finds an active schedule whose time window contains server time
-   and matches **`event_id`** or **`guest_name`**.
+   and matches **`event_id`** (canonical rules above) or **`guest_name`**.
 3. **No match → UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`**
    to all active owners sharing **zone_id**, and record a PERMISSION zone event.
 
@@ -107,6 +110,11 @@ Session polling also succeeds with **`guest_id`** only (**`zone_id`** query omit
 Backend-issued tokens (`POST /api/access/qr-tokens`) may enforce expiry, revocation, and optional **max_uses** (counted on successful arrivals only).
 
 Rate-limited per client IP (rolling minute). CORS: browser guests should call the API from an allowed origin (this server enables permissive CORS by default).
+
+**`event_id`:** clients may send the invite **`eid`** query string unchanged (aside from trim). The server normalizes
+**`EVT-…`** numeric event codes and bare digit strings to one logical key for guest-pass and schedule matching; other
+ids are compared case-insensitively. Prefer using the same string you store on schedules / guest passes / QR **`eid`**;
+equivalent forms still match.
 """
 
 
