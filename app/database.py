@@ -51,6 +51,35 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
     if engine.dialect.name == "postgresql":
+        # Guest arrival copy: tiny transaction so ORM never hits UndefinedColumn if a later patch fails.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE guest_access_sessions ADD COLUMN IF NOT EXISTS arrival_guest_message_snapshot VARCHAR(500);"
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS guest_access_zone_messages (
+                        id SERIAL PRIMARY KEY,
+                        zone_id VARCHAR(100) NOT NULL UNIQUE,
+                        expected_arrival_message VARCHAR(500),
+                        unexpected_arrival_message VARCHAR(500),
+                        guest_pass_verified_message VARCHAR(500),
+                        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                        updated_by_owner_id INTEGER REFERENCES owners(id) ON DELETE SET NULL
+                    );
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_zone_messages_updated_by_owner_id "
+                    "ON guest_access_zone_messages (updated_by_owner_id);"
+                )
+            )
+
         # Run critical compatibility patches in an isolated transaction first.
         # The broader migration block below can fail on legacy enum/type drift;
         # this ensures core columns used by active request paths still exist.
@@ -556,32 +585,6 @@ def init_db():
             )
             conn.execute(
                 text("CREATE INDEX IF NOT EXISTS ix_guest_passes_created_at ON guest_passes (created_at);")
-            )
-            conn.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS guest_access_zone_messages (
-                        id SERIAL PRIMARY KEY,
-                        zone_id VARCHAR(100) NOT NULL UNIQUE,
-                        expected_arrival_message VARCHAR(500),
-                        unexpected_arrival_message VARCHAR(500),
-                        guest_pass_verified_message VARCHAR(500),
-                        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
-                        updated_by_owner_id INTEGER REFERENCES owners(id) ON DELETE SET NULL
-                    );
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_guest_access_zone_messages_updated_by_owner_id "
-                    "ON guest_access_zone_messages (updated_by_owner_id);"
-                )
-            )
-            conn.execute(
-                text(
-                    "ALTER TABLE guest_access_sessions ADD COLUMN IF NOT EXISTS arrival_guest_message_snapshot VARCHAR(500);"
-                )
             )
 
 
