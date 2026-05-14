@@ -8,6 +8,7 @@ from app.models import AccessSchedule, Owner, ZoneMessageEvent
 from app.models.owner import OwnerRole
 from app.schemas.message_feature import PropagationMessageCreate
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
+from app.services.guest_access_service import pick_co_owner_for_direct_permission
 from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_values
 
 
@@ -85,9 +86,17 @@ def process_permission_message(db: Session, sender: Owner, payload: PropagationM
             if admin_id not in delivered_owner_ids:
                 delivered_owner_ids.append(admin_id)
 
+    receiver_id: int | None = None
+    candidates = [oid for oid in delivered_owner_ids if oid != sender.id]
+    if candidates:
+        receiver_id = candidates[0]
+    else:
+        receiver_id = pick_co_owner_for_direct_permission(db, zone_id, sender.id)
+
     event = ZoneMessageEvent(
         zone_id=zone_id,
         sender_id=sender.id,
+        receiver_id=receiver_id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
@@ -100,6 +109,7 @@ def process_permission_message(db: Session, sender: Owner, payload: PropagationM
             "sender_message": sender_message,
             "member_message": member_message,
             "delivered_owner_ids": delivered_owner_ids,
+            "permission_visibility": "direct",
         },
     )
     db.add(event)

@@ -13,6 +13,10 @@ from app.core.config import settings
 
 from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_values
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
+from app.domain.permission_visibility import (
+    PERMISSION_VISIBILITY_DIRECT,
+    PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST,
+)
 from app.models import AccessSchedule, GuestAccessQrToken, GuestAccessSession, Owner, Zone, ZoneMessageEvent
 from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import OwnerRole
@@ -242,6 +246,30 @@ def zone_member_owner_ids(db: Session, zone_id: str) -> list[int]:
     return sorted(zone_staff_owner_ids(db, zone_id))
 
 
+def pick_co_owner_for_direct_permission(db: Session, zone_id: str, sender_id: int) -> int:
+    """Second **`owners.id`** for a direct (non–zone-broadcast) PERMISSION pairing; falls back to **`sender_id`** if alone."""
+
+    for oid in sorted(zone_staff_owner_ids(db, zone_id)):
+        if oid != sender_id:
+            return oid
+    return sender_id
+
+
+def _permission_receiver_for_staff_decision(
+    db: Session,
+    zone_id: str,
+    *,
+    acting_owner_id: int,
+    session_row: GuestAccessSession,
+) -> int:
+    """Peer owner for approve / reject / revoke **PERMISSION** rows (direct visibility)."""
+
+    aid = session_row.admin_owner_id
+    if aid is not None and aid != acting_owner_id:
+        return aid
+    return pick_co_owner_for_direct_permission(db, zone_id, acting_owner_id)
+
+
 def process_guest_arrival(
     db: Session,
     *,
@@ -305,9 +333,13 @@ def process_guest_arrival(
                 ws_guest_is_here.append((broadcast_ids, payload_here))
 
             permission_sender_owner_id = guest_pass.requested_by
+            permission_receiver_owner_id = guest_pass.reviewed_by or pick_co_owner_for_direct_permission(
+                db, zone_id, permission_sender_owner_id,
+            )
             perm_event = ZoneMessageEvent(
                 zone_id=zone_id,
                 sender_id=permission_sender_owner_id,
+                receiver_id=permission_receiver_owner_id,
                 guest_access_session_id=session_row.id,
                 type=CanonicalMessageType.PERMISSION.value,
                 category=type_category(CanonicalMessageType.PERMISSION),
@@ -331,6 +363,7 @@ def process_guest_arrival(
                     "guest_pass_id": guest_pass.id,
                     "schedule_match": True,
                     "domain_event": "guest_pass_arrival",
+                    "permission_visibility": PERMISSION_VISIBILITY_DIRECT,
                     **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
                 },
             )
@@ -357,6 +390,7 @@ def process_guest_arrival(
     ws_unexpected: list[tuple[list[int], dict]] = []
 
     permission_sender_owner_id: int | None = None
+    permission_receiver_owner_id: int | None = None
 
     if schedule:
         msg_guest = msgs.expected_arrival_message
@@ -418,8 +452,16 @@ def process_guest_arrival(
         }
         if notify_ids:
             ws_guest_is_here.append((notify_ids, payload_here))
-        if notify_ids:
             permission_sender_owner_id = notify_ids[0]
+            alt = next((nid for nid in notify_ids if nid != permission_sender_owner_id), None)
+            permission_receiver_owner_id = (
+                alt if alt is not None else pick_co_owner_for_direct_permission(db, zone_id, permission_sender_owner_id)
+            )
+        else:
+            pa = resolve_primary_zone_admin_owner(db, zone_id)
+            if pa:
+                permission_sender_owner_id = pa.id
+                permission_receiver_owner_id = pick_co_owner_for_direct_permission(db, zone_id, pa.id)
 
         perm_meta = {
             "flow": "qr_guest_arrival",
@@ -428,6 +470,7 @@ def process_guest_arrival(
             "schedule_match": True,
             "websocket_events": [{"name": "guest_is_here", "targets": "schedule_owner_and_optional_assist"}],
             "domain_event": "guest_expected_arrival",
+            "permission_visibility": PERMISSION_VISIBILITY_DIRECT,
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         }
         decision = "EXPECTED"
@@ -437,6 +480,7 @@ def process_guest_arrival(
         if not admin:
             return {"error": "NO_ZONE_ADMIN", "message": "No administrator found for this zone.", "http_status": 422}
         permission_sender_owner_id = admin.id
+        permission_receiver_owner_id = admin.id
 
         msg_guest = msgs.unexpected_arrival_message
 
@@ -478,14 +522,23 @@ def process_guest_arrival(
             "schedule_match": False,
             "websocket_events": [{"name": "unexpected_guest", "targets": "zone_members"}],
             "domain_event": "guest_request_created",
+            "permission_visibility": PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST,
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         }
         decision = "UNEXPECTED"
         perm_line = f"Guest access requested for {guest_name.strip()}. Awaiting approval."
 
+    if permission_sender_owner_id is None:
+        return {"error": "NO_ZONE_ADMIN", "message": "No administrator found for this zone.", "http_status": 422}
+    if permission_receiver_owner_id is None:
+        permission_receiver_owner_id = pick_co_owner_for_direct_permission(
+            db, zone_id, permission_sender_owner_id,
+        )
+
     perm_event = ZoneMessageEvent(
         zone_id=zone_id,
         sender_id=permission_sender_owner_id,
+        receiver_id=permission_receiver_owner_id,
         guest_access_session_id=session_row.id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
@@ -752,9 +805,11 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
     db.flush()
 
     gname = (row.guest_name or "").strip() or "Guest"
+    recv = _permission_receiver_for_staff_decision(db, zid, acting_owner_id=acting_owner.id, session_row=row)
     note = ZoneMessageEvent(
         zone_id=zid,
         sender_id=acting_owner.id,
+        receiver_id=recv,
         guest_access_session_id=row.id,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
@@ -772,6 +827,7 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
             "domain_event": "guest_request_approved",
             "acting_owner_id": acting_owner.id,
             "guest_access_session_db_id": row.id,
+            "permission_visibility": PERMISSION_VISIBILITY_DIRECT,
         },
     )
     db.add(note)
@@ -815,9 +871,11 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
         row.access_revoked_at = datetime.utcnow()
         db.flush()
         gname = (row.guest_name or "").strip() or "Guest"
+        recv = _permission_receiver_for_staff_decision(db, zid, acting_owner_id=acting_owner.id, session_row=row)
         note = ZoneMessageEvent(
             zone_id=zid,
             sender_id=acting_owner.id,
+            receiver_id=recv,
             guest_access_session_id=row.id,
             type=CanonicalMessageType.PERMISSION.value,
             category=type_category(CanonicalMessageType.PERMISSION),
@@ -835,6 +893,7 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
                 "domain_event": "guest_access_revoked",
                 "acting_owner_id": acting_owner.id,
                 "guest_access_session_db_id": row.id,
+                "permission_visibility": PERMISSION_VISIBILITY_DIRECT,
             },
         )
         db.add(note)
@@ -856,9 +915,11 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
         db.flush()
 
         gname = (row.guest_name or "").strip() or "Guest"
+        recv = _permission_receiver_for_staff_decision(db, zid, acting_owner_id=acting_owner.id, session_row=row)
         note = ZoneMessageEvent(
             zone_id=zid,
             sender_id=acting_owner.id,
+            receiver_id=recv,
             guest_access_session_id=row.id,
             type=CanonicalMessageType.PERMISSION.value,
             category=type_category(CanonicalMessageType.PERMISSION),
@@ -876,6 +937,7 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
                 "domain_event": "guest_request_rejected",
                 "acting_owner_id": acting_owner.id,
                 "guest_access_session_db_id": row.id,
+                "permission_visibility": PERMISSION_VISIBILITY_DIRECT,
             },
         )
         db.add(note)
@@ -895,9 +957,11 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
         db.flush()
 
         gname = (row.guest_name or "").strip() or "Guest"
+        recv = _permission_receiver_for_staff_decision(db, zid, acting_owner_id=acting_owner.id, session_row=row)
         note = ZoneMessageEvent(
             zone_id=zid,
             sender_id=acting_owner.id,
+            receiver_id=recv,
             guest_access_session_id=row.id,
             type=CanonicalMessageType.PERMISSION.value,
             category=type_category(CanonicalMessageType.PERMISSION),
@@ -915,6 +979,7 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
                 "domain_event": "guest_access_revoked",
                 "acting_owner_id": acting_owner.id,
                 "guest_access_session_db_id": row.id,
+                "permission_visibility": PERMISSION_VISIBILITY_DIRECT,
             },
         )
         db.add(note)

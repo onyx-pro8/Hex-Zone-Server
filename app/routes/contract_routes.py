@@ -657,7 +657,7 @@ async def post_messages(
             zr = db.get(ZoneMessageEvent, eid)
             if zr:
                 await guest_api_service.notify_access_chat_inbox_ws(zr)
-        return guest_api_service.zone_message_event_to_member_zone_message_response(event)
+        return guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db)
 
     normalized_chat_payload = ZoneMessageCreate(
         message=chat_payload.message,

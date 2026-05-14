@@ -567,6 +567,22 @@ class ZoneMessageResponse(BaseModel):
             "(**`sender_guest_id`** or **`body`/metadata **`guest_id`**)."
         ),
     )
+    permission_visibility: Optional[Literal["direct", "zone_pending_broadcast"]] = Field(
+        default=None,
+        description=(
+            "For **`type`** **`PERMISSION`** (**`ZoneMessageEvent`** only): **`direct`** = visible in merged inbox only "
+            "to **`sender_id`** / **`receiver_id`**; **`zone_pending_broadcast`** = first pending unexpected-guest audit, "
+            "visible to all staff who may manage guest requests until the session leaves **`pending`**."
+        ),
+    )
+    guest_access_session_id: Optional[int] = Field(
+        default=None,
+        description="Internal **`guest_access_sessions.id`** when the zone event references a guest access session.",
+    )
+    session_pending: Optional[bool] = Field(
+        default=None,
+        description="When **`permission_visibility`** is **`zone_pending_broadcast`**, whether the linked session is still **`pending`**.",
+    )
 
     model_config = ConfigDict(
         from_attributes=True,

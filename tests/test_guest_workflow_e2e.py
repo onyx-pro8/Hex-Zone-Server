@@ -80,6 +80,7 @@ async def test_permission_request_visible_in_admin_messages_inbox(test_db, overr
         rows = inbox.json()
         perm_rows = [r for r in rows if r.get("type") == "PERMISSION"]
         assert perm_rows, "admin inbox should merge ZoneMessageEvent PERMISSION rows"
+        assert perm_rows[0].get("permission_visibility") == "zone_pending_broadcast"
         assert any(
             "Guest access requested" in str(r.get("message", "")) and "Inbox Guest" in str(r.get("message", ""))
             for r in perm_rows
@@ -159,3 +160,146 @@ async def test_approve_permission_in_admin_and_guest_thread_with_chat(test_db, o
         items = gm.json()["data"]["items"]
         types_found = {i["type"] for i in items}
         assert "PERMISSION" in types_found and "CHAT" in types_found
+
+
+@pytest.mark.asyncio
+async def test_pending_unexpected_permission_visible_to_two_staff_approve_direct_private(test_db, override_get_db):
+    """Unexpected+pending PERMISSION is zone staff broadcast; post-approve audit is direct (not visible to unrelated staff)."""
+    from datetime import datetime, timedelta
+
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = f"e2e-vis-{uuid.uuid4().hex[:6]}"
+        admin_a_id, token_a = await _register_admin(client, zone_id)
+        admin_b_id, token_b = await _register_admin(client, zone_id)
+
+        perm = await client.post(
+            "/api/access/permission",
+            json={"zone_id": zone_id, "guest_name": "Visibility Guest"},
+        )
+        assert perm.status_code == 200
+        guest_id = perm.json()["data"]["guest_id"]
+
+        for oid, tok in ((admin_a_id, token_a), (admin_b_id, token_b)):
+            inbox = await client.get(
+                "/messages/",
+                params={"owner_id": oid, "limit": 50},
+                headers={"Authorization": f"Bearer {tok}"},
+            )
+            assert inbox.status_code == 200
+            pr = [r for r in inbox.json() if r.get("type") == "PERMISSION" and r.get("guest_id") == guest_id]
+            assert pr, f"owner {oid} should see pending PERMISSION"
+            assert pr[0].get("permission_visibility") == "zone_pending_broadcast"
+
+        ap = await client.post(
+            "/api/access/approve",
+            headers={"Authorization": f"Bearer {token_b}"},
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        assert ap.status_code == 200
+
+        admin_c_id, token_c = await _register_admin(client, zone_id)
+        inbox_c = await client.get(
+            "/messages/",
+            params={"owner_id": admin_c_id, "limit": 100},
+            headers={"Authorization": f"Bearer {token_c}"},
+        )
+        assert inbox_c.status_code == 200
+        approve_msgs = [
+            r
+            for r in inbox_c.json()
+            if r.get("type") == "PERMISSION" and "Guest access approved" in str(r.get("message", ""))
+        ]
+        assert not approve_msgs, "third staff must not see approve PERMISSION unless sender/receiver"
+
+
+@pytest.mark.asyncio
+async def test_guest_pass_created_permission_not_visible_to_unpaired_staff(test_db, override_get_db):
+    from datetime import datetime, timedelta
+
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = f"e2e-gp-{uuid.uuid4().hex[:6]}"
+        admin_a_id, token_a = await _register_admin(client, zone_id)
+        _, _token_b = await _register_admin(client, zone_id)
+        admin_c_id, token_c = await _register_admin(client, zone_id)
+
+        exp = datetime.utcnow() + timedelta(days=7)
+        gp = await client.post(
+            "/api/access/guest-passes",
+            headers={"Authorization": f"Bearer {token_a}"},
+            json={
+                "zone_id": zone_id,
+                "event_id": f"EVT-GP-{uuid.uuid4().hex[:8]}",
+                "expires_at": exp.replace(microsecond=0).isoformat() + "Z",
+            },
+        )
+        assert gp.status_code in (200, 201), gp.text
+        event_id = gp.json()["data"]["event_id"]
+
+        inbox_c = await client.get(
+            "/messages/",
+            params={"owner_id": admin_c_id, "limit": 100},
+            headers={"Authorization": f"Bearer {token_c}"},
+        )
+        assert inbox_c.status_code == 200
+        gp_perm = [
+            r
+            for r in inbox_c.json()
+            if r.get("type") == "PERMISSION" and "guest pass" in str(r.get("message", "")).lower()
+        ]
+        assert not gp_perm, "staff not in sender/receiver pairing should not see guest pass CREATED PERMISSION"
+
+        inbox_a = await client.get(
+            "/messages/",
+            params={"owner_id": admin_a_id, "limit": 100},
+            headers={"Authorization": f"Bearer {token_a}"},
+        )
+        assert inbox_a.status_code == 200
+        assert any(
+            r.get("type") == "PERMISSION"
+            and r.get("permission_visibility") == "direct"
+            and event_id in str(r.get("message", ""))
+            for r in inbox_a.json()
+        )
+
+
+@pytest.mark.asyncio
+async def test_guest_messages_still_include_permission_chain(test_db, override_get_db):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        zone_id = f"e2e-guestperm-{uuid.uuid4().hex[:6]}"
+        admin_id, token = await _register_admin(client, zone_id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        perm = await client.post(
+            "/api/access/permission",
+            json={"zone_id": zone_id, "guest_name": "Guest Chain"},
+        )
+        assert perm.status_code == 200
+        guest_id = perm.json()["data"]["guest_id"]
+
+        ap = await client.post(
+            "/api/access/approve",
+            headers=headers,
+            json={"guest_id": guest_id, "zone_id": zone_id},
+        )
+        assert ap.status_code == 200
+
+        sess = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
+        code = sess.json()["data"]["exchange_code"]
+        gs = await client.post(
+            "/api/access/guest-session",
+            json={"guest_id": guest_id, "zone_id": zone_id, "exchange_code": code},
+        )
+        assert gs.status_code == 200
+        guest_jwt = gs.json()["data"]["access_token"]
+        gh = {"Authorization": f"Bearer {guest_jwt}"}
+
+        gm = await client.get(
+            "/api/guest/messages",
+            headers=gh,
+            params={"zone_id": zone_id, "with_owner_id": admin_id, "limit": 30},
+        )
+        assert gm.status_code == 200
+        items = gm.json()["data"]["items"]
+        perm_items = [i for i in items if i["type"] == "PERMISSION"]
+        assert perm_items
+        assert any("permission_visibility" in (i.get("raw_payload") or {}) for i in perm_items)

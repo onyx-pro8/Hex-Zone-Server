@@ -10,10 +10,11 @@ from sqlalchemy.orm import Session
 from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_values
 
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
+from app.domain.permission_visibility import PERMISSION_VISIBILITY_DIRECT
 from app.models import GuestAccessSession, ZoneMessageEvent
 from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import Owner, OwnerRole
-from app.services.guest_access_service import zone_exists, zone_member_owner_ids, zone_staff_owner_ids
+from app.services.guest_access_service import pick_co_owner_for_direct_permission, zone_exists
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,30 @@ def find_accepted_guest_pass_for_event(
     )
 
 
+def guest_pass_permission_direct_recipient_ids(
+    db: Session,
+    *,
+    guest_pass: GuestPass,
+    code: str,
+    acting_owner_id: int | None = None,
+) -> list[int]:
+    """**`owners.id`** list for **`PERMISSION_MESSAGE`** WebSocket (aligned with merged-inbox direct pairing)."""
+
+    zid = guest_pass.zone_id
+    if code == "GUEST_PASS_CREATED":
+        s, r = guest_pass.requested_by, pick_co_owner_for_direct_permission(db, zid, guest_pass.requested_by)
+    elif code in ("GUEST_PASS_ACCEPTED", "GUEST_PASS_REJECTED"):
+        s, r = guest_pass.reviewed_by, guest_pass.requested_by
+    elif code == "GUEST_PASS_REVOKED":
+        s = acting_owner_id or guest_pass.reviewed_by or guest_pass.requested_by
+        r = guest_pass.requested_by
+    else:
+        s = guest_pass.reviewed_by or guest_pass.requested_by
+        r = pick_co_owner_for_direct_permission(db, zid, s)
+    out = {x for x in (s, r) if x is not None}
+    return sorted(out)
+
+
 def consume_guest_pass(db: Session, guest_pass: GuestPass, guest_id: str) -> None:
     """Mark a guest pass as consumed by setting used_by_guest_id."""
     guest_pass.used_by_guest_id = guest_id
@@ -271,6 +296,7 @@ def build_guest_pass_ws_payload(
     guest_pass: GuestPass,
     code: str,
     zone_id: str,
+    acting_owner_id: int | None = None,
 ) -> dict:
     """Build a PERMISSION_MESSAGE WebSocket payload for guest pass lifecycle events."""
     requester = db.query(Owner).filter(Owner.id == guest_pass.requested_by).first()
@@ -326,7 +352,9 @@ def build_guest_pass_ws_payload(
         sender_text = f"Guest pass ({event_id}) status changed."
         member_text = f"Guest pass {event_id} status changed."
 
-    member_ids = list(zone_staff_owner_ids(db, zone_id))
+    member_ids = guest_pass_permission_direct_recipient_ids(
+        db, guest_pass=guest_pass, code=code, acting_owner_id=acting_owner_id,
+    )
 
     return {
         "type": "PERMISSION_MESSAGE",
@@ -357,7 +385,13 @@ def _record_guest_pass_permission_zone_event(
     acting_owner_id: int | None = None,
 ) -> None:
     """Persist a PERMISSION zone row so guest pass lifecycle appears in merged message feeds."""
-    payload = build_guest_pass_ws_payload(db, guest_pass=guest_pass, code=code, zone_id=guest_pass.zone_id)
+    payload = build_guest_pass_ws_payload(
+        db,
+        guest_pass=guest_pass,
+        code=code,
+        zone_id=guest_pass.zone_id,
+        acting_owner_id=acting_owner_id,
+    )
     member_text = payload["data"]["member_message"]["text"]
     status_val = guest_pass.status.value if isinstance(guest_pass.status, GuestPassStatus) else guest_pass.status
 
@@ -366,9 +400,14 @@ def _record_guest_pass_permission_zone_event(
     elif code in ("GUEST_PASS_ACCEPTED", "GUEST_PASS_REJECTED"):
         sender_id = guest_pass.reviewed_by
     elif code == "GUEST_PASS_REVOKED":
-        sender_id = acting_owner_id
+        sender_id = acting_owner_id or guest_pass.reviewed_by or guest_pass.requested_by
     else:
         sender_id = guest_pass.reviewed_by or guest_pass.requested_by
+
+    direct_ids = guest_pass_permission_direct_recipient_ids(
+        db, guest_pass=guest_pass, code=code, acting_owner_id=acting_owner_id,
+    )
+    receiver_id = next((oid for oid in direct_ids if oid != sender_id), sender_id)
 
     body: dict = {
         "guest_pass_id": guest_pass.id,
@@ -388,6 +427,7 @@ def _record_guest_pass_permission_zone_event(
     perm = ZoneMessageEvent(
         zone_id=guest_pass.zone_id,
         sender_id=sender_id,
+        receiver_id=receiver_id,
         guest_access_session_id=None,
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
@@ -397,6 +437,7 @@ def _record_guest_pass_permission_zone_event(
         metadata_json={
             "flow": "guest_pass_lifecycle",
             "domain_event": code,
+            "permission_visibility": PERMISSION_VISIBILITY_DIRECT,
         },
     )
     db.add(perm)

@@ -192,7 +192,7 @@ async def create_message(
             zr = db.get(ZoneMessageEvent, eid)
             if zr:
                 await guest_api_service.notify_access_chat_inbox_ws(zr)
-        return guest_api_service.zone_message_event_to_member_zone_message_response(event)
+        return guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db)
 
     try:
         canonical_type = normalize_message_type(payload.type or "")
@@ -389,9 +389,10 @@ async def _list_zone_messages_for_owner(
             peer_owner_id=other_owner_id,
             skip=skip,
             limit=limit,
+            viewer_owner_id=owner.id,
         )
         return [
-            guest_api_service.zone_message_event_to_member_zone_message_response(event) for event in rows
+            guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db) for event in rows
         ]
 
     if other_owner_id is not None:
@@ -457,7 +458,7 @@ async def _list_zone_messages_for_owner(
         owner=owner,
         max_scan=fetch_cap + 250,
     )
-    perm_responses = [guest_api_service.zone_message_event_to_member_zone_message_response(e) for e in perm_events]
+    perm_responses = [guest_api_service.zone_message_event_to_member_zone_message_response(e, db=db) for e in perm_events]
     chat_responses: list[ZoneMessageResponse] = []
     if settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
         chat_events = guest_api_service.list_zone_guest_access_chat_events_for_owner_inbox(
@@ -466,7 +467,7 @@ async def _list_zone_messages_for_owner(
             max_scan=fetch_cap + 250,
         )
         chat_responses = [
-            guest_api_service.zone_message_event_to_member_zone_message_response(e) for e in chat_events
+            guest_api_service.zone_message_event_to_member_zone_message_response(e, db=db) for e in chat_events
         ]
     merged = sorted(
         [*msg_responses, *perm_responses, *chat_responses],

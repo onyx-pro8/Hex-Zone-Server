@@ -587,7 +587,7 @@ async def revoke_guest_pass(
     db.refresh(row)
 
     ws_payload = guest_pass_service.build_guest_pass_ws_payload(
-        db, guest_pass=row, code="GUEST_PASS_REVOKED", zone_id=row.zone_id,
+        db, guest_pass=row, code="GUEST_PASS_REVOKED", zone_id=row.zone_id, acting_owner_id=owner.id,
     )
     member_ids = ws_payload["data"]["delivered_owner_ids"]
     if member_ids:
@@ -1621,8 +1621,9 @@ async def list_guest_access_messages_for_member(
         peer_owner_id=with_owner_id,
         skip=skip,
         limit=limit,
+        viewer_owner_id=viewer.id,
     )
-    items = [guest_api_service.zone_message_event_to_member_zone_message_response(e) for e in events]
+    items = [guest_api_service.zone_message_event_to_member_zone_message_response(e, db=db) for e in events]
     return MemberGuestAccessThreadMessagesEnvelope(
         status="success",
         data=MemberGuestAccessThreadMessagesData(items=items),

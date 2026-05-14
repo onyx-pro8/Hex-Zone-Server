@@ -14,7 +14,8 @@ from app.domain.message_types import (
     type_category,
     type_scope,
 )
-from app.models import MessageBlock, Owner, Zone, ZoneMessageEvent
+from app.domain.permission_visibility import PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST
+from app.models import GuestAccessSession, MessageBlock, Owner, Zone, ZoneMessageEvent
 from app.services.access_policy import zone_listing_owner_ids
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
@@ -148,6 +149,33 @@ def belongs_to_guest_access_thread(row: ZoneMessageEvent, guest_id: str) -> bool
     return _body_guest_id_matches(row, gid)
 
 
+def merged_inbox_permission_event_visible(db: Session, viewer: Owner, row: ZoneMessageEvent) -> bool:
+    """Whether **`row`** (**`PERMISSION`**) may appear in **`GET /messages`** merged inbox for **`viewer`**."""
+
+    if row.type != CanonicalMessageType.PERMISSION.value:
+        return True
+    zid = (row.zone_id or "").strip()
+    if not zid:
+        return False
+    meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+    vis = meta.get("permission_visibility")
+    if vis == PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST:
+        if row.guest_access_session_id is None:
+            return False
+        sess = db.get(GuestAccessSession, row.guest_access_session_id)
+        pending_unexpected = (
+            sess is not None
+            and sess.kind == "unexpected"
+            and (sess.resolution or "") == "pending"
+        )
+        if pending_unexpected and guest_access_service.can_manage_zone_guest_requests(db, viewer, zid):
+            return True
+        return viewer.id == row.sender_id or viewer.id == row.receiver_id
+    if row.receiver_id is None:
+        return False
+    return viewer.id == row.sender_id or viewer.id == row.receiver_id
+
+
 def list_guest_access_thread_for_zone_member(
     db: Session,
     *,
@@ -156,11 +184,13 @@ def list_guest_access_thread_for_zone_member(
     peer_owner_id: int | None,
     skip: int,
     limit: int,
+    viewer_owner_id: int,
 ) -> list[ZoneMessageEvent]:
     """Return **`ZoneMessageEvent`** rows visible to admins for the guest access thread.
 
-    Uses an in-memory filter so **PERMISSION** rows ( **`sender_id`/ `sender_guest_id` null**, guest only in **`body`**)
-    match reliably on SQLite **and** PostgreSQL (avoids dialect-specific JSON path SQL).
+    Uses an in-memory filter so **PERMISSION** rows (guest id in **`body`** / **`metadata`**) match reliably on SQLite
+    **and** PostgreSQL. **`viewer_owner_id`** scopes **PERMISSION** rows to the same visibility rules as the merged
+    member inbox (direct vs **`zone_pending_broadcast`**).
     """
     zid = zone_id.strip()
     gid = (guest_id or "").strip()
@@ -178,12 +208,20 @@ def list_guest_access_thread_for_zone_member(
         .all()
     )
 
+    viewer = db.get(Owner, viewer_owner_id)
+    if not viewer:
+        return []
+
     peer = peer_owner_id
     filtered: list[ZoneMessageEvent] = []
     for row in rows:
         if not belongs_to_guest_access_thread(row, gid):
             continue
         if peer is not None and not _guest_thread_row_matches_peer(row, peer, gid):
+            continue
+        if row.type == CanonicalMessageType.PERMISSION.value and not merged_inbox_permission_event_visible(
+            db, viewer, row,
+        ):
             continue
         filtered.append(row)
     return filtered[sk : sk + lim]
@@ -240,7 +278,7 @@ def list_zone_permission_events_for_owner_feed(
     )
     visible: list[ZoneMessageEvent] = []
     for row in rows:
-        if guest_access_service.can_manage_zone_guest_requests(db, owner, row.zone_id):
+        if merged_inbox_permission_event_visible(db, owner, row):
             visible.append(row)
     return visible
 
@@ -290,11 +328,29 @@ def list_zone_guest_access_chat_events_for_owner_inbox(
     return visible
 
 
-def zone_message_event_to_member_zone_message_response(row: ZoneMessageEvent):
+def zone_message_event_to_member_zone_message_response(
+    row: ZoneMessageEvent,
+    db: Session | None = None,
+):
     """Build **`ZoneMessageResponse`** for admin/member clients (import local to avoid circular imports)."""
     from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageResponse
 
     gtype = normalize_message_type(row.type)
+    meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+    raw_vis = meta.get("permission_visibility")
+    perm_vis = raw_vis if raw_vis in ("direct", "zone_pending_broadcast") else None
+    if row.type != CanonicalMessageType.PERMISSION.value:
+        perm_vis = None
+    session_pending: bool | None = None
+    if (
+        db is not None
+        and row.guest_access_session_id is not None
+        and perm_vis == PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST
+    ):
+        sess = db.get(GuestAccessSession, row.guest_access_session_id)
+        if sess is not None:
+            session_pending = bool(sess.kind == "unexpected" and (sess.resolution or "") == "pending")
+
     return ZoneMessageResponse(
         id=row.id,
         zone_id=row.zone_id,
@@ -311,6 +367,9 @@ def zone_message_event_to_member_zone_message_response(row: ZoneMessageEvent):
         message=row.text,
         created_at=row.created_at,
         guest_id=access_thread_guest_marker(row),
+        permission_visibility=perm_vis,
+        guest_access_session_id=row.guest_access_session_id,
+        session_pending=session_pending,
     )
 
 
@@ -388,6 +447,11 @@ def _serialize_to(row: ZoneMessageEvent, viewer_guest_id: str) -> dict[str, Any]
 
 def serialize_zone_message_for_guest(row: ZoneMessageEvent, viewer_guest_id: str) -> dict[str, Any]:
     created = row.created_at.replace(microsecond=0).isoformat() + "Z"
+    meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+    raw_payload = dict(row.body_json) if isinstance(row.body_json, dict) else {}
+    pv = meta.get("permission_visibility")
+    if pv in ("direct", "zone_pending_broadcast"):
+        raw_payload = {**raw_payload, "permission_visibility": pv}
     return {
         "id": row.id,
         "zone_id": row.zone_id,
@@ -396,7 +460,7 @@ def serialize_zone_message_for_guest(row: ZoneMessageEvent, viewer_guest_id: str
         "text": row.text,
         "from": _serialize_from(row, viewer_guest_id),
         "to": _serialize_to(row, viewer_guest_id),
-        "raw_payload": dict(row.body_json) if isinstance(row.body_json, dict) else {},
+        "raw_payload": raw_payload,
     }
 
 
