@@ -288,7 +288,7 @@ def init_db():
                         WHEN message_type IN ('PRIVATE', 'PERMISSION', 'CHAT') THEN 'private'
                         ELSE 'public'
                     END
-                    WHERE scope IS NULL OR scope = '';
+                    WHERE scope IS NULL OR scope::text = '';
                     """
                 )
             )
@@ -319,7 +319,7 @@ def init_db():
                         WHEN type::text IN ('PERMISSION','CHAT') THEN 'Access'
                         ELSE 'Alert'
                     END
-                    WHERE category IS NULL OR category = '';
+                    WHERE category IS NULL OR category::text = '';
                     """
                 )
             )
@@ -331,7 +331,7 @@ def init_db():
                         WHEN type::text IN ('PRIVATE','PERMISSION','CHAT') THEN 'private'
                         ELSE 'public'
                     END
-                    WHERE scope IS NULL OR scope = '';
+                    WHERE scope IS NULL OR scope::text = '';
                     """
                 )
             )
