@@ -309,7 +309,7 @@ async def list_guest_requests(
         status=filter_status,
     )
     return [
-        GuestAccessSessionListItem.model_validate(guest_access_service.serialize_guest_session_row(r))
+        GuestAccessSessionListItem.model_validate(guest_access_service.serialize_guest_session_row(db, r))
         for r in rows
     ]
 

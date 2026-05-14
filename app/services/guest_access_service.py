@@ -17,6 +17,7 @@ from app.models import AccessSchedule, GuestAccessQrToken, GuestAccessSession, O
 from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import OwnerRole
 from app.services.access_policy import zone_listing_owner_ids
+from app.services.guest_arrival_zone_messages import resolve_guest_arrival_messages
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +257,8 @@ def process_guest_arrival(
     if not zone_exists(db, zone_id):
         return {"error": "INVALID_ZONE", "message": "Unknown or inactive zone.", "http_status": 404}
 
+    msgs = resolve_guest_arrival_messages(db, zone_id)
+
     # Guest pass lookup: if event_id provided, check for a valid ACCEPTED guest pass first.
     ev_id = (event_id or "").strip()
     if ev_id:
@@ -265,6 +268,8 @@ def process_guest_arrival(
         if guest_pass:
             guest_token = str(uuid.uuid4())
             _gp_service.consume_guest_pass(db, guest_pass, guest_token)
+
+            msg_guest = msgs.guest_pass_verified_message
 
             session_row = GuestAccessSession(
                 guest_id=guest_token,
@@ -279,6 +284,7 @@ def process_guest_arrival(
                 schedule_id=None,
                 admin_owner_id=None,
                 qr_token_id=qr_token_db_id,
+                arrival_guest_message_snapshot=msg_guest,
             )
             db.add(session_row)
             db.flush()
@@ -315,7 +321,7 @@ def process_guest_arrival(
                     "event_id": ev_id,
                     "device_id": (device_id or "").strip() or None,
                     "location": {"lat": latitude, "lng": longitude},
-                    "guest_message": "You are expected. Guest pass verified.",
+                    "guest_message": msg_guest,
                     "guest_pass_id": guest_pass.id,
                 },
                 metadata_json={
@@ -334,7 +340,7 @@ def process_guest_arrival(
             return {
                 "guest_response": {
                     "status": "EXPECTED",
-                    "message": "You are expected. Guest pass verified.",
+                    "message": msg_guest,
                     "guest_id": guest_token,
                     "zone_id": zone_id,
                     "exchange_code": session_row.exchange_code,
@@ -353,6 +359,7 @@ def process_guest_arrival(
     permission_sender_owner_id: int | None = None
 
     if schedule:
+        msg_guest = msgs.expected_arrival_message
         session_row = GuestAccessSession(
             guest_id=guest_token,
             zone_id=zone_id,
@@ -366,6 +373,7 @@ def process_guest_arrival(
             schedule_id=schedule.id,
             admin_owner_id=None,
             qr_token_id=qr_token_db_id,
+            arrival_guest_message_snapshot=msg_guest,
         )
         db.add(session_row)
         db.flush()
@@ -423,13 +431,14 @@ def process_guest_arrival(
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         }
         decision = "EXPECTED"
-        msg_guest = "You are expected. Please proceed."
         perm_line = f"Expected guest arrived: {guest_name.strip()}."
     else:
         admin = resolve_primary_zone_admin_owner(db, zone_id)
         if not admin:
             return {"error": "NO_ZONE_ADMIN", "message": "No administrator found for this zone.", "http_status": 422}
         permission_sender_owner_id = admin.id
+
+        msg_guest = msgs.unexpected_arrival_message
 
         session_row = GuestAccessSession(
             guest_id=guest_token,
@@ -444,6 +453,7 @@ def process_guest_arrival(
             schedule_id=None,
             admin_owner_id=admin.id,
             qr_token_id=qr_token_db_id,
+            arrival_guest_message_snapshot=msg_guest,
         )
         db.add(session_row)
         db.flush()
@@ -471,7 +481,6 @@ def process_guest_arrival(
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         }
         decision = "UNEXPECTED"
-        msg_guest = "You are not scheduled. Please wait for approval."
         perm_line = f"Guest access requested for {guest_name.strip()}. Awaiting approval."
 
     perm_event = ZoneMessageEvent(
@@ -514,9 +523,9 @@ def process_guest_arrival(
     }
 
 
-def serialize_guest_session_row(row: GuestAccessSession) -> dict:
+def serialize_guest_session_row(db: Session, row: GuestAccessSession) -> dict:
     """Member/API list shape for dashboard polling."""
-    base = guest_session_public_view(row)
+    base = guest_session_public_view(db, row)
     return {
         "id": row.id,
         "guest_id": row.guest_id,
@@ -585,7 +594,7 @@ def list_guest_sessions_for_zone(
     return q.order_by(GuestAccessSession.created_at.desc()).offset(sk).limit(lim).all()
 
 
-def guest_session_public_view(row: GuestAccessSession) -> dict:
+def guest_session_public_view(db: Session, row: GuestAccessSession) -> dict:
     if row.access_revoked_at is not None:
         return {
             "guest_id": row.guest_id,
@@ -594,9 +603,17 @@ def guest_session_public_view(row: GuestAccessSession) -> dict:
             "approval_status": "REJECTED",
             "message": "Access has been revoked.",
         }
+    resolved = resolve_guest_arrival_messages(db, row.zone_id)
     if row.kind == "expected":
         status = "EXPECTED"
-        message = "You are expected. Please proceed."
+        if row.arrival_guest_message_snapshot is not None:
+            message = row.arrival_guest_message_snapshot
+        elif (
+            db.query(GuestPass.id).filter(GuestPass.used_by_guest_id == row.guest_id).first() is not None
+        ):
+            message = resolved.guest_pass_verified_message
+        else:
+            message = resolved.expected_arrival_message
         approval_status = "APPROVED"
     elif row.resolution == "approved":
         status = "APPROVED"
@@ -608,7 +625,10 @@ def guest_session_public_view(row: GuestAccessSession) -> dict:
         approval_status = "REJECTED"
     else:
         status = "UNEXPECTED"
-        message = "You are not scheduled. Please wait for approval."
+        if row.arrival_guest_message_snapshot is not None:
+            message = row.arrival_guest_message_snapshot
+        else:
+            message = resolved.unexpected_arrival_message
         approval_status = "PENDING"
     out = {
         "guest_id": row.guest_id,

@@ -31,4 +31,6 @@ class GuestAccessSession(Base):
     exchange_consumed_at = Column(DateTime, nullable=True)
     # Set when admin revokes an active session (expected arrivals) or when a consumed guest pass is revoked.
     access_revoked_at = Column(DateTime, nullable=True, index=True)
+    # Snapshot of guest-facing instruction at arrival (expected schedule, guest pass, or pending unexpected).
+    arrival_guest_message_snapshot = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

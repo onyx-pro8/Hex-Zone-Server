@@ -26,6 +26,10 @@ from app.schemas.access_guest import (
     GuestAccessQrLinkResponse,
     GuestAccessSessionListItem,
     GuestAdminDecisionResponse,
+    GuestArrivalMessagesData,
+    GuestArrivalMessagesDefaults,
+    GuestArrivalMessagesEnvelope,
+    GuestArrivalMessagesPatch,
     GuestArrivalRequest,
     GuestQrTokenCreate,
     GuestRequestDecisionData,
@@ -61,7 +65,14 @@ from app.schemas.guest_api import (
     GuestSessionGuestProfile,
 )
 from app.schemas.schemas import MemberGuestAccessThreadMessagesData, MemberGuestAccessThreadMessagesEnvelope
-from app.services import guest_access_qr, guest_access_qr_token_service, guest_access_service, guest_api_service, guest_pass_service
+from app.services import (
+    guest_access_qr,
+    guest_access_qr_token_service,
+    guest_access_service,
+    guest_api_service,
+    guest_arrival_zone_messages as guest_arrival_zone_messages_service,
+    guest_pass_service,
+)
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -98,7 +109,11 @@ Outcomes:
 - **UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`** to all active owners
   sharing **zone_id**, and record a PERMISSION zone event for request/decision history.
 
-Those **PERMISSION** rows live in **`zone_message_events`**. **Guest pass** create/accept/reject/revoke also appends
+Those **PERMISSION** rows live in **`zone_message_events`**. **Guest-facing arrival strings** (expected schedule,
+unexpected pending, guest pass verified) may be overridden per zone via
+**`GET` / `PATCH` / `PUT /api/access/zones/{zone_id}/guest-arrival-messages`**; each successful arrival **snapshots**
+the effective **`message`** on **`guest_access_sessions`** and embeds the same value as **`guest_message`** on the
+**PERMISSION** event so staff and guest stay aligned. **Guest pass** create/accept/reject/revoke also appends
 **`PERMISSION`** rows (`metadata.flow` **`guest_pass_lifecycle`**, **`body.code`** one of **`GUEST_PASS_*`**).
 Eligible owners see merged **`PERMISSION`** lines on **`GET /messages?owner_id=`**; guest-facing threads use
 **`GET /api/guest/messages`** / **`GET /api/access/guest-messages`** where a session or guest id applies.
@@ -166,6 +181,34 @@ def _require_guest_qr_administrator(db: Session, current_user: dict, zone_id: st
             detail={
                 "error_code": "FORBIDDEN",
                 "message": "Administrator role required to fetch guest access QR material.",
+            },
+        )
+    return owner
+
+
+def _require_zone_guest_arrival_messages_admin(db: Session, current_user: dict, zone_id: str) -> Owner:
+    """Same cohort as **GET /api/access/guest-requests** / guest thread admin views."""
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "NOT_FOUND", "message": "Owner not found"},
+        )
+    zid = zone_id.strip()
+    if owner.role != OwnerRole.ADMINISTRATOR or owner.zone_id != zid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "FORBIDDEN",
+                "message": "Administrator role is required for this zone.",
+            },
+        )
+    if not guest_access_service.can_manage_zone_guest_requests(db, owner, zid):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "FORBIDDEN",
+                "message": "You are not allowed to administer guest arrival messages for this zone.",
             },
         )
     return owner
@@ -1130,7 +1173,10 @@ async def guest_access_qr_token_png(
         "When **status** is **APPROVED** (expected guest, guest pass, schedule match, or admin-approved unexpected), "
         "the body includes a valid unused **`exchange_code`** and **`exchange_expires_at`** until the guest completes "
         "**`POST /api/access/guest-session`** (single-use; TTL from **`GUEST_ACCESS_EXCHANGE_TTL_MINUTES`**). "
-        "Those fields are omitted after a successful exchange (**`exchange_consumed`**) or if the session is not cleared."
+        "Those fields are omitted after a successful exchange (**`exchange_consumed`**) or if the session is not cleared.\n\n"
+        "**`message`:** For **PENDING** unexpected guests and for **APPROVED** while the guest is still in the initial "
+        "expected or guest-pass path, text is the **arrival snapshot** (immutable for that session after **`POST /api/access/permission`**); "
+        "see **`GET|PATCH|PUT /api/access/zones/{zone_id}/guest-arrival-messages`** in OpenAPI."
     ),
     response_description="Guest-visible status; one-time exchange when APPROVED and JWT exchange is still pending.",
     responses={
@@ -1170,7 +1216,7 @@ async def guest_session_status(
         )
     if guest_access_service.ensure_active_guest_exchange_for_poll(db, row):
         db.commit()
-    view = guest_access_service.guest_session_public_view(row)
+    view = guest_access_service.guest_session_public_view(db, row)
     if view["status"] == "UNEXPECTED":
         mapped_status = "PENDING"
     elif view["status"] == "EXPECTED":
@@ -1184,6 +1230,94 @@ async def guest_session_status(
         exchange_expires_at=view.get("exchange_expires_at"),
     )
     return AccessSessionPollEnvelope(data=data)
+
+
+def _guest_arrival_messages_envelope_from_db(db: Session, zone_id: str) -> GuestArrivalMessagesEnvelope:
+    payload = guest_arrival_zone_messages_service.guest_arrival_messages_admin_api_dict(db, zone_id)
+    data = GuestArrivalMessagesData(
+        zone_id=payload["zone_id"],
+        expected_arrival_message=payload["expected_arrival_message"],
+        unexpected_arrival_message=payload["unexpected_arrival_message"],
+        guest_pass_verified_message=payload["guest_pass_verified_message"],
+        defaults=GuestArrivalMessagesDefaults.model_validate(payload["defaults"]),
+    )
+    return GuestArrivalMessagesEnvelope(status="success", data=data)
+
+
+@router.get(
+    "/zones/{zone_id}/guest-arrival-messages",
+    response_model=GuestArrivalMessagesEnvelope,
+    status_code=status.HTTP_200_OK,
+    summary="Read guest arrival message overrides for a zone",
+    description=(
+        "**Bearer** member JWT. Caller must be a **zone administrator** with **`owners.zone_id`** equal to **zone_id** "
+        "and satisfy **`can_manage_zone_guest_requests`** (same rules as **`GET /api/access/guest-requests`**).\n\n"
+        "Returns nullable per-field overrides plus **`defaults`** (built-in English strings). **JSON null** on a field "
+        "means that slot uses the default for **new** arrivals only; **`GET /api/access/session/{guest_id}`** may still "
+        "show a **snapshot** taken at arrival (see that route)."
+    ),
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {"model": GuestAccessHttpError},
+        status.HTTP_404_NOT_FOUND: {"description": "Authenticated owner not found."},
+    },
+)
+async def get_guest_arrival_messages(
+    zone_id: str = Path(..., min_length=1, max_length=100, description="Hex zone id (**zid**)."),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_zone_guest_arrival_messages_admin(db, current_user, zone_id)
+    return _guest_arrival_messages_envelope_from_db(db, zone_id)
+
+
+@router.patch(
+    "/zones/{zone_id}/guest-arrival-messages",
+    response_model=GuestArrivalMessagesEnvelope,
+    status_code=status.HTTP_200_OK,
+    summary="Update guest arrival message overrides (partial)",
+    description=(
+        "Same authorization as **GET**. Only keys present in the JSON body are updated; **JSON null** clears a stored "
+        "override for that slot (revert to built-in default for **new** arrivals). Strings are trimmed; whitespace-only "
+        f"or longer than **{guest_arrival_zone_messages_service.MAX_GUEST_ARRIVAL_MESSAGE_LEN}** characters is **422**."
+    ),
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {"model": GuestAccessHttpError},
+        status.HTTP_404_NOT_FOUND: {"description": "Authenticated owner not found."},
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {"description": "Validation error (empty trimmed string or over max length)."},
+    },
+)
+@router.put(
+    "/zones/{zone_id}/guest-arrival-messages",
+    response_model=GuestArrivalMessagesEnvelope,
+    status_code=status.HTTP_200_OK,
+    summary="Update guest arrival message overrides (partial, same as PATCH)",
+    description="Alias of **PATCH** for clients that prefer **PUT** with a partial JSON body.",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {"model": GuestAccessHttpError},
+        status.HTTP_404_NOT_FOUND: {"description": "Authenticated owner not found."},
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {"description": "Validation error (empty trimmed string or over max length)."},
+    },
+)
+async def patch_put_guest_arrival_messages(
+    body: GuestArrivalMessagesPatch,
+    zone_id: str = Path(..., min_length=1, max_length=100, description="Hex zone id (**zid**)."),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = _require_zone_guest_arrival_messages_admin(db, current_user, zone_id)
+    updates = body.model_dump(exclude_unset=True)
+    if updates:
+        guest_arrival_zone_messages_service.upsert_guest_arrival_zone_messages(
+            db,
+            zone_id=zone_id.strip(),
+            column_updates=updates,
+            acting_owner_id=owner.id,
+        )
+        db.commit()
+    return _guest_arrival_messages_envelope_from_db(db, zone_id)
 
 
 @router.post(

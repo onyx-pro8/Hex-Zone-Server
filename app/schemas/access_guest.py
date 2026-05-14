@@ -3,9 +3,10 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 MAX_GUEST_QR_TOKEN_TTL_HOURS = 24 * 365
+MAX_GUEST_ARRIVAL_ZONE_MESSAGE_LEN = 500
 
 
 class GuestArrivalLocation(BaseModel):
@@ -120,7 +121,14 @@ class GuestScanResponse(BaseModel):
     status: Literal["EXPECTED", "UNEXPECTED"] = Field(
         description="EXPECTED: matched active schedule in window. UNEXPECTED: no matching schedule."
     )
-    message: str = Field(description="Guest-facing instruction text.")
+    message: str = Field(
+        description=(
+            "Guest-facing instruction text. Built-in English defaults apply unless an administrator configures "
+            "per-zone overrides (**GET/PUT|PATCH `/api/access/zones/{zone_id}/guest-arrival-messages`**). "
+            "At arrival the server stores a **snapshot** on the guest session; **PERMISSION** thread **`guest_message`** "
+            "uses the same string so staff and guest stay aligned."
+        ),
+    )
     guest_id: str = Field(description="Opaque id for polling GET /api/access/session/{guest_id}.")
     zone_id: str = Field(
         description=(
@@ -470,7 +478,13 @@ class PrimaryGuestQrRotateRequest(BaseModel):
 
 class AccessPermissionResponseData(BaseModel):
     status: Literal["EXPECTED", "UNEXPECTED"]
-    message: str
+    message: str = Field(
+        description=(
+            "Guest-facing instruction text (same string stored as the session **arrival snapshot** and embedded as "
+            "**`guest_message`** on the **PERMISSION** zone event). See **GuestScanResponse.message** for defaults vs "
+            "per-zone admin overrides."
+        ),
+    )
     guest_id: str
     zone_id: str
     exchange_code: str | None = Field(
@@ -490,7 +504,15 @@ class AccessPermissionResponseEnvelope(BaseModel):
 
 class AccessSessionPollData(BaseModel):
     status: Literal["PENDING", "APPROVED", "REJECTED"]
-    message: str | None = None
+    message: str | None = Field(
+        default=None,
+        description=(
+            "Guest-facing copy for this poll. For **PENDING** (unexpected, awaiting approval) and **APPROVED** while "
+            "still in the **scheduled-expected** or **guest-pass** waiting state, text matches the **arrival snapshot** "
+            "(see **POST /api/access/permission**): later edits to zone templates do not change in-flight sessions. "
+            "Very old sessions without a snapshot fall back to the effective zone template at poll time."
+        ),
+    )
     exchange_code: str | None = None
     exchange_expires_at: str | None = None
 
@@ -498,6 +520,89 @@ class AccessSessionPollData(BaseModel):
 class AccessSessionPollEnvelope(BaseModel):
     status: Literal["success"] = "success"
     data: AccessSessionPollData
+
+
+class GuestArrivalMessagesDefaults(BaseModel):
+    """Built-in English strings used when an override column is null or absent."""
+
+    expected_arrival_message: str = Field(description="Schedule-matched / expected arrival (no guest pass).")
+    unexpected_arrival_message: str = Field(description="Unexpected guest pending admin approval.")
+    guest_pass_verified_message: str = Field(description="Consumed **ACCEPTED** guest pass path.")
+
+
+class GuestArrivalMessagesData(BaseModel):
+    zone_id: str
+    expected_arrival_message: str | None = Field(
+        default=None,
+        description="Stored override or null to mean **defaults.expected_arrival_message** at runtime for new arrivals.",
+    )
+    unexpected_arrival_message: str | None = Field(
+        default=None,
+        description="Stored override or null to mean **defaults.unexpected_arrival_message** at runtime for new arrivals.",
+    )
+    guest_pass_verified_message: str | None = Field(
+        default=None,
+        description="Stored override or null to mean **defaults.guest_pass_verified_message** at runtime for new arrivals.",
+    )
+    defaults: GuestArrivalMessagesDefaults = Field(
+        description="Echo of built-in defaults (not persisted); omitted keys in **PATCH**/**PUT** do not change stored null vs override."
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "zone_id": "ZN-DEMO",
+                    "expected_arrival_message": None,
+                    "unexpected_arrival_message": "Please wait at reception.",
+                    "guest_pass_verified_message": None,
+                    "defaults": {
+                        "expected_arrival_message": "You are expected. Please proceed.",
+                        "unexpected_arrival_message": "You are not scheduled. Please wait for approval.",
+                        "guest_pass_verified_message": "You are expected. Guest pass verified.",
+                    },
+                }
+            ]
+        }
+    )
+
+
+class GuestArrivalMessagesEnvelope(BaseModel):
+    status: Literal["success"] = "success"
+    data: GuestArrivalMessagesData
+
+
+class GuestArrivalMessagesPatch(BaseModel):
+    """Partial update body: include only fields to change. **JSON null** clears an override (revert to default)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_arrival_message: str | None = Field(default=None, description="Omit to leave unchanged; null clears override.")
+    unexpected_arrival_message: str | None = Field(default=None, description="Omit to leave unchanged; null clears override.")
+    guest_pass_verified_message: str | None = Field(
+        default=None, description="Omit to leave unchanged; null clears override."
+    )
+
+    @field_validator(
+        "expected_arrival_message",
+        "unexpected_arrival_message",
+        "guest_pass_verified_message",
+        mode="before",
+    )
+    @classmethod
+    def normalize_non_null_strings(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return v
+        t = v.strip()
+        if not t:
+            raise ValueError(
+                "When provided as a string, each message must be non-empty after trimming surrounding whitespace."
+            )
+        if len(t) > MAX_GUEST_ARRIVAL_ZONE_MESSAGE_LEN:
+            raise ValueError(f"Each message may be at most {MAX_GUEST_ARRIVAL_ZONE_MESSAGE_LEN} characters.")
+        return t
 
 
 class GuestRequestListItemContract(BaseModel):
