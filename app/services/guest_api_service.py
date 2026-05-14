@@ -172,7 +172,9 @@ def merged_inbox_permission_event_visible(db: Session, viewer: Owner, row: ZoneM
             return True
         return viewer.id == row.sender_id or viewer.id == row.receiver_id
     if row.receiver_id is None:
-        return False
+        # Legacy PERMISSION rows (no `receiver_id`): keep the historical merged-inbox cohort so
+        # production DBs are not blank until backfill. New server-written rows always set `receiver_id`.
+        return guest_access_service.can_manage_zone_guest_requests(db, viewer, zid)
     return viewer.id == row.sender_id or viewer.id == row.receiver_id
 
 

@@ -8,7 +8,7 @@
 
 ## Semantics
 
-- **`direct`**: merged **`GET /messages`** includes the row only for viewers whose **`owners.id`** equals **`sender_id`** or **`receiver_id`**. Legacy **`PERMISSION`** rows with **`receiver_id`** null are excluded from the merged feed.
+- **`direct`**: merged **`GET /messages`** includes the row only for viewers whose **`owners.id`** equals **`sender_id`** or **`receiver_id`**, when **`receiver_id`** is set. Rows with **`receiver_id`** null (legacy data) remain visible to the same **`can_manage_zone_guest_requests`** cohort as before the pairing change, until you backfill **`receiver_id`** / metadata.
 - **`zone_pending_broadcast`**: first “awaiting approval” audit for an **unexpected** guest while **`GuestAccessSession.resolution`** is **`pending`** is visible to every staff member who passes **`guest_access_service.can_manage_zone_guest_requests`** for that zone. After the session is no longer unexpected+pending, the row is only visible under the **`direct`** rule (same **`sender_id`** / **`receiver_id`**).
 
 Guest **`GET /api/guest/messages`** is unchanged for threading; **`raw_payload`** may include **`permission_visibility`** for debugging.
