@@ -57,13 +57,22 @@ class PropagationMessageCreate(BaseModel):
 
 
 class BlockRuleCreate(BaseModel):
-    blocked_owner_id: int | None = Field(default=None, ge=1)
-    blocked_message_type: MessageFeatureType | None = None
+    blocked_owner_id: int | None = Field(
+        default=None,
+        ge=1,
+        description="Block all message types from this zone member.",
+    )
+    blocked_message_type: MessageFeatureType | None = Field(
+        default=None,
+        description="Block this message type from all senders in the zone.",
+    )
 
     @model_validator(mode="after")
     def validate_any_selector(self):
         if self.blocked_owner_id is None and self.blocked_message_type is None:
             raise ValueError("Either blocked_owner_id or blocked_message_type is required")
+        if self.blocked_owner_id is not None and self.blocked_message_type is not None:
+            raise ValueError("Send only blocked_owner_id or blocked_message_type, not both")
         return self
 
 

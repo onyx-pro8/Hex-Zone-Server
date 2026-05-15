@@ -15,7 +15,8 @@ from app.domain.message_types import (
     type_scope,
 )
 from app.domain.permission_visibility import PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST
-from app.models import GuestAccessSession, MessageBlock, Owner, Zone, ZoneMessageEvent
+from app.models import GuestAccessSession, Owner, Zone, ZoneMessageEvent
+from app.services import message_block_service
 from app.services.access_policy import zone_listing_owner_ids
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
@@ -76,15 +77,12 @@ def _guest_messaging_peer_owner_ids(db: Session, *, zone_id: str) -> set[int]:
 
 
 def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) -> bool:
-    """True if recipient recorded a block on this message type (applies to any sender, including guests)."""
-    return (
-        db.query(MessageBlock)
-        .filter(
-            MessageBlock.owner_id == recipient_owner_id,
-            MessageBlock.blocked_message_type == message_type,
-        )
-        .first()
-        is not None
+    """True if recipient blocks this delivery (type-only rules apply for guest senders)."""
+    return message_block_service.is_delivery_blocked(
+        db,
+        recipient_owner_id=recipient_owner_id,
+        sender_owner_id=None,
+        message_type=message_type,
     )
 
 
@@ -539,7 +537,7 @@ async def notify_guest_message_recipient(*, recipient_owner_id: int, payload: di
     await ws_manager.broadcast_to_users([recipient_owner_id], "guest_zone_message", payload)
 
 
-async def notify_access_chat_inbox_ws(row: ZoneMessageEvent) -> None:
+async def notify_access_chat_inbox_ws(db: Session, row: ZoneMessageEvent) -> None:
     """Push **`NEW_MESSAGE`** to staff parties with the same **`ZoneMessageResponse`** shape as **`GET /messages`**."""
 
     if not settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
@@ -552,8 +550,22 @@ async def notify_access_chat_inbox_ws(row: ZoneMessageEvent) -> None:
         recipients.add(int(row.sender_id))
     if not recipients:
         return
+
     payload = zone_message_event_to_member_zone_message_response(row).model_dump(mode="json")
-    await ws_manager.broadcast_to_users(sorted(recipients), "NEW_MESSAGE", payload)
+    msg_type = str(row.type or "")
+    deliver_to = [
+        uid
+        for uid in recipients
+        if not message_block_service.is_delivery_blocked(
+            db,
+            recipient_owner_id=uid,
+            sender_owner_id=row.sender_id,
+            message_type=msg_type,
+        )
+    ]
+    if not deliver_to:
+        return
+    await ws_manager.broadcast_to_users(sorted(deliver_to), "NEW_MESSAGE", payload)
 
 
 def create_member_to_guest_zone_message(

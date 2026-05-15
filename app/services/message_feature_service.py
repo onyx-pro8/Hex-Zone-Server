@@ -1,10 +1,10 @@
 """Geo propagation message workflows."""
 from datetime import datetime
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models import MessageBlock, Owner, ZoneMembership, ZoneMessageEvent
+from app.models import Owner, ZoneMembership, ZoneMessageEvent
+from app.services import message_block_service
 from app.schemas.message_feature import MessageFeatureType, PropagationMessageCreate
 from app.services.access_policy import visible_owner_ids
 from app.services.geospatial_service import evaluate_member_zones
@@ -19,21 +19,6 @@ from app.domain.message_types import (
 
 def _to_canonical_type(message_type: MessageFeatureType) -> CanonicalMessageType:
     return normalize_message_type(message_type.value)
-
-
-def _is_blocked(db: Session, recipient_owner_id: int, sender_owner_id: int, message_type: MessageFeatureType) -> bool:
-    block = (
-        db.query(MessageBlock)
-        .filter(
-            MessageBlock.owner_id == recipient_owner_id,
-            or_(
-                MessageBlock.blocked_owner_id == sender_owner_id,
-                MessageBlock.blocked_message_type == message_type.value,
-            ),
-        )
-        .first()
-    )
-    return block is not None
 
 
 def create_geo_propagated_message(db: Session, sender: Owner, payload: PropagationMessageCreate) -> dict:
@@ -66,7 +51,12 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
     delivered_owner_ids: list[int] = []
     blocked_owner_ids: list[int] = []
     for owner_id in candidate_recipients:
-        if _is_blocked(db, owner_id, sender.id, payload.type):
+        if message_block_service.is_delivery_blocked(
+            db,
+            recipient_owner_id=owner_id,
+            sender_owner_id=sender.id,
+            message_type=payload.type.value,
+        ):
             blocked_owner_ids.append(owner_id)
             continue
         delivered_owner_ids.append(owner_id)

@@ -471,7 +471,7 @@ async def guest_post_message(
     if mid and settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
         zr = db.get(ZoneMessageEvent, mid)
         if zr:
-            await guest_api_service.notify_access_chat_inbox_ws(zr)
+            await guest_api_service.notify_access_chat_inbox_ws(db, zr)
     await guest_api_service.notify_guest_message_recipient(
         recipient_owner_id=to_owner_id,
         payload={"event": created, "zone_id": zone_id},

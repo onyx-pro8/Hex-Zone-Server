@@ -20,6 +20,7 @@ from app.models import GuestAccessSession, ZoneMessageEvent
 from app.services import guest_api_service
 from app.services import guest_access_service
 from app.services.access_policy import can_message_owner
+from app.services import message_block_service
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 logger = logging.getLogger(__name__)
@@ -191,7 +192,7 @@ async def create_message(
         if settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
             zr = db.get(ZoneMessageEvent, eid)
             if zr:
-                await guest_api_service.notify_access_chat_inbox_ws(zr)
+                await guest_api_service.notify_access_chat_inbox_ws(db, zr)
         return guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db)
 
     try:
@@ -263,6 +264,19 @@ async def create_message(
                 detail={
                     "error_code": "RECEIVER_OUTSIDE_ALLOWED_SCOPE",
                     "message": "Receiver is outside sender account or zone scope.",
+                },
+            )
+        if message_block_service.is_delivery_blocked(
+            db,
+            recipient_owner_id=receiver.id,
+            sender_owner_id=sender.id,
+            message_type=canonical_type.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error_code": "MESSAGE_BLOCKED_BY_RECIPIENT",
+                    "message": "Recipient has blocked this message or sender.",
                 },
             )
 
@@ -391,9 +405,10 @@ async def _list_zone_messages_for_owner(
             limit=limit,
             viewer_owner_id=owner.id,
         )
-        return [
+        responses = [
             guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db) for event in rows
         ]
+        return message_block_service.filter_zone_message_responses_for_viewer(db, owner_id, responses)
 
     if other_owner_id is not None:
         other_owner = owner_crud.get_owner(db, other_owner_id)
@@ -414,7 +429,7 @@ async def _list_zone_messages_for_owner(
             skip=skip,
             limit=limit,
         )
-        return [
+        peer_responses = [
             ZoneMessageResponse(
                 id=message.id,
                 zone_id=owner.zone_id,
@@ -429,6 +444,7 @@ async def _list_zone_messages_for_owner(
             )
             for message in peer_rows
         ]
+        return message_block_service.filter_zone_message_responses_for_viewer(db, owner_id, peer_responses)
 
     fetch_cap = min(max(skip + limit + 128, limit * 2), 2500)
     inbox_rows = message_crud.list_visible_messages(
@@ -474,7 +490,8 @@ async def _list_zone_messages_for_owner(
         key=lambda item: item.created_at,
         reverse=True,
     )
-    return merged[skip : skip + limit]
+    visible = message_block_service.filter_zone_message_responses_for_viewer(db, owner_id, merged)
+    return visible[skip : skip + limit]
 
 
 @router.get(

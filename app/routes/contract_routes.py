@@ -19,6 +19,7 @@ from app.websocket.manager import ws_manager
 from app.domain.message_types import CanonicalMessageType, MessageScope, normalize_message_type, type_category, type_scope
 from app.services import guest_api_service
 from app.services.access_policy import can_message_owner
+from app.services import message_block_service
 
 router = APIRouter(tags=["contract"])
 
@@ -656,7 +657,7 @@ async def post_messages(
         if settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
             zr = db.get(ZoneMessageEvent, eid)
             if zr:
-                await guest_api_service.notify_access_chat_inbox_ws(zr)
+                await guest_api_service.notify_access_chat_inbox_ws(db, zr)
         return guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db)
 
     normalized_chat_payload = ZoneMessageCreate(
@@ -730,6 +731,19 @@ async def post_messages(
                 detail={
                     "error_code": "RECEIVER_OUTSIDE_ALLOWED_SCOPE",
                     "message": "Receiver is outside sender account or zone scope.",
+                },
+            )
+        if message_block_service.is_delivery_blocked(
+            db,
+            recipient_owner_id=receiver.id,
+            sender_owner_id=sender.id,
+            message_type=normalize_message_type(normalized_chat_payload.type or "").value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error_code": "MESSAGE_BLOCKED_BY_RECIPIENT",
+                    "message": "Recipient has blocked this message or sender.",
                 },
             )
 

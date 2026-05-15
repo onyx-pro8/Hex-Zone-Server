@@ -27,7 +27,7 @@ from app.schemas.message_feature import (
     PropagationMessageCreate,
     PropagationMessageResponse,
 )
-from app.services import guest_access_service, message_feature_service, permission_service
+from app.services import guest_access_service, message_block_service, message_feature_service, permission_service
 from app.services.zone_membership_service import refresh_owner_memberships
 from app.websocket.manager import ws_manager
 
@@ -160,10 +160,45 @@ async def create_block_rule(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    block = MessageBlock(
-        owner_id=current_user["user_id"],
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+
+    blocked_type = payload.blocked_message_type.value if payload.blocked_message_type else None
+    if payload.blocked_owner_id is not None:
+        blocked_member = owner_crud.get_owner(db, payload.blocked_owner_id)
+        if not blocked_member:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "BLOCKED_OWNER_NOT_FOUND", "message": "Member to block was not found."},
+            )
+        if blocked_member.id == owner.id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error_code": "INVALID_BLOCK_SELF", "message": "You cannot block yourself."},
+            )
+        if blocked_member.zone_id != owner.zone_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error_code": "BLOCKED_OWNER_OUTSIDE_ZONE",
+                    "message": "You can only block members in your zone.",
+                },
+            )
+
+    existing = message_block_service.find_duplicate_block(
+        db,
+        owner_id=owner.id,
         blocked_owner_id=payload.blocked_owner_id,
-        blocked_message_type=(payload.blocked_message_type.value if payload.blocked_message_type else None),
+        blocked_message_type=blocked_type,
+    )
+    if existing:
+        return existing
+
+    block = MessageBlock(
+        owner_id=owner.id,
+        blocked_owner_id=payload.blocked_owner_id,
+        blocked_message_type=blocked_type,
     )
     db.add(block)
     db.commit()
