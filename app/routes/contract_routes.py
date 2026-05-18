@@ -110,7 +110,23 @@ class RegisterRequest(BaseModel):
 
 class ZoneUpsertRequest(BaseModel):
     name: str
-    type: Literal["polygon", "circle", "grid", "dynamic", "proximity", "object", "geofence", "warn", "alert", "restricted", "custom_1", "custom_2"]
+    type: Literal[
+        "polygon",
+        "circle",
+        "grid",
+        "dynamic",
+        "proximity",
+        "object",
+        "geofence",
+        "warn",
+        "alert",
+        "restricted",
+        "emergency",
+        "communal_id",
+        "government_local_code",
+        "custom_1",
+        "custom_2",
+    ]
     geometry: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     id: str | None = None

@@ -53,14 +53,20 @@ def evaluate_member_zones(db: Session, latitude: float, longitude: float, candid
     for row in db.execute(postgis_sql, {"owner_ids": owner_ids, "longitude": longitude, "latitude": latitude}):
         matched.add(row[0])
 
-    # Dynamic zones can define multiple circles in geometry/config payloads.
-    dynamic_candidates = (
+    # Non-polygon circle-based zone types are evaluated from stored geometry/config.
+    circle_candidates = (
         db.query(Zone)
         .filter(Zone.owner_id.in_(owner_ids), Zone.active.is_(True))
         .all()
     )
-    for zone in dynamic_candidates:
+    for zone in circle_candidates:
         if _point_in_dynamic_zone(zone, latitude, longitude):
+            matched.add(zone.zone_id)
+            continue
+        if _point_in_proximity_zone(zone, latitude, longitude):
+            matched.add(zone.zone_id)
+            continue
+        if _point_in_object_zone(zone, latitude, longitude):
             matched.add(zone.zone_id)
 
     return sorted(matched)
@@ -99,6 +105,57 @@ def _point_in_dynamic_zone(zone: Zone, latitude: float, longitude: float) -> boo
     return False
 
 
+def _point_in_proximity_zone(zone: Zone, latitude: float, longitude: float) -> bool:
+    params = zone.parameters if isinstance(zone.parameters, dict) else {}
+    contract_type = str(params.get("contractType") or "").strip().lower()
+    if contract_type != "proximity":
+        return False
+
+    geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
+    config = params.get("config") if isinstance(params.get("config"), dict) else {}
+    circles = _extract_proximity_circle_specs(geometry, config)
+    if not circles:
+        return False
+
+    for circle in circles:
+        center = circle.get("center")
+        radius = circle.get("radius_meters")
+        if not isinstance(center, dict):
+            continue
+        c_lat = center.get("latitude")
+        c_lng = center.get("longitude")
+        if not isinstance(c_lat, (int, float)) or not isinstance(c_lng, (int, float)):
+            continue
+        if not isinstance(radius, (int, float)) or radius <= 0:
+            continue
+        distance = _haversine_meters(latitude, longitude, float(c_lat), float(c_lng))
+        if distance <= radius:
+            return True
+    return False
+
+
+def _point_in_object_zone(zone: Zone, latitude: float, longitude: float) -> bool:
+    params = zone.parameters if isinstance(zone.parameters, dict) else {}
+    contract_type = str(params.get("contractType") or "").strip().lower()
+    if contract_type != "object":
+        return False
+
+    geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
+    config = params.get("config") if isinstance(params.get("config"), dict) else {}
+    object_center = geometry.get("center")
+    radius = config.get("radius_meters")
+    if not isinstance(object_center, dict):
+        return False
+    c_lat = object_center.get("latitude")
+    c_lng = object_center.get("longitude")
+    if not isinstance(c_lat, (int, float)) or not isinstance(c_lng, (int, float)):
+        return False
+    if not isinstance(radius, (int, float)) or radius <= 0:
+        return False
+    distance = _haversine_meters(latitude, longitude, float(c_lat), float(c_lng))
+    return distance <= radius
+
+
 def _extract_dynamic_circle_specs(geometry: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
     circles = geometry.get("circles")
     if isinstance(circles, list):
@@ -133,6 +190,39 @@ def _extract_dynamic_circle_specs(geometry: dict[str, Any], config: dict[str, An
                 "max_radius_meters": max_radius,
             }
         ]
+    return []
+
+
+def _extract_proximity_circle_specs(geometry: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
+    circles = geometry.get("circles")
+    if isinstance(circles, list):
+        normalized: list[dict[str, Any]] = []
+        for circle in circles:
+            if isinstance(circle, dict):
+                normalized.append(
+                    {
+                        "center": circle.get("center"),
+                        "radius_meters": circle.get("radius_meters"),
+                    }
+                )
+        if normalized:
+            return normalized
+
+    centers = geometry.get("centers")
+    radii = config.get("radii_meters")
+    if isinstance(centers, list) and isinstance(radii, list):
+        pairs: list[dict[str, Any]] = []
+        for center, radius in zip(centers, radii):
+            if isinstance(center, dict):
+                pairs.append({"center": center, "radius_meters": radius})
+        if pairs:
+            return pairs
+
+    center = geometry.get("center")
+    radius = config.get("radius_meters")
+    if isinstance(center, dict) and isinstance(radius, (int, float)):
+        return [{"center": center, "radius_meters": radius}]
+
     return []
 
 

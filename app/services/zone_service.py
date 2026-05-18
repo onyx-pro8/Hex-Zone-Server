@@ -23,15 +23,26 @@ CONTRACT_TO_MODEL_ZONE_TYPE = {
     "warn": ZoneType.WARN,
     "grid": ZoneType.ALERT,
     "alert": ZoneType.ALERT,
-    "dynamic": ZoneType.CUSTOM_1,
+    "dynamic": ZoneType.EMERGENCY,
+    "emergency": ZoneType.EMERGENCY,
+    "communal_id": ZoneType.CUSTOM_1,
     "custom_1": ZoneType.CUSTOM_1,
+    "government_local_code": ZoneType.CUSTOM_2,
     "proximity": ZoneType.RESTRICTED,
     "restricted": ZoneType.RESTRICTED,
     "object": ZoneType.CUSTOM_2,
     "custom_2": ZoneType.CUSTOM_2,
 }
 
-MODEL_TO_CONTRACT_ZONE_TYPE = {value: key for key, value in CONTRACT_TO_MODEL_ZONE_TYPE.items()}
+MODEL_TO_CONTRACT_ZONE_TYPE = {
+    ZoneType.GEOFENCE: "geofence",
+    ZoneType.WARN: "warn",
+    ZoneType.ALERT: "grid",
+    ZoneType.EMERGENCY: "dynamic",
+    ZoneType.RESTRICTED: "proximity",
+    ZoneType.CUSTOM_1: "communal_id",
+    ZoneType.CUSTOM_2: "government_local_code",
+}
 
 
 def _extract_geojson_polygon(geometry: object) -> dict | None:

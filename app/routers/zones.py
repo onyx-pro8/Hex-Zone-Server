@@ -26,6 +26,11 @@ router = APIRouter(prefix="/zones", tags=["zones"])
 
 CANONICAL_ZONE_TYPES = {
     "geofence",
+    "grid",
+    "communal_id",
+    "government_local_code",
+    "object",
+    "emergency",
     "warn",
     "alert",
     "restricted",
@@ -37,13 +42,24 @@ CANONICAL_ZONE_TYPES = {
 
 ZONE_TYPE_ALIASES = {
     "polygon": "geofence",
-    "circle": "warn",
-    "grid": "alert",
-    "object": "custom_2",
+    "circle": "proximity",
+    "custom_1": "communal_id",
+    "custom_2": "government_local_code",
+    "local_code": "government_local_code",
+    "gov_local_code": "government_local_code",
+    "warn": "grid",
+    "alert": "grid",
+    "restricted": "proximity",
+    "emergency": "dynamic",
 }
 
 CANONICAL_TO_MODEL_ZONE_TYPE = {
     "geofence": ZoneType.GEOFENCE,
+    "grid": ZoneType.ALERT,
+    "communal_id": ZoneType.CUSTOM_1,
+    "government_local_code": ZoneType.CUSTOM_2,
+    "object": ZoneType.CUSTOM_2,
+    "emergency": ZoneType.EMERGENCY,
     "warn": ZoneType.WARN,
     "alert": ZoneType.ALERT,
     "restricted": ZoneType.RESTRICTED,
@@ -55,12 +71,12 @@ CANONICAL_TO_MODEL_ZONE_TYPE = {
 
 MODEL_TO_CANONICAL_ZONE_TYPE = {
     ZoneType.GEOFENCE: "geofence",
-    ZoneType.WARN: "warn",
-    ZoneType.ALERT: "alert",
-    ZoneType.RESTRICTED: "restricted",
+    ZoneType.WARN: "grid",
+    ZoneType.ALERT: "grid",
+    ZoneType.RESTRICTED: "proximity",
     ZoneType.EMERGENCY: "dynamic",
-    ZoneType.CUSTOM_1: "custom_1",
-    ZoneType.CUSTOM_2: "custom_2",
+    ZoneType.CUSTOM_1: "communal_id",
+    ZoneType.CUSTOM_2: "government_local_code",
 }
 
 
@@ -233,7 +249,7 @@ def _validate_zone_payload(zone_type: str, geometry: dict[str, Any], config: dic
                 detail="Overlapping H3 cells are not allowed across resolutions",
             )
 
-    if zone_type in {"geofence", "warn", "alert", "restricted"}:
+    if zone_type in {"geofence", "grid", "warn", "alert", "restricted"}:
         polygon = _extract_geo_fence_polygon(geometry)
         if not polygon and not h3_cells:
             raise HTTPException(
@@ -320,21 +336,49 @@ def _validate_zone_payload(zone_type: str, geometry: dict[str, Any], config: dic
             )
         return
 
-    if zone_type == "custom_1":
+    if zone_type in {"communal_id", "custom_1"}:
         communal_id = config.get("communal_id")
         if not isinstance(communal_id, str) or not communal_id.strip():
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="custom_1 requires non-empty config.communal_id",
+                detail="communal_id requires non-empty config.communal_id",
             )
         return
 
-    if zone_type == "custom_2":
+    if zone_type in {"government_local_code", "custom_2"}:
         local_code = config.get("local_code")
         if not isinstance(local_code, str) or not local_code.strip():
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="custom_2 requires non-empty config.local_code",
+                detail="government_local_code requires non-empty config.local_code",
+            )
+        return
+
+    if zone_type == "object":
+        object_id = config.get("object_id")
+        if not isinstance(object_id, str) or not object_id.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="object requires non-empty config.object_id",
+            )
+        radius = config.get("radius_meters")
+        if not isinstance(radius, (float, int)) or radius <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="object requires config.radius_meters > 0",
+            )
+        center = geometry.get("center")
+        if not isinstance(center, dict):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="object requires geometry.center with latitude and longitude",
+            )
+        latitude = center.get("latitude")
+        longitude = center.get("longitude")
+        if not isinstance(latitude, (float, int)) or not isinstance(longitude, (float, int)):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="object requires numeric geometry.center.latitude and geometry.center.longitude",
             )
         return
 
