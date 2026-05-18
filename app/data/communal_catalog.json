@@ -1,0 +1,50 @@
+{
+  "COMM-77": {
+    "display_name": "Riverside Community",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.812, -6.198],
+          [106.822, -6.198],
+          [106.822, -6.208],
+          [106.812, -6.208],
+          [106.812, -6.198]
+        ]
+      ]
+    },
+    "h3_cells": []
+  },
+  "COMM-NORTH": {
+    "display_name": "North District Collective",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.798, -6.185],
+          [106.815, -6.185],
+          [106.815, -6.202],
+          [106.798, -6.202],
+          [106.798, -6.185]
+        ]
+      ]
+    },
+    "h3_cells": []
+  },
+  "COMM-SOUTH": {
+    "display_name": "South Harbor Community",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.825, -6.215],
+          [106.842, -6.215],
+          [106.842, -6.232],
+          [106.825, -6.232],
+          [106.825, -6.215]
+        ]
+      ]
+    },
+    "h3_cells": []
+  }
+}

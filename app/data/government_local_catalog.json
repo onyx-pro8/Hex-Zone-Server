@@ -1,0 +1,104 @@
+{
+  "10110": {
+    "display_name": "Gambir (Postal 10110)",
+    "code_type": "postal",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.818, -6.168],
+          [106.828, -6.168],
+          [106.828, -6.178],
+          [106.818, -6.178],
+          [106.818, -6.168]
+        ]
+      ]
+    },
+    "h3_cells": []
+  },
+  "10120": {
+    "display_name": "Tanah Abang (Postal 10120)",
+    "code_type": "postal",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.808, -6.188],
+          [106.822, -6.188],
+          [106.822, -6.202],
+          [106.808, -6.202],
+          [106.808, -6.188]
+        ]
+      ]
+    },
+    "h3_cells": []
+  },
+  "10210": {
+    "display_name": "Kemayoran (Postal 10210)",
+    "code_type": "postal",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.838, -6.158],
+          [106.855, -6.158],
+          [106.855, -6.175],
+          [106.838, -6.175],
+          [106.838, -6.158]
+        ]
+      ]
+    },
+    "h3_cells": []
+  },
+  "ID-JK-3171": {
+    "display_name": "South Jakarta District",
+    "code_type": "district",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.78, -6.28],
+          [106.86, -6.28],
+          [106.86, -6.36],
+          [106.78, -6.36],
+          [106.78, -6.28]
+        ]
+      ]
+    },
+    "h3_cells": []
+  },
+  "ID-JK-3173": {
+    "display_name": "East Jakarta District",
+    "code_type": "district",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.86, -6.18],
+          [106.98, -6.18],
+          [106.98, -6.28],
+          [106.86, -6.28],
+          [106.86, -6.18]
+        ]
+      ]
+    },
+    "h3_cells": []
+  },
+  "DIST-JKT-CENTRAL": {
+    "display_name": "Central Jakarta Administrative",
+    "code_type": "administrative",
+    "geo_fence_polygon": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [106.79, -6.16],
+          [106.86, -6.16],
+          [106.86, -6.22],
+          [106.79, -6.22],
+          [106.79, -6.16]
+        ]
+      ]
+    },
+    "h3_cells": []
+  }
+}

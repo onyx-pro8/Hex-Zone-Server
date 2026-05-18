@@ -68,8 +68,10 @@ class Settings(BaseSettings):
     MAX_ZONES_PER_USER: int = 3
     REGISTRATION_CODE_EXPIRE_HOURS: int = 24
 
-    # Geocoding (placeholder for future integration)
+    # Geocoding / area boundaries (OpenStreetMap Nominatim)
     GEOCODING_PROVIDER: str = "nominatim"
+    BOUNDARY_LOOKUP_ENABLED: bool = True
+    NOMINATIM_USER_AGENT: str = "HexZone/1.0 (https://hex-zone.local; area-boundary-lookup)"
 
 
 settings = Settings()

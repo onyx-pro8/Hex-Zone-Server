@@ -12,6 +12,19 @@ from app.crud import zone as zone_crud
 from app.database import get_db
 from app.models.zone import Zone, ZoneType
 from app.services.access_policy import visible_zone_owner_ids
+from app.services.communal_zone_service import (
+    generate_communal_reference,
+    is_valid_reference_format,
+    normalize_reference_id,
+    resolution_to_response_payload as communal_resolution_to_response_payload,
+    resolve_communal_reference,
+)
+from app.services.government_zone_service import (
+    is_valid_local_code_format,
+    normalize_local_area_code,
+    resolution_to_response_payload as government_resolution_to_response_payload,
+    resolve_government_local_code,
+)
 from app.services.zone_policy import (
     account_owner_ids_for_policy,
     build_capabilities,
@@ -188,6 +201,71 @@ class ZoneContractResponse(BaseModel):
                 "updated_at": "2026-04-23T09:10:00",
             }
         }
+    )
+
+
+class ZoneReferenceValidateRequest(BaseModel):
+    zone_type: str = Field(description="communal_id (Type 2) or government_local_code (Type 3)")
+    reference_id: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Legacy short code, or auto-derived reference id for global addresses.",
+    )
+    address_mode: Optional[str] = Field(
+        default=None,
+        description="postal | street — global government local area (Type 3).",
+    )
+    postal_code: Optional[str] = Field(default=None, max_length=32)
+    city: Optional[str] = Field(default=None, max_length=120)
+    country: Optional[str] = Field(default=None, max_length=120)
+    street: Optional[str] = Field(default=None, max_length=200)
+    street_number: Optional[str] = Field(default=None, max_length=32)
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "zone_type": "communal_id",
+                    "reference_id": "COMM-77",
+                },
+                {
+                    "zone_type": "government_local_code",
+                    "address_mode": "postal",
+                    "postal_code": "M5H 2N2",
+                    "city": "Toronto",
+                    "country": "Canada",
+                },
+                {
+                    "zone_type": "government_local_code",
+                    "address_mode": "street",
+                    "street": "Queen Street West",
+                    "street_number": "100",
+                    "postal_code": "M5H 2N2",
+                    "city": "Toronto",
+                    "country": "Canada",
+                },
+            ]
+        }
+    )
+
+
+class ZoneReferenceValidateResponse(BaseModel):
+    valid: bool
+    zone_type: str
+    reference_id: str
+    display_name: Optional[str] = None
+    geometry: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    h3_cells: list[str] = Field(default_factory=list)
+    source: Optional[str] = None
+    message: Optional[str] = None
+
+
+class ZoneReferenceGenerateRequest(BaseModel):
+    zone_type: str = Field(default="communal_id")
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"zone_type": "communal_id"}}
     )
 
 
@@ -658,6 +736,161 @@ async def get_zone_capabilities(
     owner_ids = account_owner_ids_for_policy(db, owner)
     total_zones = count_zones_for_owners(db, owner_ids)
     return ZoneCapabilitiesResponse.model_validate(build_capabilities(owner.role.value, total_zones).to_dict())
+
+
+def _resolve_reference_zone_type(raw: str) -> str:
+    normalized = _normalize_zone_type(raw)
+    if normalized in {"communal_id", "custom_1"}:
+        return "communal_id"
+    if normalized in {"government_local_code", "custom_2"}:
+        return "government_local_code"
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="zone_type must be communal_id or government_local_code",
+    )
+
+
+@router.post(
+    "/validate-reference",
+    response_model=ZoneReferenceValidateResponse,
+    summary="Validate communal / government reference ID",
+    description=(
+        "Type 2–3: resolve a reference ID to zone geometry for map preview before save. "
+        "Returns geo_fence_polygon and optional h3_cells."
+    ),
+)
+async def validate_zone_reference(
+    body: ZoneReferenceValidateRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+
+    resolved_type = _resolve_reference_zone_type(body.zone_type)
+    owner_ids = account_owner_ids_for_policy(db, owner)
+
+    if resolved_type == "communal_id":
+        reference_id = normalize_reference_id(body.reference_id)
+        if not is_valid_reference_format(reference_id):
+            return ZoneReferenceValidateResponse(
+                valid=False,
+                zone_type=resolved_type,
+                reference_id=reference_id,
+                message="Reference ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
+            )
+        resolution = resolve_communal_reference(db, owner_ids, reference_id)
+        if not resolution:
+            return ZoneReferenceValidateResponse(
+                valid=False,
+                zone_type=resolved_type,
+                reference_id=reference_id,
+                message="Communal ID could not be resolved.",
+            )
+        payload = communal_resolution_to_response_payload(resolution)
+        return ZoneReferenceValidateResponse.model_validate(payload)
+
+    address_payload = {
+        "address_mode": body.address_mode,
+        "postal_code": body.postal_code,
+        "city": body.city,
+        "country": body.country,
+        "street": body.street,
+        "street_number": body.street_number,
+    }
+    has_global_address = bool(str(body.country or "").strip()) and (
+        bool(str(body.postal_code or "").strip())
+        or bool(str(body.city or "").strip())
+        or bool(str(body.street or "").strip())
+    )
+
+    if has_global_address:
+        from app.services.area_boundary_service import parse_area_location_from_dict
+
+        location = parse_area_location_from_dict(address_payload)
+        ref_id = location.reference_id() if location else ""
+        resolution = resolve_government_local_code(
+            db,
+            owner_ids,
+            ref_id,
+            address=address_payload,
+        )
+        if not resolution:
+            return ZoneReferenceValidateResponse(
+                valid=False,
+                zone_type=resolved_type,
+                reference_id=ref_id,
+                message=(
+                    "Could not resolve this address to an area boundary. "
+                    "Check postal code, city, and country (any country, e.g. 00510, Helsinki, Finland "
+                    "or M5H 2N2, Toronto, Canada). Ensure the API server can reach OpenStreetMap."
+                ),
+            )
+        payload = government_resolution_to_response_payload(resolution)
+        return ZoneReferenceValidateResponse.model_validate(payload)
+
+    reference_raw = str(body.reference_id or "").strip()
+    if not reference_raw:
+        return ZoneReferenceValidateResponse(
+            valid=False,
+            zone_type=resolved_type,
+            reference_id="",
+            message=(
+                "Provide postal code, city, and country — or street, postal code, "
+                "city, and country."
+            ),
+        )
+
+    local_code = normalize_local_area_code(reference_raw)
+    if not is_valid_local_code_format(local_code):
+        return ZoneReferenceValidateResponse(
+            valid=False,
+            zone_type=resolved_type,
+            reference_id=local_code,
+            message=(
+                "Provide postal code, city, and country (global), "
+                "or a legacy district code (e.g. ID-JK-3171)."
+            ),
+        )
+    resolution = resolve_government_local_code(db, owner_ids, local_code)
+    if not resolution:
+        return ZoneReferenceValidateResponse(
+            valid=False,
+            zone_type=resolved_type,
+            reference_id=local_code,
+            message="Local area code could not be resolved.",
+        )
+    payload = government_resolution_to_response_payload(resolution)
+    return ZoneReferenceValidateResponse.model_validate(payload)
+
+
+@router.post(
+    "/generate-reference",
+    response_model=ZoneReferenceValidateResponse,
+    summary="Generate a new communal reference ID",
+    description="Type 2: server generates a communal ID and resolvable preview geometry.",
+)
+async def generate_zone_reference(
+    body: ZoneReferenceGenerateRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+
+    resolved_type = _resolve_reference_zone_type(body.zone_type)
+    if resolved_type != "communal_id":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only communal_id generation is supported",
+        )
+
+    owner_ids = account_owner_ids_for_policy(db, owner)
+    resolution = generate_communal_reference(db, owner_ids)
+    payload = communal_resolution_to_response_payload(resolution)
+    return ZoneReferenceValidateResponse.model_validate(payload)
 
 
 @router.get(
