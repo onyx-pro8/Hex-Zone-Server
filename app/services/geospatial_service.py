@@ -66,7 +66,7 @@ def evaluate_member_zones(db: Session, latitude: float, longitude: float, candid
         if _point_in_proximity_zone(zone, latitude, longitude):
             matched.add(zone.zone_id)
             continue
-        if _point_in_object_zone(zone, latitude, longitude):
+        if _point_in_object_zone(db, zone, latitude, longitude, owner_ids):
             matched.add(zone.zone_id)
 
     return sorted(matched)
@@ -134,7 +134,13 @@ def _point_in_proximity_zone(zone: Zone, latitude: float, longitude: float) -> b
     return False
 
 
-def _point_in_object_zone(zone: Zone, latitude: float, longitude: float) -> bool:
+def _point_in_object_zone(
+    db: Session,
+    zone: Zone,
+    latitude: float,
+    longitude: float,
+    owner_ids: list[int],
+) -> bool:
     params = zone.parameters if isinstance(zone.parameters, dict) else {}
     contract_type = str(params.get("contractType") or "").strip().lower()
     if contract_type != "object":
@@ -142,7 +148,7 @@ def _point_in_object_zone(zone: Zone, latitude: float, longitude: float) -> bool
 
     geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
     config = params.get("config") if isinstance(params.get("config"), dict) else {}
-    object_center = geometry.get("center")
+    object_center = _resolve_object_center(geometry)
     radius = config.get("radius_meters")
     if not isinstance(object_center, dict):
         return False
@@ -154,6 +160,11 @@ def _point_in_object_zone(zone: Zone, latitude: float, longitude: float) -> bool
         return False
     distance = _haversine_meters(latitude, longitude, float(c_lat), float(c_lng))
     return distance <= radius
+
+
+def _resolve_object_center(geometry: dict[str, Any]) -> dict[str, Any] | None:
+    center = geometry.get("center")
+    return center if isinstance(center, dict) else None
 
 
 def _extract_dynamic_circle_specs(geometry: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
