@@ -7,19 +7,14 @@ from app.services.area_boundary_service import (
     lookup_area_boundary,
     lookup_global_area_boundary,
     parse_area_location_from_dict,
-    resolve_country_iso2,
 )
 
 
-@patch("app.services.area_boundary_service._nominatim_get")
-def test_resolve_country_via_nominatim(mock_get):
-    mock_get.return_value = [
-        {
-            "address": {"country_code": "ee"},
-            "display_name": "Estonia",
-        }
-    ]
-    assert resolve_country_iso2("Estonia") == "ee"
+def test_resolve_country_via_nominatim():
+    from app.services.area_boundary_service import resolve_country_iso2
+
+    assert resolve_country_iso2("Poland") == "pl"
+    assert resolve_country_iso2("Suomi") == "fi"
 
 
 def test_parse_toronto_postal():
@@ -82,6 +77,39 @@ def test_lookup_postal_returns_polygon(mock_get):
     assert polygon["type"] == "Polygon"
     assert len(polygon["coordinates"][0]) >= 4
     assert "Gambir" in name or "10110" in name
+
+
+@patch("app.services.area_boundary_service._search_location_boundary")
+@patch("app.services.area_boundary_service.resolve_country_iso2", return_value="fi")
+def test_lookup_global_helsinki_postal(mock_resolve, mock_search):
+    mock_search.return_value = {
+        "display_name": "00510, Vallila, Helsinki, Finland",
+        "geojson": {
+            "type": "Polygon",
+            "coordinates": [
+                [
+                    [24.94, 60.19],
+                    [24.95, 60.19],
+                    [24.95, 60.20],
+                    [24.94, 60.20],
+                    [24.94, 60.19],
+                ]
+            ],
+        },
+    }
+    location = AreaLocationInput(
+        country="Finland",
+        city="Helsinki",
+        postal_code="00510",
+        address_mode="postal",
+    )
+    result = lookup_global_area_boundary(location)
+    assert result is not None
+    polygon, name, config = result
+    assert polygon["type"] == "Polygon"
+    assert config["country_code"] == "fi"
+    assert config["postal_code"] == "00510"
+    mock_search.assert_called_once()
 
 
 @patch("app.services.area_boundary_service._nominatim_get")

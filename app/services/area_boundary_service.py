@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+PHOTON_SEARCH_URL = "https://photon.komoot.io/api/"
+
+_NOMINATIM_MIN_INTERVAL_SEC = 1.05
+_last_nominatim_request_at = 0.0
+_last_lookup_failure = ""
 
 # Legacy catalog / district shortcuts (optional fallback).
 GOVERNMENT_CODE_QUERIES: dict[str, str] = {
@@ -23,9 +29,11 @@ GOVERNMENT_CODE_QUERIES: dict[str, str] = {
     "DIST-JKT-CENTRAL": "Jakarta Pusat, Daerah Khusus Ibukota Jakarta, Indonesia",
 }
 
+# Common aliases; any other name is resolved via Nominatim (see resolve_country_iso2).
 _COUNTRY_NAME_TO_ISO2: dict[str, str] = {
     "INDONESIA": "id",
     "FINLAND": "fi",
+    "SUOMI": "fi",
     "UNITED STATES": "us",
     "UNITED STATES OF AMERICA": "us",
     "USA": "us",
@@ -54,9 +62,29 @@ _COUNTRY_NAME_TO_ISO2: dict[str, str] = {
     "ITALY": "it",
     "BRAZIL": "br",
     "MEXICO": "mx",
+    "POLAND": "pl",
+    "PORTUGAL": "pt",
+    "BELGIUM": "be",
+    "AUSTRIA": "at",
+    "SWITZERLAND": "ch",
+    "IRELAND": "ie",
+    "NEW ZEALAND": "nz",
+    "SOUTH AFRICA": "za",
+    "ARGENTINA": "ar",
+    "CHILE": "cl",
+    "COLOMBIA": "co",
+    "TURKEY": "tr",
+    "TÜRKIYE": "tr",
+    "TURKIYE": "tr",
+    "ISRAEL": "il",
+    "EGYPT": "eg",
+    "SAUDI ARABIA": "sa",
+    "UNITED ARAB EMIRATES": "ae",
+    "UAE": "ae",
 }
 
 _MAX_RING_VERTICES = 512
+_COUNTRY_ISO_CACHE: dict[str, str] = {}
 _LEGACY_CODE_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._-]{2,63}$")
 
 
@@ -125,11 +153,28 @@ def _user_agent() -> str:
 
 
 def _boundary_lookup_enabled() -> bool:
-    return bool(getattr(settings, "BOUNDARY_LOOKUP_ENABLED", True))
+    return bool(settings.BOUNDARY_LOOKUP_ENABLED)
+
+
+def get_last_boundary_lookup_failure() -> str:
+    return _last_lookup_failure
+
+
+def _set_lookup_failure(reason: str) -> None:
+    global _last_lookup_failure
+    _last_lookup_failure = reason
+
+
+def _wait_nominatim_rate_limit() -> None:
+    global _last_nominatim_request_at
+    elapsed = time.monotonic() - _last_nominatim_request_at
+    if elapsed < _NOMINATIM_MIN_INTERVAL_SEC:
+        time.sleep(_NOMINATIM_MIN_INTERVAL_SEC - elapsed)
+    _last_nominatim_request_at = time.monotonic()
 
 
 def normalize_country_iso2(country: str) -> Optional[str]:
-    """Resolve ISO 3166-1 alpha-2 from a 2-letter code or known English country name."""
+    """Map a country label to ISO 3166-1 alpha-2 when possible (static list only)."""
     raw = _clean_part(country)
     if not raw:
         return None
@@ -140,37 +185,46 @@ def normalize_country_iso2(country: str) -> Optional[str]:
 
 
 def resolve_country_iso2(country: str) -> Optional[str]:
-    """
-    Resolve ISO2 for any country: known names, 2-letter codes, then Nominatim country search.
-    """
+    """Resolve country to ISO2 via static map, cache, or Nominatim country search."""
     iso2 = normalize_country_iso2(country)
     if iso2:
         return iso2
     raw = _clean_part(country)
     if not raw:
         return None
+    cache_key = raw.upper()
+    if cache_key in _COUNTRY_ISO_CACHE:
+        return _COUNTRY_ISO_CACHE[cache_key]
     try:
         results = _nominatim_get(
             NOMINATIM_SEARCH_URL,
             {
-                "q": raw,
                 "format": "json",
-                "limit": 1,
-                "addressdetails": 1,
-                "featuretype": "country",
+                "limit": 3,
+                "q": raw,
+                "featureType": "country",
             },
         )
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("Nominatim country lookup failed for %r: %s", raw, exc)
+        logger.warning("Nominatim country lookup failed for %s: %s", raw, exc)
         return None
-    if not results:
-        return None
-    address = results[0].get("address")
-    if isinstance(address, dict):
+    for row in results:
+        address = row.get("address")
+        if not isinstance(address, dict):
+            continue
         code = address.get("country_code")
         if isinstance(code, str) and len(code) == 2:
-            return code.lower()
+            resolved = code.lower()
+            _COUNTRY_ISO_CACHE[cache_key] = resolved
+            return resolved
     return None
+
+
+def boundary_lookup_status() -> tuple[bool, str]:
+    """Whether OSM boundary lookup is enabled; second value is a short reason if disabled."""
+    if not _boundary_lookup_enabled():
+        return False, "boundary_lookup_disabled"
+    return True, ""
 
 
 def is_valid_legacy_area_code(code: str) -> bool:
@@ -239,55 +293,150 @@ def _polygon_vertex_count(geojson: dict[str, Any]) -> int:
     return 0
 
 
-def _result_postal_code(row: dict[str, Any]) -> str:
-    address = row.get("address")
-    if not isinstance(address, dict):
-        return ""
-    for key in ("postcode", "postal_code"):
-        value = address.get(key)
-        if isinstance(value, str) and value.strip():
-            return re.sub(r"\s+", "", value.strip()).upper()
-    return ""
+def _ring_bbox_area(ring: list[list[float]]) -> float:
+    if len(ring) < 4:
+        return 0.0
+    lngs = [p[0] for p in ring if isinstance(p, list) and len(p) >= 2]
+    lats = [p[1] for p in ring if isinstance(p, list) and len(p) >= 2]
+    if not lngs or not lats:
+        return 0.0
+    return abs(max(lngs) - min(lngs)) * abs(max(lats) - min(lats))
+
+
+def _polygon_area_estimate(geojson: dict[str, Any]) -> float:
+    geometry_type = geojson.get("type")
+    if geometry_type == "Polygon":
+        coords = geojson.get("coordinates")
+        if isinstance(coords, list) and coords and isinstance(coords[0], list):
+            return _ring_bbox_area(coords[0])
+    if geometry_type == "MultiPolygon":
+        coords = geojson.get("coordinates")
+        if isinstance(coords, list) and coords and isinstance(coords[0], list):
+            rings = coords[0]
+            if rings and isinstance(rings[0], list):
+                return _ring_bbox_area(rings[0])
+    return 0.0
 
 
 def _pick_polygon_result(
     results: list[dict[str, Any]],
     *,
-    postal_code: str | None = None,
+    prefer_smallest: bool = False,
 ) -> Optional[dict[str, Any]]:
-    """Prefer polygon results; for postcodes prefer matching or smaller areas."""
-    normalized_postal = re.sub(r"\s+", "", str(postal_code or "").strip()).upper()
-    polygon_rows: list[dict[str, Any]] = []
+    candidates: list[tuple[float, int, dict[str, Any]]] = []
     for row in results:
         geojson = row.get("geojson")
         if not isinstance(geojson, dict) or geojson.get("type") not in {"Polygon", "MultiPolygon"}:
             continue
-        if _polygon_vertex_count(geojson) >= 4:
-            polygon_rows.append(row)
-
-    if not polygon_rows:
+        count = _polygon_vertex_count(geojson)
+        if count < 4:
+            continue
+        area = _polygon_area_estimate(geojson)
+        candidates.append((area, count, row))
+    if not candidates:
         return None
+    if prefer_smallest:
+        candidates.sort(key=lambda item: (item[0], item[1]))
+    else:
+        candidates.sort(key=lambda item: (-item[1], -item[0]))
+    return candidates[0][2]
 
-    if normalized_postal:
-        for row in polygon_rows:
-            if _result_postal_code(row) == normalized_postal:
-                return row
 
-    # Prefer smaller boundaries (postcode/suburb) over city/region when multiple polygons exist.
-    return min(polygon_rows, key=lambda row: _polygon_vertex_count(row.get("geojson", {})))
+def _pick_postcode_or_place_row(results: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    for row in results:
+        if row.get("type") in {"postcode", "postal_code"}:
+            return row
+        if row.get("class") == "place" and row.get("type") in {"postcode", "suburb", "neighbourhood", "quarter"}:
+            return row
+    return results[0] if results else None
 
 
 def _nominatim_get(url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    _wait_nominatim_rate_limit()
     headers = {"User-Agent": _user_agent(), "Accept": "application/json"}
-    with httpx.Client(timeout=25.0) as client:
-        response = client.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        payload = response.json()
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            response = client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        _set_lookup_failure(f"nominatim_http_{exc.response.status_code}")
+        raise
+    except httpx.HTTPError as exc:
+        _set_lookup_failure(f"nominatim_unreachable:{type(exc).__name__}")
+        raise
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     if isinstance(payload, dict):
         return [payload]
     return []
+
+
+def _photon_geocode(query: str) -> Optional[tuple[float, float, str]]:
+    """Forward geocode via Photon (Komoot). Returns (lat, lon, label)."""
+    q = _clean_part(query)
+    if not q:
+        return None
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            response = client.get(
+                PHOTON_SEARCH_URL,
+                params={"q": q, "limit": 1, "lang": "en"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPError as exc:
+        logger.warning("Photon geocode failed for %s: %s", q, exc)
+        _set_lookup_failure(f"photon_unreachable:{type(exc).__name__}")
+        return None
+    features = payload.get("features") if isinstance(payload, dict) else None
+    if not isinstance(features, list) or not features:
+        _set_lookup_failure("photon_no_results")
+        return None
+    feature = features[0]
+    if not isinstance(feature, dict):
+        return None
+    geometry = feature.get("geometry")
+    if not isinstance(geometry, dict):
+        return None
+    coordinates = geometry.get("coordinates")
+    if not isinstance(coordinates, list) or len(coordinates) < 2:
+        return None
+    lon = float(coordinates[0])
+    lat = float(coordinates[1])
+    props = feature.get("properties")
+    if not isinstance(props, dict):
+        return lat, lon, q
+    city = props.get("city") or props.get("town") or props.get("village") or ""
+    parts = [
+        str(props.get("name") or "").strip(),
+        str(props.get("street") or "").strip(),
+        str(props.get("postcode") or "").strip(),
+        str(city).strip(),
+        str(props.get("country") or "").strip(),
+    ]
+    label = ", ".join(p for p in parts if p) or q
+    return lat, lon, label
+
+
+def _square_buffer_polygon(
+    lon: float,
+    lat: float,
+    *,
+    half_km: float = 1.2,
+) -> dict[str, Any]:
+    """Approximate postcode/neighbourhood box when OSM has no polygon."""
+    dlat = half_km / 111.0
+    cos_lat = max(0.2, abs(math.cos(math.radians(lat))))
+    dlon = half_km / (111.0 * cos_lat)
+    ring = [
+        [lon - dlon, lat - dlat],
+        [lon + dlon, lat - dlat],
+        [lon + dlon, lat + dlat],
+        [lon - dlon, lat + dlat],
+        [lon - dlon, lat - dlat],
+    ]
+    return {"type": "Polygon", "coordinates": [ring]}
 
 
 def _reverse_admin_polygon(
@@ -318,6 +467,20 @@ def _reverse_admin_polygon(
     return None
 
 
+def _reverse_polygon_at_point(
+    lat: str,
+    lon: str,
+    *,
+    prefer_postal: bool = False,
+) -> Optional[dict[str, Any]]:
+    zooms = [18, 16, 14, 12, 10] if prefer_postal else [14, 12, 10]
+    for zoom in zooms:
+        row = _reverse_admin_polygon(lat, lon, zoom=zoom)
+        if row is not None:
+            return row
+    return None
+
+
 def _search_nominatim(
     *,
     country_iso2: str | None = None,
@@ -326,6 +489,8 @@ def _search_nominatim(
     country_name: str | None = None,
     street: str | None = None,
     free_query: str | None = None,
+    prefer_smallest_polygon: bool = False,
+    prefer_postal_point: bool = False,
 ) -> Optional[dict[str, Any]]:
     params: dict[str, Any] = {
         "format": "json",
@@ -353,98 +518,129 @@ def _search_nominatim(
         logger.warning("Nominatim search failed: %s", exc)
         return None
 
-    picked = _pick_polygon_result(results, postal_code=postal_code)
+    picked = _pick_polygon_result(results, prefer_smallest=prefer_smallest_polygon)
     if picked:
         return picked
 
-    if results:
-        point_row = results[0]
+    point_row = _pick_postcode_or_place_row(results) if results else None
+    if point_row:
         lat = point_row.get("lat")
         lon = point_row.get("lon")
         if lat is not None and lon is not None:
-            zoom = 14 if street or postal_code else 12
-            reversed_row = _reverse_admin_polygon(str(lat), str(lon), zoom=zoom)
+            reversed_row = _reverse_polygon_at_point(
+                str(lat),
+                str(lon),
+                prefer_postal=prefer_postal_point or bool(postal_code),
+            )
             if reversed_row:
                 return reversed_row
 
     return None
 
 
-def _compose_free_query(
+def _search_location_boundary(
+    location: AreaLocationInput,
     *,
-    postal_code: str = "",
-    city: str = "",
-    country: str = "",
-    street: str = "",
-) -> str:
-    parts = [p for p in [street, postal_code, city, country] if p and str(p).strip()]
-    return ", ".join(parts)
-
-
-def _lookup_address_row(location: AreaLocationInput, *, iso2: str | None) -> Optional[dict[str, Any]]:
-    """Try several Nominatim strategies until a boundary or reverse-geocode polygon is found."""
+    country_iso2: str | None,
+) -> Optional[dict[str, Any]]:
+    """Try several Nominatim strategies until a polygon is found."""
     country_name = location.country.strip()
     city = location.city.strip()
     postal = location.postal_code.strip()
     label = location.display_label()
+    prefer_postal = location.address_mode != "street" and bool(postal)
 
+    street_line: str | None = None
     if location.address_mode == "street":
         street_parts = [location.street.strip()]
         if location.street_number.strip():
             street_parts.append(location.street_number.strip())
         street_line = " ".join(p for p in street_parts if p)
-        if not street_line and not postal:
-            return None
-        attempts: list[dict[str, Any]] = []
-        if iso2:
-            attempts.append(
-                {
-                    "country_iso2": iso2,
-                    "postal_code": postal or None,
-                    "city": city or None,
-                    "country_name": country_name,
-                    "street": street_line or None,
-                }
-            )
-        attempts.append({"free_query": label, "country_iso2": iso2})
-        attempts.append({"free_query": label, "country_iso2": None})
-    else:
-        if not postal and not city:
-            return None
-        attempts = []
-        if iso2:
-            attempts.append(
-                {
-                    "country_iso2": iso2,
-                    "postal_code": postal or None,
-                    "city": city or None,
-                    "country_name": country_name,
-                }
-            )
-            if postal:
-                attempts.append(
-                    {
-                        "country_iso2": iso2,
-                        "postal_code": postal,
-                        "country_name": country_name,
-                    }
-                )
-        free_parts = _compose_free_query(postal_code=postal, city=city, country=country_name)
-        if free_parts:
-            attempts.append({"free_query": free_parts, "country_iso2": iso2})
-            attempts.append({"free_query": free_parts, "country_iso2": None})
-        if label and label != free_parts:
-            attempts.append({"free_query": label, "country_iso2": None})
 
-    seen: set[str] = set()
-    for attempt in attempts:
-        key = repr(sorted(attempt.items()))
-        if key in seen:
+    strategies: list[dict[str, Any]] = []
+
+    if label:
+        strategies.append(
+            {
+                "country_iso2": country_iso2,
+                "free_query": label,
+                "prefer_smallest_polygon": prefer_postal,
+                "prefer_postal_point": prefer_postal,
+            }
+        )
+        if country_iso2:
+            strategies.append(
+                {
+                    "country_iso2": None,
+                    "free_query": label,
+                    "prefer_smallest_polygon": prefer_postal,
+                    "prefer_postal_point": prefer_postal,
+                }
+            )
+
+    if location.address_mode == "street" and street_line:
+        strategies.append(
+            {
+                "country_iso2": country_iso2,
+                "street": street_line,
+                "postal_code": postal or None,
+                "city": city or None,
+                "country_name": country_name,
+                "prefer_postal_point": True,
+            }
+        )
+    elif postal or city:
+        strategies.append(
+            {
+                "country_iso2": country_iso2,
+                "postal_code": postal or None,
+                "city": city or None,
+                "country_name": country_name,
+                "prefer_smallest_polygon": prefer_postal,
+                "prefer_postal_point": prefer_postal,
+            }
+        )
+
+    nominatim_failed = False
+    for kwargs in strategies:
+        try:
+            row = _search_nominatim(**kwargs)
+        except httpx.HTTPError:
+            nominatim_failed = True
             continue
-        seen.add(key)
-        row = _search_nominatim(**attempt)
         if row:
             return row
+
+    if label:
+        geocoded = _photon_geocode(label)
+        if geocoded:
+            lat, lon, photon_name = geocoded
+            try:
+                reversed_row = _reverse_polygon_at_point(
+                    str(lat),
+                    str(lon),
+                    prefer_postal=prefer_postal,
+                )
+            except httpx.HTTPError:
+                reversed_row = None
+                nominatim_failed = True
+            if reversed_row:
+                if isinstance(reversed_row.get("display_name"), str):
+                    return reversed_row
+                reversed_row = dict(reversed_row)
+                reversed_row["display_name"] = photon_name
+                return reversed_row
+            half_km = 1.2 if prefer_postal else 2.0
+            return {
+                "display_name": photon_name,
+                "geojson": _square_buffer_polygon(lon, lat, half_km=half_km),
+                "_approximate": True,
+            }
+
+    if nominatim_failed:
+        _set_lookup_failure(_last_lookup_failure or "nominatim_unreachable")
+    else:
+        _set_lookup_failure("no_boundary_polygon_found")
     return None
 
 
@@ -456,24 +652,31 @@ def lookup_global_area_boundary(
 
     Returns (geo_fence_polygon, display_name, config) or None.
     """
+    _set_lookup_failure("")
     if not _boundary_lookup_enabled():
+        _set_lookup_failure("boundary_lookup_disabled")
+        return None
+
+    if location.address_mode == "street":
+        if not location.street.strip() and not location.postal_code.strip():
+            _set_lookup_failure("missing_street_or_postal")
+            return None
+    elif not location.postal_code.strip() and not location.city.strip():
+        _set_lookup_failure("missing_postal_or_city")
         return None
 
     iso2 = resolve_country_iso2(location.country)
-    row = _lookup_address_row(location, iso2=iso2)
+    row = _search_location_boundary(location, country_iso2=iso2)
     if not row:
-        logger.info(
-            "No boundary for %s (iso2=%s)",
-            location.display_label(),
-            iso2 or "unknown",
-        )
         return None
 
     geojson = row.get("geojson")
     if not isinstance(geojson, dict):
+        _set_lookup_failure("invalid_geojson")
         return None
     polygon = _normalize_geojson_boundary(geojson)
     if not polygon:
+        _set_lookup_failure("polygon_normalization_failed")
         return None
 
     display_name = row.get("display_name")
@@ -482,7 +685,10 @@ def lookup_global_area_boundary(
         if isinstance(display_name, str) and display_name.strip()
         else location.display_label()
     )
-    return polygon, name, location.to_config()
+    config = location.to_config()
+    if row.get("_approximate"):
+        config["boundary_precision"] = "approximate"
+    return polygon, name, config
 
 
 def _legacy_catalog_query(code: str) -> Optional[str]:

@@ -43,13 +43,18 @@ def _resolution_from_location(location: AreaLocationInput) -> Optional[Reference
         return None
     polygon, display_name, config = boundary
     geometry = {"geo_fence_polygon": polygon}
+    source = (
+        "geocoded_approximate"
+        if config.get("boundary_precision") == "approximate"
+        else "osm_boundary"
+    )
     return ReferenceZoneResolution(
         reference_id=location.reference_id(),
         display_name=display_name,
         geometry=geometry,
         config=config,
         h3_cells=[],
-        source="osm_boundary",
+        source=source,
     )
 
 

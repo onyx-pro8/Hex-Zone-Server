@@ -806,7 +806,22 @@ async def validate_zone_reference(
     )
 
     if has_global_address:
-        from app.services.area_boundary_service import parse_area_location_from_dict
+        from app.services.area_boundary_service import (
+            boundary_lookup_status,
+            parse_area_location_from_dict,
+        )
+
+        lookup_ok, lookup_reason = boundary_lookup_status()
+        if not lookup_ok:
+            return ZoneReferenceValidateResponse(
+                valid=False,
+                zone_type=resolved_type,
+                reference_id="",
+                message=(
+                    "Area boundary lookup is disabled on the server. "
+                    "Set BOUNDARY_LOOKUP_ENABLED=true and restart the API."
+                ),
+            )
 
         location = parse_area_location_from_dict(address_payload)
         ref_id = location.reference_id() if location else ""
@@ -817,15 +832,36 @@ async def validate_zone_reference(
             address=address_payload,
         )
         if not resolution:
+            from app.services.area_boundary_service import get_last_boundary_lookup_failure
+
+            failure = get_last_boundary_lookup_failure()
+            if failure == "boundary_lookup_disabled":
+                detail = (
+                    "Area boundary lookup is disabled on the server "
+                    "(BOUNDARY_LOOKUP_ENABLED=false)."
+                )
+            elif failure.startswith("nominatim_unreachable") or failure.startswith(
+                "photon_unreachable"
+            ):
+                detail = (
+                    "The server could not reach geocoding services (OpenStreetMap/Photon). "
+                    "Check outbound HTTPS from the API host or try again later."
+                )
+            elif failure.startswith("nominatim_http_"):
+                detail = (
+                    "OpenStreetMap rejected the boundary request (rate limit or blocked). "
+                    "Wait a few seconds and try again."
+                )
+            else:
+                detail = (
+                    "Could not resolve this address to an area boundary. "
+                    "Check postal code, city, and country (e.g. 00510, Helsinki, Finland)."
+                )
             return ZoneReferenceValidateResponse(
                 valid=False,
                 zone_type=resolved_type,
                 reference_id=ref_id,
-                message=(
-                    "Could not resolve this address to an area boundary. "
-                    "Check postal code, city, and country (any country, e.g. 00510, Helsinki, Finland "
-                    "or M5H 2N2, Toronto, Canada). Ensure the API server can reach OpenStreetMap."
-                ),
+                message=detail,
             )
         payload = government_resolution_to_response_payload(resolution)
         return ZoneReferenceValidateResponse.model_validate(payload)
