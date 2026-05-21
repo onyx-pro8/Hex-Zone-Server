@@ -83,3 +83,20 @@ def type_scope(message_type: CanonicalMessageType) -> MessageScope:
 
 def type_category(message_type: CanonicalMessageType) -> MessageCategory:
     return TYPE_CATEGORY_MAP[message_type]
+
+
+# Alarm types that trigger mobile push (FCM/APNS) in addition to WebSocket fan-out.
+ALARM_PUSH_TYPES: frozenset[CanonicalMessageType] = frozenset(
+    {
+        CanonicalMessageType.UNKNOWN,
+        CanonicalMessageType.PANIC,
+        CanonicalMessageType.NS_PANIC,
+        CanonicalMessageType.SENSOR,
+    }
+)
+
+
+def is_alarm_push_type(message_type: CanonicalMessageType | str) -> bool:
+    if isinstance(message_type, CanonicalMessageType):
+        return message_type in ALARM_PUSH_TYPES
+    return normalize_message_type(message_type) in ALARM_PUSH_TYPES

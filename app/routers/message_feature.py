@@ -27,11 +27,49 @@ from app.schemas.message_feature import (
     PropagationMessageCreate,
     PropagationMessageResponse,
 )
+from app.domain.message_types import is_alarm_push_type
 from app.services import guest_access_service, message_block_service, message_feature_service, permission_service
+from app.services.message_feature_service import GeoMessageSkipped, UnknownRateLimitError
+from app.services import push_notification_service
 from app.services.zone_membership_service import refresh_owner_memberships
 from app.websocket.manager import ws_manager
 
 router = APIRouter(prefix="/message-feature", tags=["message-feature"])
+
+
+async def _finalize_geo_propagation(db: Session, result: dict) -> dict:
+    """WebSocket + optional mobile push after DB commit."""
+    if result.get("skipped"):
+        return result
+
+    delivered = result.get("delivered_owner_ids") or []
+    if delivered:
+        await ws_manager.broadcast_to_users(delivered, "NEW_GEO_MESSAGE", result)
+
+    if is_alarm_push_type(str(result.get("type") or "")):
+        push_stats = await push_notification_service.send_alarm_push_to_owners(db, delivered, result)
+        result.update(push_stats)
+    return result
+
+
+def _handle_geo_propagation_errors(exc: Exception) -> None:
+    if isinstance(exc, UnknownRateLimitError):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error_code": "RATE_LIMIT_UNKNOWN",
+                "message": "Only one UNKNOWN message is allowed every 10 seconds.",
+            },
+        ) from exc
+    if isinstance(exc, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "MISSING_RECIPIENT_FOR_PRIVATE_TYPE",
+                "message": "receiver_owner_id is required for private-scope message types.",
+            },
+        ) from exc
+    raise exc
 
 
 @router.post("/members/location", summary="Update member location and zone memberships")
@@ -88,18 +126,12 @@ async def create_geo_message(
 
     try:
         result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error_code": "MISSING_RECIPIENT_FOR_PRIVATE_TYPE",
-                "message": "receiver_owner_id is required for private-scope message types.",
-            },
-        ) from exc
+    except GeoMessageSkipped as skipped:
+        return skipped.detail
+    except (UnknownRateLimitError, ValueError) as exc:
+        _handle_geo_propagation_errors(exc)
     db.commit()
-
-    await ws_manager.broadcast_to_users(result["delivered_owner_ids"], "NEW_GEO_MESSAGE", result)
-    return result
+    return await _finalize_geo_propagation(db, result)
 
 
 @router.post(
@@ -141,17 +173,12 @@ async def create_geo_message_with_api_key(
 
     try:
         result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error_code": "MISSING_RECIPIENT_FOR_PRIVATE_TYPE",
-                "message": "receiver_owner_id is required for private-scope message types.",
-            },
-        ) from exc
+    except GeoMessageSkipped as skipped:
+        return skipped.detail
+    except (UnknownRateLimitError, ValueError) as exc:
+        _handle_geo_propagation_errors(exc)
     db.commit()
-    await ws_manager.broadcast_to_users(result["delivered_owner_ids"], "NEW_GEO_MESSAGE", result)
-    return result
+    return await _finalize_geo_propagation(db, result)
 
 
 @router.post("/blocks", response_model=BlockRuleResponse, status_code=status.HTTP_201_CREATED)

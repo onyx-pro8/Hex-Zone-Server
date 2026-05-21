@@ -131,11 +131,18 @@ class PermissionDecisionResponse(BaseModel):
 
 
 class PropagationMessageResponse(BaseModel):
-    id: str
-    type: str
+    id: str | None = None
+    type: str | None = None
     category: str | None = None
     scope: str | None = None
-    zone_ids: list[str]
-    delivered_owner_ids: list[int]
-    blocked_owner_ids: list[int]
-    created_at: str
+    zone_ids: list[str] = Field(default_factory=list)
+    delivered_owner_ids: list[int] = Field(default_factory=list)
+    blocked_owner_ids: list[int] = Field(default_factory=list)
+    created_at: str | None = None
+    text: str | None = None
+    skipped: bool = False
+    reason: str | None = None
+    fanout: dict | None = None
+    metadata: dict | None = None
+    push_sent: int | None = None
+    push_failed: int | None = None

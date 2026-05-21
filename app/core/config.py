@@ -73,5 +73,12 @@ class Settings(BaseSettings):
     BOUNDARY_LOOKUP_ENABLED: bool = True
     NOMINATIM_USER_AGENT: str = "HexZone/1.0 (https://hex-zone.local; area-boundary-lookup)"
 
+    # Mobile push (optional). FCM legacy server key; leave empty to skip FCM sends.
+    FCM_SERVER_KEY: str = ""
+    APNS_HTTP_URL: str = ""
+    APNS_AUTH_KEY: str = ""
+
+    UNKNOWN_MESSAGE_RATE_LIMIT_SECONDS: int = 10
+
 
 settings = Settings()
