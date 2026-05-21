@@ -41,6 +41,59 @@ def get_db() -> Session:
         db.close()
 
 
+def patch_owner_location_columns() -> None:
+    """Ensure `owners.latitude / longitude / location_updated_at` exist.
+
+    Runs in an isolated transaction so every Owner ORM query succeeds even when
+    the longer `init_db()` migration block has not finished or failed part-way.
+    Safe to call repeatedly (`IF NOT EXISTS`).
+
+    A hard `lock_timeout` and `statement_timeout` protect the lifespan startup
+    path: on rolling deploys the previous container can still hold a read lock
+    on `owners`, which would block the `ACCESS EXCLUSIVE` lock required by
+    `ALTER TABLE` indefinitely. With the timeout, the patch fails fast and is
+    retried by the background `init_db()` worker once the old container exits.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        # Bound the worst case so we never block the FastAPI lifespan / Render
+        # port-scan window. Postgres lock_timeout aborts the statement if we
+        # cannot acquire the required lock within 5 s; statement_timeout caps
+        # total runtime per statement at 8 s. Both are scoped to this
+        # transaction via SET LOCAL.
+        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
+        conn.execute(text("SET LOCAL statement_timeout = '8s';"))
+        conn.execute(
+            text("ALTER TABLE owners ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;")
+        )
+        conn.execute(
+            text("ALTER TABLE owners ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;")
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS location_updated_at "
+                "TIMESTAMP WITHOUT TIME ZONE;"
+            )
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE owners o
+                SET latitude = ml.latitude,
+                    longitude = ml.longitude,
+                    location_updated_at = ml.updated_at
+                FROM member_locations ml
+                WHERE ml.owner_id = o.id
+                  AND ml.latitude IS NOT NULL
+                  AND ml.longitude IS NOT NULL
+                  AND (o.latitude IS NULL OR o.longitude IS NULL);
+                """
+            )
+        )
+    logger.info("Owner location columns patch applied")
+
+
 def init_db():
     """Initialize database tables."""
     import app.models  # noqa: F401
@@ -48,6 +101,8 @@ def init_db():
     with engine.begin() as conn:
         if engine.dialect.name == "postgresql":
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+    # Critical: Owner ORM maps latitude/longitude; patch before any request path runs.
+    patch_owner_location_columns()
     Base.metadata.create_all(bind=engine)
 
     if engine.dialect.name == "postgresql":

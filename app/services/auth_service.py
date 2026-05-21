@@ -1,14 +1,43 @@
 """Authentication business logic for contract endpoints."""
-from datetime import timedelta
+import logging
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, generate_api_key, get_password_hash, verify_password
-from app.models import Device, MemberLocation, Owner
+from app.models import Owner
 from app.models.owner import OwnerRole
 from app.services.access_policy import resolve_account_owner_id
+from app.services.geocoding_service import geocode_address
 from app.services.registration_code_service import require_and_consume_admin_registration_code
+
+logger = logging.getLogger(__name__)
+
+
+def _try_geocode_owner_address(owner: Owner) -> None:
+    """Best-effort populate `owner.latitude/longitude` from `owner.address`.
+
+    Used at registration time and as a lazy backfill on `/me`. Network errors
+    are swallowed by `geocode_address`; this helper only mutates the owner row
+    when coordinates were resolved.
+    """
+    if owner.latitude is not None and owner.longitude is not None:
+        return
+    coords = geocode_address(owner.address)
+    if coords is None:
+        return
+    lat, lng = coords
+    owner.latitude = lat
+    owner.longitude = lng
+    owner.location_updated_at = datetime.utcnow()
+    logger.info(
+        "Geocoded owner %s address %r to (%.6f, %.6f)",
+        owner.id,
+        owner.address,
+        lat,
+        lng,
+    )
 
 
 def _to_contract_account_type(account_type: str) -> str:
@@ -51,23 +80,19 @@ def _to_owner_role(registration_type: str | None) -> OwnerRole:
 
 
 def _get_map_center(db: Session, owner_id: int) -> dict | None:
-    location = db.get(MemberLocation, owner_id)
-    if location:
-        return {"latitude": location.latitude, "longitude": location.longitude}
+    """Return the owner's canonical map center.
 
-    device = (
-        db.query(Device)
-        .filter(
-            Device.owner_id == owner_id,
-            Device.latitude.isnot(None),
-            Device.longitude.isnot(None),
-        )
-        .order_by(Device.updated_at.desc())
-        .first()
-    )
-    if not device:
+    Reads directly from `owners.latitude / owners.longitude`, which is the
+    single source of truth for the user's last known location (kept in sync by
+    `upsert_member_location` and the startup backfill). Returns ``None`` when
+    the owner has never published a location.
+    """
+    owner = db.get(Owner, owner_id)
+    if owner is None:
         return None
-    return {"latitude": device.latitude, "longitude": device.longitude}
+    if owner.latitude is None or owner.longitude is None:
+        return None
+    return {"latitude": owner.latitude, "longitude": owner.longitude}
 
 
 def register_user(db: Session, payload: dict) -> dict:
@@ -104,6 +129,14 @@ def register_user(db: Session, payload: dict) -> dict:
     if owner.role.value == "administrator" and owner.account_owner_id is None:
         owner.account_owner_id = owner.id
         db.flush()
+    # Best-effort geocode of the wizard address into owners.latitude/longitude so
+    # downstream consumers (`/me`, dynamic-zone resolver) have a sane starting
+    # map_center even before the device pushes a live position.
+    try:
+        _try_geocode_owner_address(owner)
+        db.flush()
+    except Exception as exc:  # pragma: no cover - never block registration
+        logger.warning("Address geocoding failed for owner %s: %s", owner.id, exc)
     db.refresh(owner)
     return {
         "id": str(owner.id),
@@ -134,6 +167,16 @@ def login_user(db: Session, email: str, password: str) -> dict:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is inactive or expired",
         )
+
+    # Lazy backfill: existing owners created before the geocode-at-registration
+    # hook still have NULL coordinates. Resolve them once on login so the
+    # mobile/web clients receive a populated `mapCenter` immediately.
+    if owner.latitude is None or owner.longitude is None:
+        try:
+            _try_geocode_owner_address(owner)
+            db.flush()
+        except Exception as exc:  # pragma: no cover - never block login
+            logger.warning("Address geocoding failed for owner %s: %s", owner.id, exc)
 
     token = create_access_token({"sub": str(owner.id)}, expires_delta=timedelta(minutes=30))
     return {

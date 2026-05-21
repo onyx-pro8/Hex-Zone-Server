@@ -1,5 +1,5 @@
 """Owner/User model."""
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, Float, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -37,6 +37,12 @@ class Owner(Base):
     api_key = Column(String(255), unique=True, nullable=False, index=True)
     phone = Column(String(20), nullable=True)
     address = Column(String(255), nullable=False)
+    # Canonical owner location used for dynamic-zone resolution and any other
+    # geo workflow that needs the user's last-known position. Nullable so
+    # legacy rows backfill lazily on the first location upsert / login.
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    location_updated_at = Column(DateTime, nullable=True)
     active = Column(Boolean, default=True, nullable=False)
     expired = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

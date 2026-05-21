@@ -1,4 +1,5 @@
 """Contract-compatible routes."""
+import asyncio
 from datetime import datetime
 from typing import Any, Literal
 
@@ -12,7 +13,7 @@ from app.crud import owner as owner_crud
 from app.database import get_db
 from app.middleware.auth import require_auth
 from app.core.config import settings
-from app.models import Device, MemberLocation, Owner, ZoneMessageEvent
+from app.models import Owner, ZoneMessageEvent
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.utils.api_response import success_response
 from app.websocket.manager import ws_manager
@@ -364,7 +365,10 @@ class ContractSuccessAnyResponse(BaseModel):
     response_description="Login success envelope containing token and user bootstrap context.",
 )
 async def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    data = controllers.login(db, payload.model_dump())
+    # `login` does blocking I/O (DB + optional geocode for legacy owners with
+    # NULL coordinates). Run it on the FastAPI thread pool so the event loop
+    # stays responsive for other concurrent requests.
+    data = await asyncio.to_thread(controllers.login, db, payload.model_dump())
     db.commit()
     return success_response(data)
 
@@ -386,7 +390,10 @@ async def login(payload: LoginRequest, db: Session = Depends(get_db)):
     response_description="Registration success envelope containing newly created owner profile.",
 )
 async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    data = controllers.register(db, payload.model_dump())
+    # `register` may invoke the geocoding service for the wizard address —
+    # offload to the thread pool so the event loop is not blocked by a slow
+    # Nominatim/Photon round-trip.
+    data = await asyncio.to_thread(controllers.register, db, payload.model_dump())
     db.commit()
     return success_response(data)
 
@@ -421,23 +428,18 @@ async def get_zones(owner: Owner = Depends(require_auth), db: Session = Depends(
     response_description="Success envelope containing authenticated contract profile.",
 )
 async def get_me(owner: Owner = Depends(require_auth), db: Session = Depends(get_db)):
-    location = db.get(MemberLocation, owner.id)
-    map_center = None
-    if location:
-        map_center = MemberLocationResponse(latitude=location.latitude, longitude=location.longitude)
-    else:
-        device = (
-            db.query(Device)
-            .filter(
-                Device.owner_id == owner.id,
-                Device.latitude.isnot(None),
-                Device.longitude.isnot(None),
-            )
-            .order_by(Device.updated_at.desc())
-            .first()
+    # Canonical map_center comes from `owners.latitude / owners.longitude`,
+    # populated by `upsert_member_location`, registration-time geocoding, and
+    # the startup background backfill in `app.services.startup_jobs`. This
+    # endpoint never blocks on a network call — if the columns are NULL the
+    # client just gets `map_center: null` and the backfill loop will fill it
+    # in shortly afterwards.
+    map_center: MemberLocationResponse | None = None
+    if owner.latitude is not None and owner.longitude is not None:
+        map_center = MemberLocationResponse(
+            latitude=owner.latitude,
+            longitude=owner.longitude,
         )
-        if device:
-            map_center = MemberLocationResponse(latitude=device.latitude, longitude=device.longitude)
 
     data = OwnerContractResponse(
         id=str(owner.id),

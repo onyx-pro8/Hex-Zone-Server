@@ -11,13 +11,17 @@ from app.crud import owner as owner_crud
 from app.crud import zone as zone_crud
 from app.database import get_db
 from app.models.zone import Zone, ZoneType
-from app.services.access_policy import visible_zone_owner_ids
+from app.services.access_policy import visible_owner_ids, visible_zone_owner_ids
 from app.services.communal_zone_service import (
     generate_communal_reference,
     is_valid_reference_format,
     normalize_reference_id,
     resolution_to_response_payload as communal_resolution_to_response_payload,
     resolve_communal_reference,
+)
+from app.services.geospatial_service import (
+    DynamicZoneResolution,
+    resolve_dynamic_zone_cluster,
 )
 from app.services.government_zone_service import (
     is_valid_local_code_format,
@@ -279,6 +283,61 @@ class ZoneCapabilitiesResponse(BaseModel):
     reason: Optional[str] = None
 
 
+class _DynamicResolvedCenter(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class DynamicZonePreviewRequest(BaseModel):
+    """Inputs for live dynamic-zone resolution.
+
+    The server scans active members of the caller's `zone_id`, picks the
+    tightest cluster of `target_user_count` nearest users whose smallest
+    enclosing circle radius is `<= max_radius_meters`, clamps that radius into
+    `[min_radius_meters, max_radius_meters]`, and returns the resolved center
+    and matched users. No client-supplied center.
+    """
+
+    target_user_count: int = Field(..., ge=1, le=500)
+    min_radius_meters: float = Field(..., gt=0)
+    max_radius_meters: float = Field(..., gt=0)
+    include_self: bool = Field(
+        default=True,
+        description="Include the caller's own location in the candidate population (default true).",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "target_user_count": 5,
+                "min_radius_meters": 100,
+                "max_radius_meters": 2000,
+            }
+        }
+    )
+
+
+class DynamicZonePreviewResponse(BaseModel):
+    """Resolver output for live dynamic-zone preview.
+
+    `infeasible=True` means no cluster meets the constraints; `reason` carries a
+    user-facing message. `center` and `resolved_radius_meters` are populated
+    when `infeasible=False`.
+    """
+
+    infeasible: bool
+    reason: Optional[str] = None
+    center: Optional[_DynamicResolvedCenter] = None
+    resolved_radius_meters: Optional[float] = None
+    tight_radius_meters: Optional[float] = None
+    matched_user_count: int
+    matched_owner_ids: list[int] = Field(default_factory=list)
+    population_size: int
+    target_user_count: int
+    min_radius_meters: float
+    max_radius_meters: float
+
+
 def _normalize_zone_type(raw_type: Optional[str]) -> Optional[str]:
     if raw_type is None:
         return None
@@ -376,41 +435,31 @@ def _validate_zone_payload(zone_type: str, geometry: dict[str, Any], config: dic
         return
 
     if zone_type == "dynamic":
-        center = geometry.get("center")
-        if not isinstance(center, dict):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="dynamic requires geometry.center with latitude and longitude",
-            )
-        if not isinstance(center.get("latitude"), (float, int)) or not isinstance(center.get("longitude"), (float, int)):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="dynamic requires numeric geometry.center.latitude and geometry.center.longitude",
-            )
-        centers = geometry.get("centers")
-        if centers is not None:
-            if not isinstance(centers, list):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="dynamic geometry.centers must be an array when provided",
-                )
-            for idx, item in enumerate(centers):
-                if not isinstance(item, dict) or not isinstance(item.get("latitude"), (float, int)) or not isinstance(item.get("longitude"), (float, int)):
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=f"dynamic geometry.centers[{idx}] must include numeric latitude and longitude",
-                    )
+        # Dynamic zones are described ENTIRELY by config: target_user_count,
+        # min_radius_meters, max_radius_meters. Geometry is server-derived from
+        # the zone's active members (see _resolve_and_apply_dynamic_cluster).
         min_radius = config.get("min_radius_meters")
         max_radius = config.get("max_radius_meters")
-        if not isinstance(min_radius, (float, int)) or min_radius <= 0:
+        target_user_count = config.get("target_user_count")
+        if not isinstance(min_radius, (float, int)) or isinstance(min_radius, bool) or min_radius <= 0:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="dynamic requires config.min_radius_meters > 0",
             )
-        if not isinstance(max_radius, (float, int)) or max_radius < min_radius:
+        if not isinstance(max_radius, (float, int)) or isinstance(max_radius, bool) or max_radius < min_radius:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="dynamic requires config.max_radius_meters >= config.min_radius_meters",
+            )
+        if (
+            not isinstance(target_user_count, int)
+            or isinstance(target_user_count, bool)
+            or target_user_count < 1
+            or target_user_count > 500
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="dynamic requires config.target_user_count between 1 and 500",
             )
         return
 
@@ -618,6 +667,17 @@ async def create_zone(
     ensure_unique_zone_name(db, account_owner_ids, normalized_name)
     _validate_zone_payload(zone_type, geometry, config)
 
+    if zone_type == "dynamic":
+        resolution = _resolve_dynamic_cluster_for_owner(
+            db,
+            owner,
+            target_user_count=int(config["target_user_count"]),
+            min_radius_meters=float(config["min_radius_meters"]),
+            max_radius_meters=float(config["max_radius_meters"]),
+            include_self=bool(config.get("include_self", True)),
+        )
+        _apply_dynamic_resolution_to_payload(geometry, config, resolution)
+
     model_zone_type = CANONICAL_TO_MODEL_ZONE_TYPE[zone_type]
     h3_cells = _extract_h3_cells(config)
     geo_fence_polygon = _extract_geo_fence_polygon(geometry)
@@ -736,6 +796,123 @@ async def get_zone_capabilities(
     owner_ids = account_owner_ids_for_policy(db, owner)
     total_zones = count_zones_for_owners(db, owner_ids)
     return ZoneCapabilitiesResponse.model_validate(build_capabilities(owner.role.value, total_zones).to_dict())
+
+
+def _resolve_dynamic_cluster_for_owner(
+    db: Session,
+    owner,
+    *,
+    target_user_count: int,
+    min_radius_meters: float,
+    max_radius_meters: float,
+    include_self: bool,
+) -> DynamicZoneResolution:
+    """Run the cluster resolver against the active members of `owner.zone_id`."""
+    exclude_ids: list[int] = [] if include_self else [owner.id]
+    return resolve_dynamic_zone_cluster(
+        db,
+        zone_id=owner.zone_id,
+        target_user_count=target_user_count,
+        min_radius_meters=min_radius_meters,
+        max_radius_meters=max_radius_meters,
+        exclude_owner_ids=exclude_ids,
+    )
+
+
+def _apply_dynamic_resolution_to_payload(
+    geometry: dict[str, Any],
+    config: dict[str, Any],
+    resolution: DynamicZoneResolution,
+) -> None:
+    """Stamp the resolved center/radius into the persisted payload.
+
+    Geometry is fully overwritten so stale client values (centers[], circles[],
+    etc.) never leak through. Config keeps the operator-supplied bounds and
+    target count, plus mirrors the resolver outputs for downstream readers and
+    point-in-zone checks that rely on `resolved_radius_meters`.
+    """
+    if resolution.infeasible or resolution.center_latitude is None or resolution.center_longitude is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": resolution.reason or "Dynamic zone cluster could not be resolved.",
+                "error_code": "DYNAMIC_ZONE_INFEASIBLE",
+                "details": {
+                    "target_user_count": resolution.target_user_count,
+                    "min_radius_meters": resolution.min_radius_meters,
+                    "max_radius_meters": resolution.max_radius_meters,
+                    "population_size": resolution.population_size,
+                },
+            },
+        )
+    geometry.clear()
+    geometry["center"] = {
+        "latitude": resolution.center_latitude,
+        "longitude": resolution.center_longitude,
+    }
+    config["resolved_radius_meters"] = resolution.resolved_radius_meters
+    config["tight_radius_meters"] = resolution.tight_radius_meters
+    config["matched_owner_ids"] = list(resolution.matched_owner_ids)
+    config["matched_user_count"] = len(resolution.matched_owner_ids)
+    config["population_size"] = resolution.population_size
+
+
+@router.post(
+    "/dynamic/preview",
+    response_model=DynamicZonePreviewResponse,
+    summary="Preview dynamic zone resolution",
+    description=(
+        "Server picks the tightest cluster of `target_user_count` nearest active "
+        "members of the caller's zone whose smallest enclosing circle fits within "
+        "`[min_radius_meters, max_radius_meters]`. Returns the resolved center, "
+        "radius, and matched users, or `infeasible=True` with a reason. Intended "
+        "for live UI updates as the operator tunes the inputs."
+    ),
+)
+async def preview_dynamic_zone(
+    body: DynamicZonePreviewRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if body.max_radius_meters < body.min_radius_meters:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="max_radius_meters must be >= min_radius_meters",
+        )
+
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+
+    resolution = _resolve_dynamic_cluster_for_owner(
+        db,
+        owner,
+        target_user_count=body.target_user_count,
+        min_radius_meters=body.min_radius_meters,
+        max_radius_meters=body.max_radius_meters,
+        include_self=body.include_self,
+    )
+
+    return DynamicZonePreviewResponse(
+        infeasible=resolution.infeasible,
+        reason=resolution.reason,
+        center=(
+            _DynamicResolvedCenter(
+                latitude=resolution.center_latitude,
+                longitude=resolution.center_longitude,
+            )
+            if resolution.center_latitude is not None and resolution.center_longitude is not None
+            else None
+        ),
+        resolved_radius_meters=resolution.resolved_radius_meters,
+        tight_radius_meters=resolution.tight_radius_meters,
+        matched_user_count=len(resolution.matched_owner_ids),
+        matched_owner_ids=resolution.matched_owner_ids,
+        population_size=resolution.population_size,
+        target_user_count=resolution.target_user_count,
+        min_radius_meters=resolution.min_radius_meters,
+        max_radius_meters=resolution.max_radius_meters,
+    )
 
 
 def _resolve_reference_zone_type(raw: str) -> str:
@@ -1049,6 +1226,19 @@ async def update_zone(
     owner_ids = account_owner_ids_for_policy(db, owner)
     ensure_unique_zone_name(db, owner_ids, normalized_name, exclude_zone_record_id=target_zone.id)
     _validate_zone_payload(merged["type"], merged["geometry"], merged["config"])
+
+    if merged["type"] == "dynamic":
+        resolution = _resolve_dynamic_cluster_for_owner(
+            db,
+            owner,
+            target_user_count=int(merged["config"]["target_user_count"]),
+            min_radius_meters=float(merged["config"]["min_radius_meters"]),
+            max_radius_meters=float(merged["config"]["max_radius_meters"]),
+            include_self=bool(merged["config"].get("include_self", True)),
+        )
+        _apply_dynamic_resolution_to_payload(
+            merged["geometry"], merged["config"], resolution
+        )
 
     target_zone.name = normalized_name
     target_zone.zone_type = CANONICAL_TO_MODEL_ZONE_TYPE[merged["type"]]

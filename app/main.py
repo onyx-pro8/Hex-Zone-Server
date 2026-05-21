@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.core.config import settings
-from app.database import init_db
+from app.database import init_db, patch_owner_location_columns
 from app.routers import access, devices, guest, message_feature, messages, owners, utils, zones
 from app.routes.contract_routes import router as contract_router
 from app.utils.api_response import error_response
@@ -19,8 +19,42 @@ _MAX_INIT_RETRIES = 5
 _INIT_RETRY_BASE_DELAY = 3
 
 
+def _patch_owner_location_with_retry() -> None:
+    """Run the critical owners-location schema patch with bounded retries.
+
+    Lives in `_init_db_background` (a daemon thread), so a stuck `ALTER TABLE`
+    on the owners table — typically caused by a rolling deploy where the
+    previous container still holds a lock — cannot wedge the FastAPI lifespan
+    and starve Render's port-scan window. The patch already uses
+    `SET LOCAL lock_timeout` / `statement_timeout`, so each attempt fails fast
+    rather than hanging.
+    """
+    for attempt in range(1, _MAX_INIT_RETRIES + 1):
+        try:
+            patch_owner_location_columns()
+            logging.info("Owner location schema patch applied (attempt %d)", attempt)
+            return
+        except Exception as exc:
+            if attempt < _MAX_INIT_RETRIES:
+                delay = _INIT_RETRY_BASE_DELAY * attempt
+                logging.warning(
+                    "Owner schema patch attempt %d/%d failed: %s — retrying in %ds",
+                    attempt, _MAX_INIT_RETRIES, exc, delay,
+                )
+                time.sleep(delay)
+            else:
+                logging.exception(
+                    "Owner schema patch failed after %d attempts: %s",
+                    _MAX_INIT_RETRIES, exc,
+                )
+
+
 def _init_db_background() -> None:
     """Run DB bootstrap without blocking app startup, retrying on transient failures."""
+    # Critical patch first: every Owner ORM query maps the new columns, so we
+    # apply it before the heavier `init_db()` block runs. It uses bounded
+    # timeouts (see `patch_owner_location_columns`) so it never hangs.
+    _patch_owner_location_with_retry()
     for attempt in range(1, _MAX_INIT_RETRIES + 1):
         try:
             init_db()
@@ -40,16 +74,37 @@ def _init_db_background() -> None:
                     _MAX_INIT_RETRIES, exc,
                 )
 
+
+def _owner_geocode_backfill_background() -> None:
+    """Backfill `owners.latitude/longitude` for legacy rows after init_db completes.
+
+    Sleeps long enough for `init_db()` (run in its own thread) to finish before
+    issuing Nominatim calls. Wrapped in try/except so a transient network error
+    cannot terminate the daemon thread (it just won't retry until next boot).
+    """
+    try:
+        time.sleep(30)
+        from app.services.startup_jobs import backfill_owner_coordinates
+        backfill_owner_coordinates()
+    except Exception:  # pragma: no cover - never crash the worker thread
+        logging.exception("Owner geocode backfill thread failed")
+
 # Lifespan context
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage startup and shutdown of the app."""
-    # Startup
+    """Manage startup and shutdown of the app.
+
+    The lifespan must complete quickly so uvicorn binds the listening port and
+    Render's port-scan sees the service as healthy. All blocking bootstrap
+    work — including the owners-location schema patch — happens on background
+    daemon threads.
+    """
     print("Starting Zone Weaver backend...")
     threading.Thread(target=_init_db_background, daemon=True).start()
     print("Database initialization started in background")
+    threading.Thread(target=_owner_geocode_backfill_background, daemon=True).start()
+    print("Owner geocode backfill scheduled in background")
     yield
-    # Shutdown
     print("Shutting down Zone Weaver backend...")
 
 

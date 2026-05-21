@@ -10,6 +10,7 @@ from app.services.zone_membership_service import refresh_owner_memberships
 
 
 def upsert_member_location(db: Session, owner_id: int, latitude: float, longitude: float) -> dict:
+    now = datetime.utcnow()
     row = db.get(MemberLocation, owner_id)
     if row is None:
         row = MemberLocation(owner_id=owner_id, latitude=latitude, longitude=longitude)
@@ -17,9 +18,15 @@ def upsert_member_location(db: Session, owner_id: int, latitude: float, longitud
     else:
         row.latitude = latitude
         row.longitude = longitude
-        row.updated_at = datetime.utcnow()
-    db.flush()
+        row.updated_at = now
+    # Mirror the position onto the owner row so the dynamic-zone resolver and
+    # any other consumer of `owners.latitude / longitude` stays current.
     owner = db.get(Owner, owner_id)
+    if owner is not None:
+        owner.latitude = latitude
+        owner.longitude = longitude
+        owner.location_updated_at = now
+    db.flush()
     zone_ids = evaluate_member_zones(db, latitude, longitude, [owner_id])
     if owner:
         zone_ids = refresh_owner_memberships(db, owner, latitude, longitude)
