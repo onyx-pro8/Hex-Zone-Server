@@ -6,7 +6,10 @@ from sqlalchemy.orm import Session
 
 from app.models import Owner
 from app.models.owner import AccountType, OwnerRole
-from app.services.device_entitlements import assert_account_allows_user_members
+from app.services.device_entitlements import (
+    assert_account_allows_user_members,
+    assert_admin_user_member_capacity,
+)
 
 
 def account_root_id(owner: Owner) -> int:
@@ -41,6 +44,7 @@ def resolve_account_owner_id(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="account_owner_id account type mismatch",
             )
+        assert_admin_user_member_capacity(db, account_owner)
         return account_owner.id
 
     # Fallback to the matching administrator in the same main zone.
@@ -60,6 +64,7 @@ def resolve_account_owner_id(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="User registration requires an existing administrator account owner",
         )
+    assert_admin_user_member_capacity(db, account_owner)
     return account_owner.id
 
 

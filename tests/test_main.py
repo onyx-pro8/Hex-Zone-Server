@@ -1258,7 +1258,8 @@ async def test_contract_register_admin_with_free_succeeds(test_db, override_get_
 
 
 @pytest.mark.asyncio
-async def test_exclusive_account_rejects_user_registration(test_db, override_get_db):
+async def test_exclusive_account_allows_one_user_rejects_second(test_db, override_get_db):
+    """Exclusive accounts: admin can invite exactly 1 user (the 2nd is rejected)."""
     async with AsyncClient(app=app, base_url="http://test") as client:
         admin = await client.post(
             "/owners/register",
@@ -1277,13 +1278,13 @@ async def test_exclusive_account_rejects_user_registration(test_db, override_get
         assert admin.status_code == 201
         admin_id = admin.json()["id"]
 
-        user = await client.post(
+        first_user = await client.post(
             "/owners/register",
             json={
-                "email": "exclusive-user@example.com",
+                "email": "exclusive-user-1@example.com",
                 "zone_id": "exclusive-zone",
                 "first_name": "Exclusive",
-                "last_name": "User",
+                "last_name": "UserOne",
                 "account_type": "exclusive",
                 "role": "user",
                 "account_owner_id": admin_id,
@@ -1291,8 +1292,26 @@ async def test_exclusive_account_rejects_user_registration(test_db, override_get
                 "address": "User Address",
             },
         )
-        assert user.status_code == 422
-        assert "exclusive" in _http_error_message(user.json()).lower()
+        assert first_user.status_code == 201, first_user.text
+
+        second_user = await client.post(
+            "/owners/register",
+            json={
+                "email": "exclusive-user-2@example.com",
+                "zone_id": "exclusive-zone",
+                "first_name": "Exclusive",
+                "last_name": "UserTwo",
+                "account_type": "exclusive",
+                "role": "user",
+                "account_owner_id": admin_id,
+                "password": "SecurePassword123",
+                "address": "User Address",
+            },
+        )
+        assert second_user.status_code == 403
+        message = _http_error_message(second_user.json()).lower()
+        assert "exclusive" in message
+        assert "1" in message
 
 
 @pytest.mark.asyncio

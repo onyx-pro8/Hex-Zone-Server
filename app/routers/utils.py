@@ -16,6 +16,7 @@ from app.core.security import get_current_user
 from app.crud import qr_registration as qr_crud
 from app.crud import owner as owner_crud
 from app.services.registration_code_service import mint_registration_code
+from app.services.device_entitlements import assert_admin_user_member_capacity
 from fastapi import HTTPException, status
 
 router = APIRouter(prefix="/utils", tags=["utilities"])
@@ -83,6 +84,9 @@ async def convert_to_h3(
     )
 
 
+QR_INVITE_ALLOWED_ACCOUNT_TYPES = {"private", "exclusive"}
+
+
 @router.post(
     "/qr/generate",
     response_model=QRRegistrationResponse,
@@ -90,11 +94,15 @@ async def convert_to_h3(
     description=(
         "Generate invite token used by **account/member join** QR flow only. "
         "Not for door guest access — use **`GET /api/access/qr-link`** for canonical **`/access?zid=`** URLs. "
-        "Only private-account administrators can issue invitation tokens."
+        "Available to administrators of **Private** (multi-user) and **Exclusive** "
+        "(admin + 1 invited user) account tiers."
     ),
     responses={
         status.HTTP_403_FORBIDDEN: {
-            "description": "Only private-account administrators can generate QR registration tokens.",
+            "description": (
+                "Caller is not an administrator of an invite-capable tier, or the "
+                "administrator has already reached their invited-user capacity."
+            ),
         },
         status.HTTP_404_NOT_FOUND: {
             "description": "Authenticated owner was not found.",
@@ -107,33 +115,38 @@ async def generate_qr_registration(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Generate QR registration token for inviting users (Private accounts only)."""
+    """Generate QR registration token for inviting a user member."""
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Owner not found",
         )
-    
-    # Only Private administrators can generate QR codes
-    if owner.account_type.value != "private":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only Private accounts can generate QR registration codes",
-        )
+
     if owner.role.value != "administrator":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only administrators can generate QR registration codes",
         )
-    
+    if owner.account_type.value not in QR_INVITE_ALLOWED_ACCOUNT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only Private and Exclusive accounts can generate QR registration codes"
+            ),
+        )
+
+    # Reject up-front when the administrator has already filled their invited-user
+    # capacity so they get a clean error instead of a token that cannot be redeemed.
+    assert_admin_user_member_capacity(db, owner)
+
     qr = qr_crud.create_qr_registration(
         db,
         current_user["user_id"],
         qr_request.expires_in_hours,
     )
     db.commit()
-    
+
     return QRRegistrationResponse.model_validate(qr)
 
 
@@ -185,14 +198,21 @@ async def join_with_qr(
             detail="QR registration token has expired",
         )
     
-    # Ensure this token belongs to a private account owner
+    # Ensure this token belongs to an invite-capable administrator
     owner = owner_crud.get_owner(db, qr.owner_id)
-    if not owner or owner.account_type.value != "private":
+    if (
+        not owner
+        or owner.role.value != "administrator"
+        or owner.account_type.value not in QR_INVITE_ALLOWED_ACCOUNT_TYPES
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid QR registration token",
         )
-    
+
+    # Final capacity gate: e.g. Exclusive admin already has their 1 invited user.
+    assert_admin_user_member_capacity(db, owner)
+
     # Check if email already exists
     existing = owner_crud.get_owner_by_email(db, qr_data.email)
     if existing:
@@ -200,8 +220,9 @@ async def join_with_qr(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email already registered",
         )
-    
-    # Create new owner under Private account type
+
+    # Create new owner inheriting the inviter's account type so an Exclusive
+    # invite stays Exclusive (admin + 1 user) and a Private invite stays Private.
     from app.schemas.schemas import OwnerCreate, AccountTypeEnum, OwnerRoleEnum
     new_owner_data = OwnerCreate(
         email=qr_data.email,
@@ -210,17 +231,17 @@ async def join_with_qr(
         first_name=qr_data.first_name,
         last_name=qr_data.last_name,
         password=qr_data.password,
-        account_type=AccountTypeEnum.PRIVATE,
+        account_type=AccountTypeEnum(owner.account_type.value),
         role=OwnerRoleEnum.USER,
         account_owner_id=owner.id,
         address=qr_data.address,
         phone=qr_data.phone,
     )
-    
+
     new_owner = owner_crud.create_owner(db, new_owner_data)
-    
+
     # Mark QR as used
     qr_crud.mark_qr_registration_used(db, qr.token)
     db.commit()
-    
+
     return OwnerResponse.model_validate(new_owner)
