@@ -85,6 +85,37 @@ def evaluate_member_zones(db: Session, latitude: float, longitude: float, candid
     return sorted(matched)
 
 
+def evaluate_zones_containing_point(db: Session, latitude: float, longitude: float) -> list[str]:
+    """Return zone_ids whose geometry contains ``(latitude, longitude)`` across all active owners.
+
+    Used for cross-account message propagation: any owner whose acceptable zone
+    (a zone they own) includes the message coordinates may receive the alarm.
+    """
+    active_owner_rows = db.query(Owner.id).filter(Owner.active.is_(True)).all()
+    owner_ids = [int(row[0]) for row in active_owner_rows]
+    return evaluate_member_zones(db, latitude, longitude, owner_ids)
+
+
+def owner_ids_whose_acceptable_zones_contain_point(
+    db: Session,
+    latitude: float,
+    longitude: float,
+) -> tuple[list[str], list[int]]:
+    """Owners whose owned zones contain the point (acceptable-zone match)."""
+    zone_ids = evaluate_zones_containing_point(db, latitude, longitude)
+    if not zone_ids:
+        return [], []
+
+    rows = (
+        db.query(Zone.owner_id)
+        .filter(Zone.zone_id.in_(zone_ids), Zone.active.is_(True))
+        .distinct()
+        .all()
+    )
+    owner_ids = sorted({int(row[0]) for row in rows})
+    return zone_ids, owner_ids
+
+
 def _point_in_dynamic_zone(zone: Zone, latitude: float, longitude: float) -> bool:
     """Match point against the saved resolved radius for a dynamic zone.
 

@@ -13,11 +13,11 @@ from app.domain.message_types import (
     type_category,
     type_scope,
 )
-from app.models import Owner, ZoneMembership, ZoneMessageEvent
+from app.models import Owner, ZoneMessageEvent
 from app.schemas.message_feature import MessageFeatureType, PropagationMessageCreate
 from app.services import message_block_service
 from app.services.access_policy import visible_owner_ids
-from app.services.geospatial_service import evaluate_member_zones
+from app.services.geospatial_service import owner_ids_whose_acceptable_zones_contain_point
 from app.services.unknown_fanout_service import (
     UNKNOWN_RATE_LIMIT_SECONDS,
     resolve_nearest_owner_ids,
@@ -30,10 +30,36 @@ class UnknownRateLimitError(Exception):
 
 
 class GeoMessageSkipped(Exception):
-    """No-op path (e.g. UNKNOWN with no canonical sender location)."""
+    """No-op path (e.g. UNKNOWN with no usable origin coordinates)."""
 
     def __init__(self, detail: dict):
         self.detail = detail
+
+
+def _merge_propagation_recipients(
+    *,
+    sender_id: int,
+    account_owner_ids: list[int],
+    acceptable_zone_owner_ids: list[int],
+) -> list[int]:
+    """Union same-account members with cross-account acceptable-zone owners."""
+    merged = set(account_owner_ids) | set(acceptable_zone_owner_ids)
+    merged.discard(sender_id)
+    return sorted(merged)
+
+
+def _resolve_unknown_origin(
+    sender: Owner,
+    payload: PropagationMessageCreate,
+) -> tuple[float, float, str]:
+    """Origin for UNKNOWN nearest-neighbour fan-out (owner record, else message position)."""
+    if sender.latitude is not None and sender.longitude is not None:
+        return float(sender.latitude), float(sender.longitude), "owner_record"
+    return (
+        float(payload.position.latitude),
+        float(payload.position.longitude),
+        "message_position",
+    )
 
 
 def _to_canonical_type(message_type: MessageFeatureType) -> CanonicalMessageType:
@@ -84,31 +110,39 @@ def _zone_based_recipients(
     payload: PropagationMessageCreate,
     canonical_type: CanonicalMessageType,
     scope: MessageScope,
-) -> tuple[list[str], list[int]]:
-    candidate_owner_ids = visible_owner_ids(db, sender, include_inactive=False)
-    zone_ids = evaluate_member_zones(
-        db,
-        payload.position.latitude,
-        payload.position.longitude,
-        candidate_owner_ids,
-    )
+) -> tuple[list[str], list[int], dict]:
+    """Resolve recipients for geo alarm/alert types (not UNKNOWN).
 
+    Delivers to:
+    - all members on the sender's account, and
+    - any other owner whose acceptable zone geometry contains the message point.
+    """
     if scope == MessageScope.PRIVATE and payload.receiver_owner_id is None:
         raise ValueError("receiver_owner_id is required for private-scope message types")
 
     if payload.receiver_owner_id:
-        return zone_ids, [payload.receiver_owner_id]
+        return [], [payload.receiver_owner_id], {"strategy": "direct_receiver"}
 
-    member_rows = (
-        db.query(ZoneMembership.owner_id)
-        .filter(ZoneMembership.zone_id.in_(zone_ids))
-        .distinct()
-        .all()
+    latitude = float(payload.position.latitude)
+    longitude = float(payload.position.longitude)
+
+    account_owner_ids = visible_owner_ids(db, sender, include_inactive=False)
+    zone_ids, acceptable_zone_owner_ids = owner_ids_whose_acceptable_zones_contain_point(
+        db,
+        latitude,
+        longitude,
     )
-    candidate_recipients = [row[0] for row in member_rows]
-    if sender.id not in candidate_recipients:
-        candidate_recipients.append(sender.id)
-    return zone_ids, candidate_recipients
+    candidate_recipients = _merge_propagation_recipients(
+        sender_id=sender.id,
+        account_owner_ids=account_owner_ids,
+        acceptable_zone_owner_ids=acceptable_zone_owner_ids,
+    )
+    meta = {
+        "strategy": "account_plus_acceptable_zone",
+        "account_member_ids": account_owner_ids,
+        "acceptable_zone_owner_ids": acceptable_zone_owner_ids,
+    }
+    return zone_ids, candidate_recipients, meta
 
 
 def create_geo_propagated_message(db: Session, sender: Owner, payload: PropagationMessageCreate) -> dict:
@@ -118,38 +152,15 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
 
     fanout_meta: dict = {
         "account_type": account_type,
-        "strategy": "zone_membership",
     }
 
     if canonical_type == CanonicalMessageType.UNKNOWN:
         _assert_unknown_rate_limit_ok(db, sender)
-        if sender.latitude is None or sender.longitude is None:
-            target_x = unknown_fanout_limit(sender)
-            raise GeoMessageSkipped(
-                {
-                    "id": None,
-                    "type": canonical_type.value,
-                    "category": type_category(canonical_type).value,
-                    "scope": scope.value,
-                    "zone_ids": [],
-                    "delivered_owner_ids": [],
-                    "blocked_owner_ids": [],
-                    "created_at": datetime.utcnow().isoformat(),
-                    "skipped": True,
-                    "reason": "sender_location_unavailable",
-                    "fanout": {
-                        **fanout_meta,
-                        "strategy": "unknown_nearest",
-                        "target_x": target_x,
-                        "resolved_x": 0,
-                        "origin": None,
-                    },
-                    "metadata": {},
-                }
-            )
-
-        origin_lat = float(sender.latitude)
-        origin_lon = float(sender.longitude)
+        origin_lat, origin_lon, origin_source = _resolve_unknown_origin(sender, payload)
+        if origin_source == "message_position":
+            sender.latitude = origin_lat
+            sender.longitude = origin_lon
+            sender.location_updated_at = datetime.utcnow()
         target_x = unknown_fanout_limit(sender)
         candidate_recipients = resolve_nearest_owner_ids(
             db,
@@ -164,16 +175,26 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
             "strategy": "unknown_nearest",
             "target_x": target_x,
             "resolved_x": len(candidate_recipients),
-            "origin": {"latitude": origin_lat, "longitude": origin_lon},
+            "origin": {
+                "latitude": origin_lat,
+                "longitude": origin_lon,
+                "source": origin_source,
+            },
         }
         position_for_metadata = {"latitude": origin_lat, "longitude": origin_lon}
     else:
-        zone_ids, candidate_recipients = _zone_based_recipients(db, sender, payload, canonical_type, scope)
+        zone_ids, candidate_recipients, zone_meta = _zone_based_recipients(
+            db, sender, payload, canonical_type, scope
+        )
         position_for_metadata = {
             "latitude": payload.position.latitude,
             "longitude": payload.position.longitude,
         }
-        fanout_meta["target_x"] = len(candidate_recipients)
+        fanout_meta = {
+            "account_type": account_type,
+            **zone_meta,
+            "target_x": len(candidate_recipients),
+        }
 
     delivered_owner_ids, blocked_owner_ids = _apply_delivery_blocks(
         db,
