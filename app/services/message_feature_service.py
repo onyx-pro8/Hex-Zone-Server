@@ -155,7 +155,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
     }
 
     if canonical_type == CanonicalMessageType.UNKNOWN:
-        _assert_unknown_rate_limit_ok(db, sender)
+        _assert_unknown_rate_limit_ok(db, sender.id)
         origin_lat, origin_lon, origin_source = _resolve_unknown_origin(sender, payload)
         if origin_source == "message_position":
             sender.latitude = origin_lat

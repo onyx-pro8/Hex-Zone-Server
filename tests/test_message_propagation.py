@@ -126,6 +126,13 @@ def test_resolve_unknown_origin_falls_back_to_message_position():
     assert lon == -74.0060
 
 
+def test_assert_unknown_rate_limit_accepts_owner_id_not_model(prop_db):
+    """Regression: passing Owner into sender_id filter caused SQLAlchemy 500."""
+    sender = _owner(prop_db, oid=7, email="rate@x.com", lat=0.0, lon=0.0)
+    prop_db.commit()
+    mfs._assert_unknown_rate_limit_ok(prop_db, sender.id)
+
+
 def test_unknown_uses_message_position_when_owner_coords_missing(prop_db, monkeypatch):
     sender = _owner(prop_db, oid=1, email="sender@x.com", lat=None, lon=None)
     _owner(prop_db, oid=2, email="near@x.com", lat=40.7130, lon=-74.0060)
