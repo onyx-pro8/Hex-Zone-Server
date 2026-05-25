@@ -327,7 +327,9 @@ def list_geo_propagation_events_for_owner_inbox(
             continue
         meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
         delivered = meta.get("delivered_owner_ids")
-        if isinstance(delivered, list) and owner.id in delivered:
+        if isinstance(delivered, list) and any(
+            isinstance(item, (int, float)) and int(item) == owner.id for item in delivered
+        ):
             visible.append(row)
     return visible
 
