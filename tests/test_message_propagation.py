@@ -156,6 +156,37 @@ def test_unknown_uses_message_position_when_owner_coords_missing(prop_db, monkey
     assert sender.longitude == -74.0060
 
 
+def test_user_role_sender_reaches_same_account_members(prop_db, monkeypatch):
+    admin = _owner(prop_db, oid=20, email="admin@x.com", lat=0.0, lon=0.0)
+    user_sender = _owner(
+        prop_db,
+        oid=21,
+        email="user@x.com",
+        lat=0.0,
+        lon=0.0,
+        account_owner_id=20,
+        role=OwnerRole.USER,
+    )
+
+    monkeypatch.setattr(
+        mfs,
+        "owner_ids_whose_acceptable_zones_contain_point",
+        lambda db, latitude, longitude: ([], []),
+    )
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.PANIC,
+        hid="device-1",
+        position=CoordinatePayload(latitude=0.5, longitude=0.5),
+        msg={"description": "user panic"},
+    )
+    result = mfs.create_geo_propagated_message(prop_db, user_sender, payload)
+    assert result["skipped"] is False
+    delivered = set(result["delivered_owner_ids"])
+    assert 20 in delivered
+    assert 21 not in delivered
+
+
 def test_zone_propagation_merges_account_and_acceptable_zone_owners(prop_db, monkeypatch):
     sender = _owner(prop_db, oid=10, email="sender@x.com", lat=0.0, lon=0.0)
     _owner(prop_db, oid=11, email="member@x.com", account_owner_id=10, role=OwnerRole.USER)

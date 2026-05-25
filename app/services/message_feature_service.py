@@ -16,7 +16,7 @@ from app.domain.message_types import (
 from app.models import Owner, ZoneMessageEvent
 from app.schemas.message_feature import MessageFeatureType, PropagationMessageCreate
 from app.services import message_block_service
-from app.services.access_policy import visible_owner_ids
+from app.services.access_policy import account_propagation_owner_ids
 from app.services.geospatial_service import owner_ids_whose_acceptable_zones_contain_point
 from app.services.unknown_fanout_service import (
     UNKNOWN_RATE_LIMIT_SECONDS,
@@ -126,7 +126,7 @@ def _zone_based_recipients(
     latitude = float(payload.position.latitude)
     longitude = float(payload.position.longitude)
 
-    account_owner_ids = visible_owner_ids(db, sender, include_inactive=False)
+    account_owner_ids = account_propagation_owner_ids(db, sender, include_inactive=False)
     zone_ids, acceptable_zone_owner_ids = owner_ids_whose_acceptable_zones_contain_point(
         db,
         latitude,

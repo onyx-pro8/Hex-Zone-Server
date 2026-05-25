@@ -22,7 +22,14 @@ _METERS_PER_DEG_LAT = 111_320.0
 _MAX_POPULATION_FOR_CLUSTER_SCAN = 1500
 
 
-def evaluate_member_zones(db: Session, latitude: float, longitude: float, candidate_owner_ids: Iterable[int]) -> list[str]:
+def evaluate_member_zones(
+    db: Session,
+    latitude: float,
+    longitude: float,
+    candidate_owner_ids: Iterable[int],
+    *,
+    include_dynamic_zones: bool = True,
+) -> list[str]:
     owner_ids = list(candidate_owner_ids)
     if not owner_ids:
         return []
@@ -73,7 +80,7 @@ def evaluate_member_zones(db: Session, latitude: float, longitude: float, candid
         .all()
     )
     for zone in circle_candidates:
-        if _point_in_dynamic_zone(zone, latitude, longitude):
+        if include_dynamic_zones and _point_in_dynamic_zone(zone, latitude, longitude):
             matched.add(zone.zone_id)
             continue
         if _point_in_proximity_zone(zone, latitude, longitude):
@@ -93,7 +100,13 @@ def evaluate_zones_containing_point(db: Session, latitude: float, longitude: flo
     """
     active_owner_rows = db.query(Owner.id).filter(Owner.active.is_(True)).all()
     owner_ids = [int(row[0]) for row in active_owner_rows]
-    return evaluate_member_zones(db, latitude, longitude, owner_ids)
+    return evaluate_member_zones(
+        db,
+        latitude,
+        longitude,
+        owner_ids,
+        include_dynamic_zones=False,
+    )
 
 
 def owner_ids_whose_acceptable_zones_contain_point(

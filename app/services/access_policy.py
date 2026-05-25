@@ -85,6 +85,28 @@ def visible_owner_ids(db: Session, owner: Owner, include_inactive: bool = False)
     return owner_ids
 
 
+def account_propagation_owner_ids(
+    db: Session,
+    owner: Owner,
+    *,
+    include_inactive: bool = False,
+) -> list[int]:
+    """All owners on the same account root — used for alarm/alert fan-out.
+
+    Unlike ``visible_owner_ids``, non-admin senders still reach every active
+    member on their account (admin, invited users, devices).
+    """
+    root_id = account_root_id(owner)
+    query = db.query(Owner.id).filter((Owner.id == root_id) | (Owner.account_owner_id == root_id))
+    if not include_inactive:
+        query = query.filter(Owner.active.is_(True))
+    rows = query.all()
+    owner_ids = [row[0] for row in rows]
+    if owner.id not in owner_ids and (include_inactive or owner.active):
+        owner_ids.append(owner.id)
+    return owner_ids
+
+
 def messaging_visible_owner_ids(
     db: Session,
     owner: Owner,
