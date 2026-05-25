@@ -283,6 +283,55 @@ def list_zone_permission_events_for_owner_feed(
     return visible
 
 
+_GEO_INBOX_TYPES: frozenset[str] = frozenset(
+    {
+        CanonicalMessageType.UNKNOWN.value,
+        CanonicalMessageType.PANIC.value,
+        CanonicalMessageType.NS_PANIC.value,
+        CanonicalMessageType.SENSOR.value,
+        CanonicalMessageType.SERVICE.value,
+        CanonicalMessageType.WELLNESS_CHECK.value,
+        CanonicalMessageType.PA.value,
+        CanonicalMessageType.PRIVATE.value,
+    }
+)
+
+
+def list_geo_propagation_events_for_owner_inbox(
+    db: Session,
+    *,
+    owner: Owner,
+    max_scan: int = 3000,
+) -> list[ZoneMessageEvent]:
+    """Geo propagation rows where this owner is a delivered recipient.
+
+    Lets users 44/45/etc. see UNKNOWN / PANIC / SENSOR / etc. on **`GET /messages`**
+    even when they were offline at fan-out time. Visibility is driven by
+    **`metadata.delivered_owner_ids`** written by the propagation service so the
+    same recipient list used for WebSocket / push also drives the inbox.
+    """
+    rows = (
+        db.query(ZoneMessageEvent)
+        .filter(ZoneMessageEvent.type.in_(tuple(_GEO_INBOX_TYPES)))
+        .order_by(ZoneMessageEvent.created_at.desc())
+        .limit(max(1, min(int(max_scan), 8000)))
+        .all()
+    )
+    visible: list[ZoneMessageEvent] = []
+    for row in rows:
+        if row.sender_id == owner.id:
+            visible.append(row)
+            continue
+        if row.receiver_id == owner.id:
+            visible.append(row)
+            continue
+        meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+        delivered = meta.get("delivered_owner_ids")
+        if isinstance(delivered, list) and owner.id in delivered:
+            visible.append(row)
+    return visible
+
+
 def list_zone_guest_access_chat_events_for_owner_inbox(
     db: Session,
     *,

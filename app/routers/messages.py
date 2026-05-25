@@ -485,8 +485,16 @@ async def _list_zone_messages_for_owner(
         chat_responses = [
             guest_api_service.zone_message_event_to_member_zone_message_response(e, db=db) for e in chat_events
         ]
+    geo_events = guest_api_service.list_geo_propagation_events_for_owner_inbox(
+        db,
+        owner=owner,
+        max_scan=fetch_cap + 250,
+    )
+    geo_responses = [
+        guest_api_service.zone_message_event_to_member_zone_message_response(e, db=db) for e in geo_events
+    ]
     merged = sorted(
-        [*msg_responses, *perm_responses, *chat_responses],
+        [*msg_responses, *perm_responses, *chat_responses, *geo_responses],
         key=lambda item: item.created_at,
         reverse=True,
     )
