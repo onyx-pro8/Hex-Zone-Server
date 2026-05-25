@@ -132,11 +132,17 @@ class PermissionDecisionResponse(BaseModel):
 
 class PropagationMessageResponse(BaseModel):
     id: str | None = None
+    sender_id: int | None = Field(
+        default=None,
+        description="Owner id that sent the geo message (for inbox + WebSocket clients).",
+    )
+    zone_id: str | None = Field(
+        default=None,
+        description="Primary zone id on the persisted ZoneMessageEvent.",
+    )
     type: str | None = None
     category: str | None = None
     scope: str | None = None
-    zone_id: str | None = None
-    sender_id: int | None = None
     zone_ids: list[str] = Field(default_factory=list)
     delivered_owner_ids: list[int] = Field(default_factory=list)
     blocked_owner_ids: list[int] = Field(default_factory=list)

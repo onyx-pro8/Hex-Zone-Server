@@ -44,10 +44,11 @@ async def _finalize_geo_propagation(db: Session, result: dict) -> dict:
 
     delivered = list(result.get("delivered_owner_ids") or [])
     sender_id = result.get("sender_id")
-    if isinstance(sender_id, int) and sender_id not in delivered:
-        delivered.append(sender_id)
-    if delivered:
-        await ws_manager.broadcast_to_users(delivered, "NEW_GEO_MESSAGE", result)
+    ws_recipients = list({int(oid) for oid in delivered if isinstance(oid, int)})
+    if isinstance(sender_id, int) and sender_id not in ws_recipients:
+        ws_recipients.append(sender_id)
+    if ws_recipients:
+        await ws_manager.broadcast_to_users(ws_recipients, "NEW_GEO_MESSAGE", result)
 
     if is_alarm_push_type(str(result.get("type") or "")):
         push_stats = await push_notification_service.send_alarm_push_to_owners(db, delivered, result)
