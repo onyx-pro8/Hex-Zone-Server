@@ -280,14 +280,14 @@ app = FastAPI(
     openapi_tags=OPENAPI_TAGS,
 )
 
-# Add CORS middleware
+# Allow any origin; echo Origin (not *) so credentials remain valid for browsers.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_origin_regex=".*",
+    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
     max_age=86400,
 )
 

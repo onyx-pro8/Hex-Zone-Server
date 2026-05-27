@@ -1,6 +1,7 @@
 """Registration codes for administrator self-registration (setup wizard)."""
 from __future__ import annotations
 
+import logging
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -10,15 +11,26 @@ from app.crud import registration_code as registration_code_crud
 
 # Stateless tier code accepted on POST without a matching DB row (product / dev convenience).
 STATIC_ADMIN_REGISTRATION_TIERS: frozenset[str] = frozenset({"FREE"})
+logger = logging.getLogger(__name__)
 
 
 def mint_registration_code(db: Session) -> str:
-    """Create a single-use DB-backed code and return the plaintext value."""
-    row = registration_code_crud.create_registration_code(
-        db,
-        expires_in_hours=settings.REGISTRATION_CODE_EXPIRE_HOURS,
-    )
-    return row.code
+    """Create a single-use DB-backed code and return plaintext; fallback to FREE on DB failure."""
+    try:
+        row = registration_code_crud.create_registration_code(
+            db,
+            expires_in_hours=settings.REGISTRATION_CODE_EXPIRE_HOURS,
+        )
+        return row.code
+    except Exception as exc:
+        # Keep onboarding available during transient DB outages. FREE is already
+        # accepted by registration validators as a static tier code.
+        db.rollback()
+        logger.exception(
+            "Falling back to static admin registration tier because code mint failed: %s",
+            exc,
+        )
+        return "FREE"
 
 
 def require_and_consume_admin_registration_code(db: Session, code: str | None) -> None:

@@ -52,7 +52,8 @@ class RegistrationCodeResponse(BaseModel):
 async def issue_utils_registration_code(db: Session = Depends(get_db)):
     """Mint a DB-backed registration code (same semantics as GET /owners/registration-code)."""
     code = mint_registration_code(db)
-    db.commit()
+    if code != "FREE":
+        db.commit()
     return {"registration_code": code}
 
 
