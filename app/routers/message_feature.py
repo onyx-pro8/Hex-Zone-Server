@@ -27,7 +27,7 @@ from app.schemas.message_feature import (
     PropagationMessageCreate,
     PropagationMessageResponse,
 )
-from app.domain.message_types import is_alarm_push_type
+from app.domain.message_types import is_pushable_geo_type
 from app.services import guest_access_service, message_block_service, message_feature_service, permission_service
 from app.services.message_feature_service import GeoMessageSkipped, UnknownRateLimitError
 from app.services import push_notification_service
@@ -50,7 +50,7 @@ async def _finalize_geo_propagation(db: Session, result: dict) -> dict:
     if ws_recipients:
         await ws_manager.broadcast_to_users(ws_recipients, "NEW_GEO_MESSAGE", result)
 
-    if is_alarm_push_type(str(result.get("type") or "")):
+    if is_pushable_geo_type(str(result.get("type") or "")):
         push_stats = await push_notification_service.send_alarm_push_to_owners(db, delivered, result)
         result.update(push_stats)
     return result

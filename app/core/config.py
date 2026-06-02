@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     FCM_SERVER_KEY: str = ""
     APNS_HTTP_URL: str = ""
     APNS_AUTH_KEY: str = ""
+    # Expo Push HTTP/2 access token (optional - only needed if your Expo project
+    # enforces the "Enhanced Security for Push Notifications" setting).
+    EXPO_ACCESS_TOKEN: str = ""
 
     UNKNOWN_MESSAGE_RATE_LIMIT_SECONDS: int = 10
 

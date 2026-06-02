@@ -239,6 +239,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
     return {
         "id": event.id,
         "sender_id": sender.id,
+        "receiver_id": event.receiver_id,
         "zone_id": event.zone_id,
         "type": event.type,
         "category": event.category.value,

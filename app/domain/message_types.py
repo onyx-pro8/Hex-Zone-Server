@@ -95,8 +95,29 @@ ALARM_PUSH_TYPES: frozenset[CanonicalMessageType] = frozenset(
     }
 )
 
+# Geo-propagated alert types that should also wake the recipient on mobile.
+# Alarm + Alert categories together cover all GPS-propagated, non-access messages.
+PUSHABLE_GEO_TYPES: frozenset[CanonicalMessageType] = ALARM_PUSH_TYPES | frozenset(
+    {
+        CanonicalMessageType.PRIVATE,
+        CanonicalMessageType.PA,
+        CanonicalMessageType.SERVICE,
+        CanonicalMessageType.WELLNESS_CHECK,
+    }
+)
+
 
 def is_alarm_push_type(message_type: CanonicalMessageType | str) -> bool:
     if isinstance(message_type, CanonicalMessageType):
         return message_type in ALARM_PUSH_TYPES
     return normalize_message_type(message_type) in ALARM_PUSH_TYPES
+
+
+def is_pushable_geo_type(message_type: CanonicalMessageType | str) -> bool:
+    """True for geo-propagated messages that should also trigger a mobile push."""
+    if isinstance(message_type, CanonicalMessageType):
+        return message_type in PUSHABLE_GEO_TYPES
+    try:
+        return normalize_message_type(message_type) in PUSHABLE_GEO_TYPES
+    except ValueError:
+        return False

@@ -1,4 +1,4 @@
-"""Mobile push delivery for alarm-category geo messages (FCM / APNS)."""
+"""Mobile push delivery for geo-propagated messages (Expo / FCM / APNS)."""
 from __future__ import annotations
 
 import logging
@@ -8,15 +8,16 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.domain.message_types import is_alarm_push_type
+from app.domain.message_types import is_alarm_push_type, is_pushable_geo_type
 from app.models import PushToken
 
 logger = logging.getLogger(__name__)
 
 FCM_LEGACY_URL = "https://fcm.googleapis.com/fcm/send"
+EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 
-def _alarm_notification_copy(message_type: str, text: str) -> tuple[str, str]:
+def _notification_copy(message_type: str, text: str) -> tuple[str, str]:
     label = str(message_type or "ALARM").replace("_", " ")
     body = (text or label).strip()[:240]
     return f"Hex Zone {label}", body or label
@@ -27,9 +28,13 @@ async def send_alarm_push_to_owners(
     owner_ids: list[int],
     alarm_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Best-effort push for alarm types. Never raises; failures are logged only."""
+    """Best-effort push for geo-propagated messages.
+
+    Includes alarm types (PANIC, SENSOR, …) and alert types (PRIVATE, PA,
+    SERVICE, WELLNESS_CHECK). Never raises; transport failures are logged.
+    """
     msg_type = str(alarm_payload.get("type") or "")
-    if not is_alarm_push_type(msg_type):
+    if not is_pushable_geo_type(msg_type):
         return {"push_sent": 0, "push_failed": 0, "push_skipped": True}
 
     if not owner_ids:
@@ -46,7 +51,8 @@ async def send_alarm_push_to_owners(
     if not tokens:
         return {"push_sent": 0, "push_failed": 0, "push_no_tokens": True}
 
-    title, body = _alarm_notification_copy(msg_type, str(alarm_payload.get("text") or ""))
+    title, body = _notification_copy(msg_type, str(alarm_payload.get("text") or ""))
+    is_alarm = is_alarm_push_type(msg_type)
     data_payload = {
         "event": "NEW_GEO_MESSAGE",
         "type": msg_type,
@@ -65,8 +71,20 @@ async def send_alarm_push_to_owners(
     sent = 0
     failed = 0
 
+    expo_tokens = [t.token for t in tokens if str(t.platform).upper() == "EXPO"]
     fcm_tokens = [t.token for t in tokens if str(t.platform).upper() == "FCM"]
     apns_tokens = [t.token for t in tokens if str(t.platform).upper() == "APNS"]
+
+    if expo_tokens:
+        expo_sent, expo_failed = await _send_expo_batch(
+            expo_tokens,
+            title=title,
+            body=body,
+            data=data_payload,
+            channel_id="alarms" if is_alarm else "messages",
+        )
+        sent += expo_sent
+        failed += expo_failed
 
     if fcm_tokens and fcm_key:
         fcm_sent, fcm_failed = await _send_fcm_legacy_batch(
@@ -92,6 +110,67 @@ async def send_alarm_push_to_owners(
         failed += apns_failed
 
     return {"push_sent": sent, "push_failed": failed}
+
+
+async def _send_expo_batch(
+    tokens: list[str],
+    *,
+    title: str,
+    body: str,
+    data: dict[str, str],
+    channel_id: str,
+) -> tuple[int, int]:
+    """Expo Push HTTP/2 API. Accepts both ``ExponentPushToken[...]`` and ``ExpoPushToken[...]``."""
+    headers = {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Content-Type": "application/json",
+    }
+    expo_access_token = getattr(settings, "EXPO_ACCESS_TOKEN", "") or ""
+    if expo_access_token:
+        headers["Authorization"] = f"Bearer {expo_access_token}"
+
+    sent = 0
+    failed = 0
+    chunk_size = 100
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for offset in range(0, len(tokens), chunk_size):
+            chunk = tokens[offset : offset + chunk_size]
+            payload = [
+                {
+                    "to": token,
+                    "title": title,
+                    "body": body,
+                    "data": data,
+                    "sound": "default",
+                    "priority": "high",
+                    "channelId": channel_id,
+                }
+                for token in chunk
+            ]
+            try:
+                response = await client.post(EXPO_PUSH_URL, headers=headers, json=payload)
+                response.raise_for_status()
+                body_json = response.json() or {}
+                tickets = body_json.get("data") or []
+                if isinstance(tickets, list):
+                    for ticket in tickets:
+                        if isinstance(ticket, dict) and ticket.get("status") == "ok":
+                            sent += 1
+                        else:
+                            failed += 1
+                            if isinstance(ticket, dict):
+                                logger.info(
+                                    "Expo push ticket error: %s",
+                                    ticket.get("message") or ticket.get("details") or ticket,
+                                )
+                else:
+                    failed += len(chunk)
+                    logger.warning("Expo push: unexpected response shape: %s", body_json)
+            except httpx.HTTPError as exc:
+                logger.warning("Expo push batch failed (%d tokens): %s", len(chunk), exc)
+                failed += len(chunk)
+    return sent, failed
 
 
 async def _send_fcm_legacy_batch(
