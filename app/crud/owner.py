@@ -9,9 +9,9 @@ from app.crud.zone import apply_zone_geo_fence_geojson
 from typing import Optional
 
 
-def create_owner(db: Session, owner: OwnerCreate) -> Owner:
+def create_owner(db: Session, owner: OwnerCreate, *, api_key: str | None = None) -> Owner:
     """Create a new owner."""
-    api_key = generate_api_key()
+    api_key = api_key or generate_api_key()
     db_owner = Owner(
         email=owner.email,
         zone_id=owner.zone_id,

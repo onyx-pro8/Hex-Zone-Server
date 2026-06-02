@@ -1,6 +1,6 @@
 """Router for utility endpoints."""
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.schemas import (
@@ -15,15 +15,63 @@ from app.core.h3_utils import lat_lng_to_h3_cell
 from app.core.security import get_current_user
 from app.crud import qr_registration as qr_crud
 from app.crud import owner as owner_crud
-from app.services.registration_code_service import mint_registration_code
+from app.services.registration_code_service import (
+    issue_registration_code_for_email_tier,
+    mint_registration_code,
+)
 from app.services.device_entitlements import assert_admin_user_member_capacity
-from fastapi import HTTPException, status
 
 router = APIRouter(prefix="/utils", tags=["utilities"])
 
 
 class RegistrationCodeResponse(BaseModel):
     registration_code: str = Field(description="Single-use code for administrator registration")
+
+
+class RegistrationCodeIssueRequest(BaseModel):
+    email: EmailStr = Field(description="Administrator email used to derive the HMAC REG-CODE")
+    pricing_tier: str = Field(
+        description=(
+            "Pricing tier: private | private_plus | exclusive | enhanced | enhanced_plus"
+        ),
+        validation_alias="pricingTier",
+    )
+    tier_level: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+        description="Required for enhanced_plus (1–5 user-capacity levels)",
+        validation_alias="tierLevel",
+    )
+
+    model_config = {"populate_by_name": True}
+
+
+class SupportContactResponse(BaseModel):
+    name: str
+    email: str
+    phone: str
+    website: str
+
+
+class EmailDeliveryResponse(BaseModel):
+    sent: bool
+    delivery: str
+    reason: str | None = None
+
+
+class RegistrationCodeIssueResponse(BaseModel):
+    registration_code: str = Field(description="HMAC-derived REG-CODE (XXXXXX-XXXXXX)")
+    api_key: str = Field(description="Pre-allocated API key bound to this issuance")
+    pricing_tier: str
+    tier_level: int | None = None
+    pricing_tier_label: str
+    expires_at: str = Field(description="UTC ISO-8601 expiration timestamp")
+    email: str
+    contact: SupportContactResponse
+    email_delivery: EmailDeliveryResponse
+
+    model_config = {"populate_by_name": True}
 
 
 @router.get(
@@ -55,6 +103,36 @@ async def issue_utils_registration_code(db: Session = Depends(get_db)):
     if code != "FREE":
         db.commit()
     return {"registration_code": code}
+
+
+@router.post(
+    "/registration-code/issue",
+    response_model=RegistrationCodeIssueResponse,
+    summary="Issue HMAC registration code by email and pricing tier",
+    description=(
+        "Public endpoint (no Authorization). Generates a deterministic HMAC REG-CODE from "
+        "the administrator email and selected pricing tier, pre-allocates an API key, "
+        "persists a single-use issuance row, and emails the REG-CODE + api-key + support "
+        "contact details to the administrator. For **enhanced_plus**, include **tier_level** "
+        "(1–5). Legacy GET /utils/registration-code remains available for mobile clients."
+    ),
+    responses={
+        status.HTTP_409_CONFLICT: {"description": "Email already registered."},
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {"description": "Invalid pricing tier or tier_level."},
+    },
+)
+async def issue_hmac_registration_code(
+    body: RegistrationCodeIssueRequest,
+    db: Session = Depends(get_db),
+):
+    result = issue_registration_code_for_email_tier(
+        db,
+        email=str(body.email),
+        pricing_tier=body.pricing_tier,
+        tier_level=body.tier_level,
+    )
+    db.commit()
+    return result
 
 
 @router.post(

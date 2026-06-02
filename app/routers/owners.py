@@ -74,11 +74,16 @@ async def register_owner(
         account_type=owner.account_type.value,
     )
 
+    preallocated_api_key: str | None = None
     if owner.role == OwnerRoleEnum.ADMINISTRATOR:
-        require_and_consume_admin_registration_code(db, owner.registration_code)
+        preallocated_api_key = require_and_consume_admin_registration_code(
+            db,
+            owner.registration_code,
+            registration_email=owner.email,
+            account_type=owner.account_type.value,
+        )
 
-    # Create owner
-    db_owner = owner_crud.create_owner(db, owner)
+    db_owner = owner_crud.create_owner(db, owner, api_key=preallocated_api_key)
     db.commit()
     
     return OwnerResponse.model_validate(_normalize_owner_name(db_owner))

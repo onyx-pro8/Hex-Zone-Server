@@ -94,6 +94,40 @@ def patch_owner_location_columns() -> None:
     logger.info("Owner location columns patch applied")
 
 
+def patch_registration_code_email_columns() -> None:
+    """Ensure `registration_codes.email/pricing_tier/tier_level/api_key` exist.
+
+    Runs in an isolated transaction so the new POST /utils/registration-code/issue
+    endpoint cannot 500 with `UndefinedColumn` while the long `init_db()` migration
+    block is still running (or has rolled back due to an unrelated failure earlier
+    in the block). Idempotent.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
+        conn.execute(text("SET LOCAL statement_timeout = '8s';"))
+        conn.execute(
+            text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS email VARCHAR(255);")
+        )
+        conn.execute(
+            text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS pricing_tier VARCHAR(32);")
+        )
+        conn.execute(
+            text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS tier_level INTEGER;")
+        )
+        conn.execute(
+            text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS api_key VARCHAR(255);")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_registration_codes_email "
+                "ON registration_codes (email);"
+            )
+        )
+    logger.info("Registration code email/tier columns patch applied")
+
+
 def init_db():
     """Initialize database tables."""
     import app.models  # noqa: F401
@@ -641,6 +675,33 @@ def init_db():
             conn.execute(
                 text("CREATE INDEX IF NOT EXISTS ix_guest_passes_created_at ON guest_passes (created_at);")
             )
+
+        # Registration code email + pricing tier columns. Run in their own isolated
+        # transaction so an unrelated failure earlier in the migration block can never
+        # roll these critical patches back — the new POST /utils/registration-code/issue
+        # endpoint would 500 with `UndefinedColumn` until the next process restart.
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS email VARCHAR(255);")
+                )
+                conn.execute(
+                    text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS pricing_tier VARCHAR(32);")
+                )
+                conn.execute(
+                    text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS tier_level INTEGER;")
+                )
+                conn.execute(
+                    text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS api_key VARCHAR(255);")
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_registration_codes_email "
+                        "ON registration_codes (email);"
+                    )
+                )
+        except Exception as exc:
+            logger.exception("Registration code schema patch failed: %s", exc)
 
 
 def drop_db():

@@ -21,6 +21,14 @@ class RegistrationCode(Base):
     expires_at = Column(DateTime, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+    # Email + pricing tier signature inputs and pre-allocated API key for the
+    # administrator self-service flow. All nullable so legacy code paths
+    # (`mint_registration_code`, FREE tier, mobile clients) still work.
+    email = Column(String(255), nullable=True, index=True)
+    pricing_tier = Column(String(32), nullable=True)
+    tier_level = Column(Integer, nullable=True)
+    api_key = Column(String(255), nullable=True)
+
     def is_expired(self) -> bool:
         return datetime.utcnow() > self.expires_at
 

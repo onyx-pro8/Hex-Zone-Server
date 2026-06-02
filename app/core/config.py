@@ -83,5 +83,27 @@ class Settings(BaseSettings):
 
     UNKNOWN_MESSAGE_RATE_LIMIT_SECONDS: int = 10
 
+    # Registration code HMAC + email delivery (administrator self-service signup).
+    # When REGISTRATION_CODE_HMAC_SECRET is empty, the runtime falls back to SECRET_KEY.
+    REGISTRATION_CODE_HMAC_SECRET: str = ""
+    REGISTRATION_CODE_EMAIL_FROM_NAME: str = "Hex Zone"
+
+    # Public-facing support contact, included in REG-CODE issuance emails / API response.
+    SUPPORT_CONTACT_NAME: str = "Hex Zone Support"
+    SUPPORT_CONTACT_EMAIL: str = "support@zoneweaver.com"
+    SUPPORT_CONTACT_PHONE: str = "+1 (555) 010-0123"
+    SUPPORT_CONTACT_WEBSITE: str = "https://zoneweaver.com"
+
+    # Outbound SMTP (Resend.com is the reference provider; any SMTP server works).
+    # Leave SMTP_HOST empty to disable real delivery — issuance still works and the
+    # email payload is logged so the code can be retrieved during local development.
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 465
+    SMTP_USER: str = ""
+    SMTP_PASS: str = ""
+    SMTP_FROM: str = ""
+    SMTP_USE_SSL: bool = True
+    SMTP_TIMEOUT_SECONDS: int = 15
+
 
 settings = Settings()

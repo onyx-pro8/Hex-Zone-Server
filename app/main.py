@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.core.config import settings
-from app.database import init_db, patch_owner_location_columns
+from app.database import init_db, patch_owner_location_columns, patch_registration_code_email_columns
 from app.routers import access, devices, guest, message_feature, messages, owners, utils, zones
 from app.routes.contract_routes import router as contract_router
 from app.utils.api_response import error_response
@@ -49,12 +49,42 @@ def _patch_owner_location_with_retry() -> None:
                 )
 
 
+def _patch_registration_code_with_retry() -> None:
+    """Apply the registration_codes email/tier columns patch with bounded retries.
+
+    Mirrors `_patch_owner_location_with_retry`: any failure here would cause the
+    new POST /utils/registration-code/issue endpoint to 500 because SQLAlchemy
+    inserts reference columns that do not yet exist.
+    """
+    for attempt in range(1, _MAX_INIT_RETRIES + 1):
+        try:
+            patch_registration_code_email_columns()
+            logging.info(
+                "Registration code email/tier columns patch applied (attempt %d)", attempt
+            )
+            return
+        except Exception as exc:
+            if attempt < _MAX_INIT_RETRIES:
+                delay = _INIT_RETRY_BASE_DELAY * attempt
+                logging.warning(
+                    "Registration code schema patch attempt %d/%d failed: %s — retrying in %ds",
+                    attempt, _MAX_INIT_RETRIES, exc, delay,
+                )
+                time.sleep(delay)
+            else:
+                logging.exception(
+                    "Registration code schema patch failed after %d attempts: %s",
+                    _MAX_INIT_RETRIES, exc,
+                )
+
+
 def _init_db_background() -> None:
     """Run DB bootstrap without blocking app startup, retrying on transient failures."""
     # Critical patch first: every Owner ORM query maps the new columns, so we
     # apply it before the heavier `init_db()` block runs. It uses bounded
     # timeouts (see `patch_owner_location_columns`) so it never hangs.
     _patch_owner_location_with_retry()
+    _patch_registration_code_with_retry()
     for attempt in range(1, _MAX_INIT_RETRIES + 1):
         try:
             init_db()

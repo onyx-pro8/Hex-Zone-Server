@@ -103,8 +103,14 @@ def register_user(db: Session, payload: dict) -> dict:
     first_name, last_name = _split_name(payload["name"])
     account_type_value = _to_contract_account_type(payload["accountType"]).lower()
     role_value = _to_owner_role(payload.get("registrationType"))
+    preallocated_api_key: str | None = None
     if role_value == OwnerRole.ADMINISTRATOR:
-        require_and_consume_admin_registration_code(db, payload.get("registrationCode"))
+        preallocated_api_key = require_and_consume_admin_registration_code(
+            db,
+            payload.get("registrationCode"),
+            registration_email=payload.get("email"),
+            account_type=account_type_value,
+        )
     account_owner_id = resolve_account_owner_id(
         db,
         role=role_value.value,
@@ -121,7 +127,7 @@ def register_user(db: Session, payload: dict) -> dict:
         role=role_value,
         account_owner_id=account_owner_id,
         hashed_password=get_password_hash(payload["password"]),
-        api_key=generate_api_key(),
+        api_key=preallocated_api_key or generate_api_key(),
         address=payload.get("address", "N/A"),
     )
     db.add(owner)
