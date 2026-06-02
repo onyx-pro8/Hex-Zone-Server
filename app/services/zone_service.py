@@ -98,7 +98,7 @@ def create_zone(db: Session, owner: Owner, payload: dict) -> dict:
     ensure_unique_zone_name(db, account_owner_ids, normalized_name)
 
     zone = Zone(
-        zone_id=payload.get("id") or f"{owner.id}-{total_zones + 1}",
+        zone_id=payload.get("id") or owner.zone_id,
         owner_id=owner.id,
         creator_id=owner.id,
         zone_type=CONTRACT_TO_MODEL_ZONE_TYPE[zone_type],

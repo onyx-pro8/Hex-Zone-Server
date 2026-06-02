@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
 from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, model_validator
 from sqlalchemy.orm import Session
 
@@ -274,7 +274,11 @@ class ContractSuccessMemberLocationResponse(BaseModel):
 
 class PushTokenRequest(BaseModel):
     token: str = Field(min_length=10)
-    platform: Literal["FCM", "APNS"] = "FCM"
+    # The Expo dev/preview/production builds register an `ExponentPushToken[...]`
+    # via expo-notifications. The mobile client sends `platform: "EXPO"` for those
+    # tokens; downstream `push_notification_service` already routes EXPO tokens
+    # through the Expo Push HTTP API. FCM/APNS remain valid for native sender keys.
+    platform: Literal["EXPO", "FCM", "APNS"] = "EXPO"
 
 
 class OwnerContractResponse(BaseModel):
@@ -872,3 +876,118 @@ async def post_push_token(
     data = controllers.register_push_token(db, owner, payload.token, payload.platform)
     db.commit()
     return success_response(data)
+
+
+class PushTestRequest(BaseModel):
+    """Diagnostic test push request body.
+
+    Used by the Settings → "Send test push" button to verify end-to-end
+    delivery (Expo → FCM/APNS → device system tray) without needing a second
+    account. `delay_seconds` lets the caller close the app before the push
+    fires, so the killed-app system-tray code path is exercised.
+    """
+
+    title: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Optional notification title; defaults to 'Hex Zone test push'.",
+    )
+    message: str | None = Field(
+        default=None,
+        max_length=240,
+        description="Optional body text; defaults to a generic confirmation string.",
+    )
+    delay_seconds: int = Field(
+        default=0,
+        ge=0,
+        le=30,
+        description=(
+            "Wait this many seconds before sending so the user can close the "
+            "app and verify killed-app push delivery. Capped at 30s."
+        ),
+    )
+
+
+@router.post(
+    "/devices/push-token/test",
+    response_model=ContractSuccessAnyResponse,
+    summary="Send a diagnostic test push to the authenticated owner",
+    description=(
+        "Sends a self-test push to every active token registered for the "
+        "authenticated owner. Returns counts so the client can show "
+        "`tokens`/`push_sent`/`push_failed`. Pass `delay_seconds` to schedule "
+        "the send a few seconds after the response so you can close the app "
+        "and verify a system-tray notification appears in the killed state.\n\n"
+        "**Common failure causes:** if `tokens > 0` but no notification "
+        "arrives, the most likely cause is that the **FCM v1 service account "
+        "key** has not been uploaded on EAS for this Expo project. Run "
+        "`eas credentials` → Android → *Push Notifications: FCM V1* and "
+        "upload the service account JSON from Firebase → Project settings → "
+        "Service accounts → Generate new private key."
+    ),
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "description": "Authentication token missing or invalid.",
+        },
+    },
+    response_description=(
+        "Success envelope with `{tokens, push_sent, push_failed, scheduled?}`."
+    ),
+)
+async def post_push_token_test(
+    background_tasks: BackgroundTasks,
+    payload: PushTestRequest = Body(default_factory=PushTestRequest),
+    owner: Owner = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    from app.database import session_maker
+    from app.services import push_notification_service
+
+    title = (payload.title or "").strip() or "Hex Zone test push"
+    body = (payload.message or "").strip() or (
+        "If you can read this, push delivery works end to end."
+    )
+
+    if payload.delay_seconds <= 0:
+        result = await push_notification_service.send_test_push_to_owner(
+            db, owner.id, title=title, body=body
+        )
+        return success_response(result)
+
+    owner_id = int(owner.id)
+    delay = int(payload.delay_seconds)
+
+    async def _delayed_test_push() -> None:
+        try:
+            await asyncio.sleep(delay)
+            bg_db = session_maker()
+            try:
+                result = await push_notification_service.send_test_push_to_owner(
+                    bg_db, owner_id, title=title, body=body
+                )
+                logger = push_notification_service.logger
+                logger.info("Delayed test push finished for owner %s: %s", owner_id, result)
+            finally:
+                bg_db.close()
+        except Exception:
+            push_notification_service.logger.exception(
+                "Delayed test push failed for owner %s", owner_id
+            )
+
+    background_tasks.add_task(_delayed_test_push)
+
+    from app.models import PushToken
+
+    token_count = (
+        db.query(PushToken)
+        .filter(PushToken.owner_id == owner_id, PushToken.active.is_(True))
+        .count()
+    )
+    return success_response(
+        {
+            "scheduled": True,
+            "delay_seconds": delay,
+            "tokens": token_count,
+            "channel_id": push_notification_service.ANDROID_DEFAULT_PUSH_CHANNEL,
+        }
+    )
