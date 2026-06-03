@@ -1,11 +1,13 @@
 """Approved-guest APIs: peers, zone messages (PERMISSION/CHAT), delivery blocks."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy.orm import Session, defer
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from app.domain.message_types import (
     CanonicalMessageType,
@@ -686,14 +688,61 @@ def create_member_to_guest_zone_message(
     return event
 
 
+def _geojson_polygon_centroid(geojson: dict[str, Any]) -> dict[str, float] | None:
+    """Rough centroid from the first ring of a GeoJSON Polygon/MultiPolygon."""
+    try:
+        gtype = geojson.get("type")
+        coords = geojson.get("coordinates")
+        ring: Any = None
+        if gtype == "Polygon" and coords:
+            ring = coords[0]
+        elif gtype == "MultiPolygon" and coords:
+            ring = coords[0][0]
+        if not ring:
+            return None
+        lngs = [float(p[0]) for p in ring]
+        lats = [float(p[1]) for p in ring]
+        if not lats or not lngs:
+            return None
+        return {"lat": sum(lats) / len(lats), "lng": sum(lngs) / len(lngs)}
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+
+
 def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
-    z = (
-        db.query(Zone)
-        .options(defer(Zone.geo_fence_polygon))
-        .filter(Zone.zone_id == zone_id.strip(), Zone.active.is_(True))
-        .order_by(Zone.id.asc())
-        .first()
-    )
+    # Load the zone with its polygon serialized to GeoJSON (ST_AsGeoJSON) so a
+    # geofence circle/polygon zone (which stores geometry, not h3_cells) still
+    # gets a drawable map on the guest dashboard. ST_AsGeoJSON requires a spatial
+    # backend (PostGIS); fall back to a plain load if it is unavailable.
+    z: Zone | None = None
+    geo_fence_geojson: dict[str, Any] | None = None
+    zid = zone_id.strip()
+    try:
+        row = (
+            db.query(Zone, func.ST_AsGeoJSON(Zone.geo_fence_polygon))
+            .filter(Zone.zone_id == zid, Zone.active.is_(True))
+            .order_by(Zone.id.asc())
+            .first()
+        )
+        z = row[0] if row else None
+        if row and row[1]:
+            parsed = json.loads(row[1])
+            if isinstance(parsed, dict) and parsed.get("type") in (
+                "Polygon",
+                "MultiPolygon",
+            ):
+                geo_fence_geojson = parsed
+    except (TypeError, ValueError):
+        geo_fence_geojson = None
+    except Exception:  # pragma: no cover - spatial fn unavailable / driver error
+        db.rollback()
+        z = (
+            db.query(Zone)
+            .filter(Zone.zone_id == zid, Zone.active.is_(True))
+            .order_by(Zone.id.asc())
+            .first()
+        )
+        geo_fence_geojson = None
     label = z.name if z else zone_id
     welcome = "Welcome to the zone guest dashboard."
 
@@ -735,12 +784,18 @@ def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
                 "west": float(ww),
             }
 
+    # Prefer an explicit guest_map override; otherwise fall back to the zone's
+    # actual geofence polygon (covers circle/polygon zones that have no cells).
+    effective_geojson = geojson_fc or geo_fence_geojson
+    if center is None and geo_fence_geojson is not None:
+        center = _geojson_polygon_centroid(geo_fence_geojson)
+
     map_payload = {
         "center": center,
         "zoom": zoom_level,
         "cells": cells,
         **({"bounds": bounds} if bounds else {}),
-        **({"geojson": geojson_fc} if geojson_fc else {}),
+        **({"geojson": effective_geojson} if effective_geojson else {}),
     }
 
     return {
