@@ -158,5 +158,16 @@ def generate_qr_token() -> str:
 
 
 def generate_registration_code_token() -> str:
-    """Generate a server-issued registration code for setup wizard flows."""
-    return secrets.token_urlsafe(24)
+    """Generate a server-issued registration code for setup wizard flows.
+
+    The value MUST be stable under the normalization applied at lookup time
+    (``code.strip().upper().replace(" ", "")`` in ``crud.registration_code``).
+    ``secrets.token_urlsafe`` returns a *mixed-case* string, so a minted code
+    could never be consumed (the lookup upper-cases it and no row matched) —
+    which broke mobile administrator self-registration. We therefore emit an
+    upper-case hex code. The ``REG-`` prefix keeps it human-readable and ensures
+    it never collides with the deterministic HMAC ``XXXXXX-XXXXXX`` format.
+    """
+    raw = secrets.token_hex(9).upper()  # 18 hex chars
+    groups = [raw[i : i + 6] for i in range(0, len(raw), 6)]
+    return "REG-" + "-".join(groups)

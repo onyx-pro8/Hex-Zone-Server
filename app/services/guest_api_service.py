@@ -688,6 +688,93 @@ def create_member_to_guest_zone_message(
     return event
 
 
+def _circle_to_geojson_polygon(
+    center_lat: float,
+    center_lng: float,
+    radius_meters: float,
+    segments: int = 48,
+) -> dict[str, Any]:
+    """Approximate a circle as a GeoJSON Polygon (mirrors the client's circleToGeoJsonPolygon)."""
+    import math
+
+    earth_radius = 6371000.0
+    lat_rad = math.radians(center_lat)
+    ring: list[list[float]] = []
+    for i in range(segments):
+        angle = (2 * math.pi * i) / segments
+        d_lat = (radius_meters * math.cos(angle)) / earth_radius
+        d_lng = (radius_meters * math.sin(angle)) / (
+            earth_radius * math.cos(lat_rad)
+        )
+        new_lat = center_lat + math.degrees(d_lat)
+        new_lng = center_lng + math.degrees(d_lng)
+        ring.append([new_lng, new_lat])
+    ring.append(ring[0])
+    return {"type": "Polygon", "coordinates": [ring]}
+
+
+def _read_circle_radius_meters(config: dict[str, Any]) -> float | None:
+    """Pull a circle/proximity radius (meters) from a zone config bag."""
+    for key in ("radius_meters", "resolved_radius_meters"):
+        v = config.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    radii = config.get("radii_meters")
+    if isinstance(radii, list) and radii:
+        first = radii[0]
+        if isinstance(first, (int, float)) and first > 0:
+            return float(first)
+    return None
+
+
+def _geometry_geojson_from_parameters(
+    parameters: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build drawable GeoJSON from a zone's stored parameters.
+
+    Circle/proximity zones persist only ``geometry.center`` + ``config.radius_meters``
+    (no ``geo_fence_polygon``), so ST_AsGeoJSON returns nothing for them. Convert the
+    circle to a polygon here. Also accept a Polygon/MultiPolygon stored directly under
+    ``geometry`` as a fallback for polygon zones whose PostGIS column is unset.
+    """
+    geometry = parameters.get("geometry") if isinstance(parameters.get("geometry"), dict) else {}
+    config = parameters.get("config") if isinstance(parameters.get("config"), dict) else {}
+
+    # Polygon/MultiPolygon stored inline.
+    gtype = geometry.get("type")
+    if gtype in ("Polygon", "MultiPolygon") and geometry.get("coordinates"):
+        return geometry
+    inner = geometry.get("geo_fence_polygon")
+    if isinstance(inner, dict) and inner.get("type") in ("Polygon", "MultiPolygon"):
+        return inner
+
+    # Circle: center (lat/lng) + radius.
+    center = geometry.get("center") if isinstance(geometry.get("center"), dict) else {}
+    lat = center.get("latitude", center.get("lat"))
+    lng = center.get("longitude", center.get("lng"))
+    radius = _read_circle_radius_meters(config)
+    if (
+        isinstance(lat, (int, float))
+        and isinstance(lng, (int, float))
+        and radius is not None
+    ):
+        return _circle_to_geojson_polygon(float(lat), float(lng), radius)
+    return None
+
+
+def _geometry_center_from_parameters(
+    parameters: dict[str, Any],
+) -> dict[str, float] | None:
+    """Read an explicit ``geometry.center`` (circle/marker zones) as {lat, lng}."""
+    geometry = parameters.get("geometry") if isinstance(parameters.get("geometry"), dict) else {}
+    center = geometry.get("center") if isinstance(geometry.get("center"), dict) else {}
+    lat = center.get("latitude", center.get("lat"))
+    lng = center.get("longitude", center.get("lng"))
+    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+        return {"lat": float(lat), "lng": float(lng)}
+    return None
+
+
 def _geojson_polygon_centroid(geojson: dict[str, Any]) -> dict[str, float] | None:
     """Rough centroid from the first ring of a GeoJSON Polygon/MultiPolygon."""
     try:
@@ -707,6 +794,45 @@ def _geojson_polygon_centroid(geojson: dict[str, Any]) -> dict[str, float] | Non
         return {"lat": sum(lats) / len(lats), "lng": sum(lngs) / len(lngs)}
     except (TypeError, ValueError, IndexError, KeyError):
         return None
+
+
+def _serialize_zone_like_member(
+    z: Zone,
+    geo_fence_geojson: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Serialize a zone in the SAME shape members receive from GET /zones.
+
+    Mirrors `app.routers.zones._serialize_zone`: geometry from `parameters.geometry`
+    plus the GeoJSON `geo_fence_polygon`, and `config.h3_cells` sourced from the
+    canonical `zones.h3_cells` column. The guest receives a read-only copy so the
+    map renders identically to the owner's, with no editing capability.
+    """
+    params = z.parameters if isinstance(z.parameters, dict) else {}
+    geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
+    geometry = dict(geometry)
+    config = params.get("config") if isinstance(params.get("config"), dict) else {}
+    config = dict(config)
+
+    if "h3Cells" in config and "h3_cells" not in config:
+        config["h3_cells"] = config["h3Cells"]
+    if z.h3_cells and "h3_cells" not in config:
+        config["h3_cells"] = list(z.h3_cells)
+
+    # Prefer the serialized PostGIS polygon; fall back to one already inlined in
+    # parameters.geometry (covers DBs without spatial fns).
+    if geo_fence_geojson and "geo_fence_polygon" not in geometry:
+        geometry["geo_fence_polygon"] = geo_fence_geojson
+
+    return {
+        "id": z.id,
+        "zone_id": z.zone_id,
+        "owner_id": z.owner_id,
+        "name": z.name,
+        "type": params.get("contractType"),
+        "geometry": geometry,
+        "config": config,
+        "h3_cells": list(z.h3_cells) if z.h3_cells else [],
+    }
 
 
 def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
@@ -784,11 +910,31 @@ def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
                 "west": float(ww),
             }
 
+    # Circle/proximity zones store geometry as center + radius in `parameters`
+    # (NOT as geo_fence_polygon), so ST_AsGeoJSON above returns nothing for them.
+    # Build a drawable polygon from the stored parameters as a final fallback.
+    geometry_geojson: dict[str, Any] | None = None
+    geometry_center: dict[str, float] | None = None
+    if z:
+        zone_params = z.parameters if isinstance(z.parameters, dict) else {}
+        geometry_geojson = _geometry_geojson_from_parameters(zone_params)
+        geometry_center = _geometry_center_from_parameters(zone_params)
+
+    # Read-only copy of the zone in the SAME shape members get from GET /zones,
+    # so a guest can render the identical map (geometry / config.h3_cells /
+    # geo_fence_polygon) without any editing capability.
+    zone_serialized = _serialize_zone_like_member(z, geo_fence_geojson) if z else None
+
     # Prefer an explicit guest_map override; otherwise fall back to the zone's
-    # actual geofence polygon (covers circle/polygon zones that have no cells).
-    effective_geojson = geojson_fc or geo_fence_geojson
+    # actual geofence polygon (covers polygon zones), then to the geometry stored
+    # in parameters (covers circle/proximity zones that have no cells/polygon).
+    effective_geojson = geojson_fc or geo_fence_geojson or geometry_geojson
     if center is None and geo_fence_geojson is not None:
         center = _geojson_polygon_centroid(geo_fence_geojson)
+    if center is None and geometry_center is not None:
+        center = geometry_center
+    if center is None and geometry_geojson is not None:
+        center = _geojson_polygon_centroid(geometry_geojson)
 
     map_payload = {
         "center": center,
@@ -805,4 +951,5 @@ def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
         "links": [],
         "cells": cells,
         "map": map_payload,
+        **({"zone": zone_serialized} if zone_serialized else {}),
     }

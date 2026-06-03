@@ -206,6 +206,14 @@ class GuestDashboardData(BaseModel):
             "Polygon geometry is intentionally omitted unless configured on **`zones.parameters.guest_map`**."
         ),
     )
+    zone: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Read-only copy of the zone in the SAME shape members get from **`GET /zones`** "
+            "(**`geometry`**, **`config.h3_cells`**, **`geo_fence_polygon`** as GeoJSON). Lets guests "
+            "render the exact same map as the owner without any zone-editing capability."
+        ),
+    )
 
 
 class GuestDashboardResponse(BaseModel):

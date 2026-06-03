@@ -29,7 +29,11 @@ def create_registration_code(
             else stripped
         )
     else:
-        token = generate_registration_code_token()
+        # Server-minted codes (mobile auto-issue flow) must be stored in the
+        # SAME normalized form used by get_registration_code/try_consume_*
+        # below, otherwise the upper-casing lookup can never match the row and
+        # registration fails with "invalid registration code".
+        token = generate_registration_code_token().strip().upper().replace(" ", "")
     if expires_at is None:
         hours = expires_in_hours if expires_in_hours is not None else 24
         expires_at = datetime.utcnow() + timedelta(hours=hours)
