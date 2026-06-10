@@ -14,7 +14,7 @@ from app.crud import owner as owner_crud
 from app.database import get_db
 from app.middleware.auth import require_auth
 from app.core.config import settings
-from app.models import Owner, OwnerSettings, ZoneMessageEvent
+from app.models import Device, Owner, OwnerSettings, PushToken, ZoneMessageEvent
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.utils.api_response import success_response
 from app.websocket.manager import ws_manager
@@ -1067,6 +1067,46 @@ def _seed_address_from_owner(raw_address: str | None) -> AddressSettingsModel:
     )
 
 
+def _seed_empty_shared_fields(
+    sn: SharedNotificationSettingsModel,
+    owner: Owner,
+    db: Session,
+) -> None:
+    """Fall back to the owner's live account data for any blank integration field.
+
+    The HID, Network ID and API Key on the Settings page describe how this
+    account is reachable. Until the operator overrides them with external
+    sharednotification.com credentials we surface the real values we already
+    hold instead of leaving the fields blank:
+
+    - API Key   -> ``owners.api_key`` (the account's own Hex Zone key)
+    - HID       -> the owner's primary device hardware id (``devices.hid``)
+    - Network ID-> the owner's most recent active push token (``push_tokens.token``)
+
+    Any value the operator has saved (non-empty) always takes precedence.
+    """
+    if not sn.api_key:
+        sn.api_key = owner.api_key or ""
+
+    if not sn.hid:
+        device = (
+            db.query(Device)
+            .filter(Device.owner_id == owner.id)
+            .order_by(Device.created_at.asc())
+            .first()
+        )
+        sn.hid = (device.hid if device else "") or ""
+
+    if not sn.network_id:
+        push = (
+            db.query(PushToken)
+            .filter(PushToken.owner_id == owner.id, PushToken.active.is_(True))
+            .order_by(PushToken.updated_at.desc())
+            .first()
+        )
+        sn.network_id = (push.token if push else "") or ""
+
+
 def _settings_to_model(row: OwnerSettings) -> AppSettingsModel:
     return AppSettingsModel(
         broadcast_name=row.broadcast_name or "",
@@ -1104,7 +1144,9 @@ async def get_my_settings(
 ):
     row = db.get(OwnerSettings, owner.id)
     if row is not None:
-        return success_response(_settings_to_model(row).model_dump(by_alias=True))
+        model = _settings_to_model(row)
+        _seed_empty_shared_fields(model.shared_notification, owner, db)
+        return success_response(model.model_dump(by_alias=True))
 
     # First load: seed only the structured address from the signup account.
     # `broadcast_name` is intentionally left blank — it is the optional
@@ -1115,6 +1157,7 @@ async def get_my_settings(
         broadcast_name="",
         address=_seed_address_from_owner(owner.address),
     )
+    _seed_empty_shared_fields(seeded.shared_notification, owner, db)
     return success_response(seeded.model_dump(by_alias=True))
 
 
@@ -1148,4 +1191,6 @@ async def put_my_settings(
 
     db.commit()
     db.refresh(row)
-    return success_response(_settings_to_model(row).model_dump(by_alias=True))
+    model = _settings_to_model(row)
+    _seed_empty_shared_fields(model.shared_notification, owner, db)
+    return success_response(model.model_dump(by_alias=True))
