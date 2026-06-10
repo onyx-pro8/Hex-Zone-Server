@@ -1,5 +1,6 @@
 """Contract-compatible routes."""
 import asyncio
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -13,7 +14,7 @@ from app.crud import owner as owner_crud
 from app.database import get_db
 from app.middleware.auth import require_auth
 from app.core.config import settings
-from app.models import Owner, ZoneMessageEvent
+from app.models import Owner, OwnerSettings, ZoneMessageEvent
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.utils.api_response import success_response
 from app.websocket.manager import ws_manager
@@ -991,3 +992,155 @@ async def post_push_token_test(
             "channel_id": push_notification_service.ANDROID_DEFAULT_PUSH_CHANNEL,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Owner application settings (broadcast identity, structured home address,
+# shared-notification integration, quick-alert messages). Persisted per owner
+# so they survive a new device / cleared browser localStorage.
+# ---------------------------------------------------------------------------
+
+
+class AddressSettingsModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    number_street: str = Field(default="", validation_alias=AliasChoices("numberStreet", "number_street"), serialization_alias="numberStreet")
+    street_name: str = Field(default="", validation_alias=AliasChoices("streetName", "street_name"), serialization_alias="streetName")
+    city: str = Field(default="")
+    state_province: str = Field(default="", validation_alias=AliasChoices("stateProvince", "state_province"), serialization_alias="stateProvince")
+    city_code: str = Field(default="", validation_alias=AliasChoices("cityCode", "city_code"), serialization_alias="cityCode")
+
+
+class SharedNotificationSettingsModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    hid: str = Field(default="")
+    network_id: str = Field(default="", validation_alias=AliasChoices("networkId", "network_id"), serialization_alias="networkId")
+    api_key: str = Field(default="", validation_alias=AliasChoices("apiKey", "api_key"), serialization_alias="apiKey")
+    webhook: str = Field(default="/alertname")
+    periodical_check_sec: str = Field(default="86400", validation_alias=AliasChoices("periodicalCheckSec", "periodical_check_sec"), serialization_alias="periodicalCheckSec")
+
+
+class AppSettingsModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    broadcast_name: str = Field(default="", validation_alias=AliasChoices("broadcastName", "broadcast_name"), serialization_alias="broadcastName")
+    address: AddressSettingsModel = Field(default_factory=AddressSettingsModel)
+    shared_notification: SharedNotificationSettingsModel = Field(
+        default_factory=SharedNotificationSettingsModel,
+        validation_alias=AliasChoices("sharedNotification", "shared_notification"),
+        serialization_alias="sharedNotification",
+    )
+    quick_messages: dict[str, str] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("quickMessages", "quick_messages"),
+        serialization_alias="quickMessages",
+    )
+
+
+def _seed_address_from_owner(raw_address: str | None) -> AddressSettingsModel:
+    """Best-effort split of the single signup address string into structured parts.
+
+    The signup form only captures one free-form string (e.g.
+    "169 Fred Young Drive, Toronto, Ontario, M3L 0A6"), so this seeds the
+    structured fields on first load. The user can correct and save afterwards.
+    """
+    parts = [p.strip() for p in (raw_address or "").split(",")]
+    first = parts[0] if len(parts) > 0 else ""
+    city = parts[1] if len(parts) > 1 else ""
+    state_province = parts[2] if len(parts) > 2 else ""
+    city_code = parts[3] if len(parts) > 3 else ""
+
+    number = ""
+    street = first
+    match = re.match(r"^\s*(\d+[A-Za-z]?)\s+(.*)$", first)
+    if match:
+        number = match.group(1)
+        street = match.group(2).strip()
+
+    return AddressSettingsModel(
+        number_street=number,
+        street_name=street,
+        city=city,
+        state_province=state_province,
+        city_code=city_code,
+    )
+
+
+def _settings_to_model(row: OwnerSettings) -> AppSettingsModel:
+    return AppSettingsModel(
+        broadcast_name=row.broadcast_name or "",
+        address=AddressSettingsModel(
+            number_street=row.address_number_street or "",
+            street_name=row.address_street_name or "",
+            city=row.address_city or "",
+            state_province=row.address_state_province or "",
+            city_code=row.address_city_code or "",
+        ),
+        shared_notification=SharedNotificationSettingsModel(
+            hid=row.sn_hid or "",
+            network_id=row.sn_network_id or "",
+            api_key=row.sn_api_key or "",
+            webhook=row.sn_webhook or "/alertname",
+            periodical_check_sec=row.sn_periodical_check_sec or "86400",
+        ),
+        quick_messages=dict(row.quick_messages or {}),
+    )
+
+
+@router.get(
+    "/me/settings",
+    summary="Get owner application settings",
+    description=(
+        "Return the authenticated owner's broadcast identity, structured home "
+        "address, shared-notification integration, and quick-alert messages. "
+        "On first load (no saved settings) the broadcast name and address are "
+        "seeded from the account created at signup."
+    ),
+)
+async def get_my_settings(
+    owner: Owner = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.get(OwnerSettings, owner.id)
+    if row is not None:
+        return success_response(_settings_to_model(row).model_dump(by_alias=True))
+
+    seeded = AppSettingsModel(
+        broadcast_name=f"{owner.first_name} {owner.last_name}".strip(),
+        address=_seed_address_from_owner(owner.address),
+    )
+    return success_response(seeded.model_dump(by_alias=True))
+
+
+@router.put(
+    "/me/settings",
+    summary="Update owner application settings",
+    description="Create or replace the authenticated owner's application settings.",
+)
+async def put_my_settings(
+    payload: AppSettingsModel,
+    owner: Owner = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.get(OwnerSettings, owner.id)
+    if row is None:
+        row = OwnerSettings(owner_id=owner.id)
+        db.add(row)
+
+    row.broadcast_name = payload.broadcast_name
+    row.address_number_street = payload.address.number_street
+    row.address_street_name = payload.address.street_name
+    row.address_city = payload.address.city
+    row.address_state_province = payload.address.state_province
+    row.address_city_code = payload.address.city_code
+    row.sn_hid = payload.shared_notification.hid
+    row.sn_network_id = payload.shared_notification.network_id
+    row.sn_api_key = payload.shared_notification.api_key
+    row.sn_webhook = payload.shared_notification.webhook
+    row.sn_periodical_check_sec = payload.shared_notification.periodical_check_sec
+    row.quick_messages = dict(payload.quick_messages or {})
+
+    db.commit()
+    db.refresh(row)
+    return success_response(_settings_to_model(row).model_dump(by_alias=True))

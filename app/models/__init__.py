@@ -16,9 +16,11 @@ from app.models.guest_access_qr_token import GuestAccessQrToken
 from app.models.guest_access_qr_token_audit import GuestAccessQrTokenAudit
 from app.models.guest_pass import GuestPass
 from app.models.guest_access_zone_message import GuestAccessZoneMessage
+from app.models.owner_settings import OwnerSettings
 
 __all__ = [
     "Owner",
+    "OwnerSettings",
     "Device",
     "Zone",
     "QRRegistration",
