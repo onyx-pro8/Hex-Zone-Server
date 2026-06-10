@@ -1106,8 +1106,13 @@ async def get_my_settings(
     if row is not None:
         return success_response(_settings_to_model(row).model_dump(by_alias=True))
 
+    # First load: seed only the structured address from the signup account.
+    # `broadcast_name` is intentionally left blank — it is the optional
+    # message-display name and falls back to the owner's first/last name at
+    # send time (see `resolveBroadcastName` on the clients). Persisting the
+    # account name here would conflate the two distinct concepts.
     seeded = AppSettingsModel(
-        broadcast_name=f"{owner.first_name} {owner.last_name}".strip(),
+        broadcast_name="",
         address=_seed_address_from_owner(owner.address),
     )
     return success_response(seeded.model_dump(by_alias=True))

@@ -30,6 +30,10 @@ class Owner(Base):
     zone_id = Column(String(100), nullable=False, index=True)
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
+    # Optional display name for outgoing messages. When blank, clients and the
+    # API fall back to ``first_name`` + ``last_name``. Distinct from the
+    # account identity fields — never auto-filled from them.
+    broadcast_name = Column(String(255), nullable=False, default="")
     account_type = Column(Enum(AccountType), nullable=False, default=AccountType.PRIVATE)
     role = Column(Enum(OwnerRole), nullable=False, default=OwnerRole.ADMINISTRATOR)
     account_owner_id = Column(Integer, ForeignKey("owners.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -79,6 +83,15 @@ class Owner(Base):
         Index("ix_owner_zone_id", "zone_id"),
         Index("ix_owner_api_key", "api_key"),
     )
+
+    @property
+    def message_display_name(self) -> str:
+        """Name shown on messages: custom broadcast name, else first + last."""
+        configured = (self.broadcast_name or "").strip()
+        if configured:
+            return configured
+        full = f"{self.first_name} {self.last_name}".strip()
+        return full or self.email or "Member"
 
     def __repr__(self) -> str:
         return f"<Owner(id={self.id}, email={self.email}, account_type={self.account_type})>"
