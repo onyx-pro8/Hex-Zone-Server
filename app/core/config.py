@@ -1,6 +1,10 @@
 """Configuration management for Zone Weaver backend."""
+from typing import Optional
+from urllib.parse import quote_plus
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
@@ -16,7 +20,21 @@ class Settings(BaseSettings):
     )
 
     # Database
+    # Two ways to configure the connection:
+    #   1. Set the full DATABASE_URL (port may be embedded as host:PORT/db).
+    #   2. Set discrete DB_* components (DB_HOST takes precedence when present).
+    # When DB_PORT is set in the environment it always defines/overrides the
+    # connection port (even if DATABASE_URL embeds a different one). When left
+    # unset, the URL's own port is kept, falling back to 5432. Read
+    # `sqlalchemy_database_url` (not DATABASE_URL directly) to get the resolved
+    # connection string.
     DATABASE_URL: str = "postgresql+psycopg2://zoneweaver_db_user:FJdjpGjfLn4Fa9VfM2FCRXSfX13jg2rk@dpg-d7bscjggjchc73fhscf0-a.oregon-postgres.render.com/zoneweaver_db_5isc"
+    DB_DRIVER: str = "postgresql+psycopg2"
+    DB_HOST: str = ""
+    DB_PORT: Optional[int] = None
+    DB_USER: str = ""
+    DB_PASSWORD: str = ""
+    DB_NAME: str = ""
 
     # JWT
     SECRET_KEY: str = "your-secret-key-change-in-production-minimum-32-chars-required"
@@ -104,6 +122,30 @@ class Settings(BaseSettings):
     SMTP_FROM: str = ""
     SMTP_USE_SSL: bool = True
     SMTP_TIMEOUT_SECONDS: int = 15
+
+    @property
+    def sqlalchemy_database_url(self) -> str:
+        """Resolved DB connection string with an explicit port.
+
+        If discrete ``DB_HOST`` is set, the URL is built from the ``DB_*``
+        components (``DB_PORT`` or 5432). Otherwise ``DATABASE_URL`` is used:
+        when ``DB_PORT`` is provided it overrides any embedded port, and when
+        it is unset the URL's own port is kept (falling back to 5432).
+        """
+        if self.DB_HOST:
+            password = quote_plus(self.DB_PASSWORD)
+            port = self.DB_PORT or 5432
+            return (
+                f"{self.DB_DRIVER}://{self.DB_USER}:{password}"
+                f"@{self.DB_HOST}:{port}/{self.DB_NAME}"
+            )
+
+        url = make_url(self.DATABASE_URL)
+        if self.DB_PORT is not None:
+            url = url.set(port=self.DB_PORT)
+        elif url.port is None:
+            url = url.set(port=5432)
+        return url.render_as_string(hide_password=False)
 
 
 settings = Settings()

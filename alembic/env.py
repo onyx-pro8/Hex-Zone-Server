@@ -1,7 +1,12 @@
 """Alembic environment configuration."""
+import sys
+from pathlib import Path
+
+# Allow `import app.*` when Alembic is invoked from the server project root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import engine_from_config, inspect, pool, text
 from alembic import context
 import app.models  # noqa: F401
 from app.database import Base
@@ -18,7 +23,25 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 # other values from the config become here
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", settings.sqlalchemy_database_url)
+
+def _ensure_alembic_version_table(connection) -> None:
+    """Use VARCHAR(255) so long revision IDs (e.g. 002_change_zone_polygon_to_multipolygon) fit."""
+    if connection.dialect.name != "postgresql":
+        return
+    inspector = inspect(connection)
+    if "alembic_version" not in inspector.get_table_names():
+        connection.execute(
+            text(
+                "CREATE TABLE alembic_version ("
+                "version_num VARCHAR(255) NOT NULL PRIMARY KEY"
+                ")"
+            )
+        )
+        return
+    connection.execute(
+        text("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)")
+    )
 
 
 def run_migrations_offline() -> None:
@@ -36,6 +59,7 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection):
+    _ensure_alembic_version_table(connection)
     context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():
@@ -45,7 +69,7 @@ def do_run_migrations(connection):
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
     configuration = config.get_section(config.config_ini_section)
-    configuration["sqlalchemy.url"] = settings.DATABASE_URL
+    configuration["sqlalchemy.url"] = settings.sqlalchemy_database_url
     
     connectable = engine_from_config(
         configuration,

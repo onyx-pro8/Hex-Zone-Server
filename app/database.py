@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from app.core.config import settings
 
-_db_url = settings.DATABASE_URL
+_db_url = settings.sqlalchemy_database_url
 _engine_kwargs = {
     "echo": False,
     "future": True,
@@ -64,6 +64,11 @@ def patch_owner_location_columns() -> None:
         # transaction via SET LOCAL.
         conn.execute(text("SET LOCAL lock_timeout = '5s';"))
         conn.execute(text("SET LOCAL statement_timeout = '8s';"))
+        # On a fresh database `owners` does not exist yet; `create_all()` will
+        # create it with these columns already present, so this patch (which only
+        # back-fills columns onto an EXISTING table) has nothing to do.
+        if conn.execute(text("SELECT to_regclass('public.owners')")).scalar() is None:
+            return
         conn.execute(
             text("ALTER TABLE owners ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;")
         )
@@ -107,6 +112,10 @@ def patch_registration_code_email_columns() -> None:
     with engine.begin() as conn:
         conn.execute(text("SET LOCAL lock_timeout = '5s';"))
         conn.execute(text("SET LOCAL statement_timeout = '8s';"))
+        # Fresh database: `registration_codes` is created by `create_all()` with
+        # these columns already present, so there is nothing to back-fill.
+        if conn.execute(text("SELECT to_regclass('public.registration_codes')")).scalar() is None:
+            return
         conn.execute(
             text("ALTER TABLE registration_codes ADD COLUMN IF NOT EXISTS email VARCHAR(255);")
         )
@@ -376,7 +385,7 @@ def init_db():
                     SET scope = CASE
                         WHEN message_type IN ('PRIVATE', 'PERMISSION', 'CHAT') THEN 'private'
                         ELSE 'public'
-                    END
+                    END::messagescope
                     WHERE scope IS NULL OR scope::text = '';
                     """
                 )
@@ -384,8 +393,8 @@ def init_db():
             try:
                 conn.execute(
                     text(
-                        "UPDATE messages SET visibility = scope "
-                        "WHERE visibility IS DISTINCT FROM scope::messagevisibility;"
+                        "UPDATE messages SET visibility = scope::text::messagevisibility "
+                        "WHERE visibility IS DISTINCT FROM scope::text::messagevisibility;"
                     )
                 )
             except Exception as exc:
@@ -407,7 +416,7 @@ def init_db():
                         WHEN type::text IN ('PRIVATE','PA','SERVICE','WELLNESS_CHECK') THEN 'Alert'
                         WHEN type::text IN ('PERMISSION','CHAT') THEN 'Access'
                         ELSE 'Alert'
-                    END
+                    END::messagecategory
                     WHERE category IS NULL OR category::text = '';
                     """
                 )
@@ -419,7 +428,7 @@ def init_db():
                     SET scope = CASE
                         WHEN type::text IN ('PRIVATE','PERMISSION','CHAT') THEN 'private'
                         ELSE 'public'
-                    END
+                    END::messagescope
                     WHERE scope IS NULL OR scope::text = '';
                     """
                 )
