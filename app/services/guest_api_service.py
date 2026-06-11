@@ -402,11 +402,25 @@ def zone_message_event_to_member_zone_message_response(
         if sess is not None:
             session_pending = bool(sess.kind == "unexpected" and (sess.resolution or "") == "pending")
 
+    # Sender display name: prefer a broadcast name embedded in the event payload
+    # (set by clients), else the sender owner's broadcast name / first+last.
+    broadcast_name = None
+    embedded = meta.get("broadcast_name") or meta.get("broadcastName")
+    if isinstance(embedded, str) and embedded.strip():
+        broadcast_name = embedded.strip()
+    elif db is not None and row.sender_id is not None:
+        from app.models import Owner
+
+        sender_owner = db.get(Owner, row.sender_id)
+        if sender_owner is not None:
+            broadcast_name = sender_owner.message_display_name
+
     return ZoneMessageResponse(
         id=row.id,
         zone_id=row.zone_id,
         sender_id=row.sender_id,
         receiver_id=row.receiver_id,
+        broadcast_name=broadcast_name,
         type=row.type,
         category=type_category(gtype).value,
         scope=type_scope(gtype).value,

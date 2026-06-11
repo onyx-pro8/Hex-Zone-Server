@@ -16,7 +16,7 @@ from app.domain.message_types import (
     type_category,
     type_scope,
 )
-from app.models import GuestAccessSession, ZoneMessageEvent
+from app.models import GuestAccessSession, Owner, ZoneMessageEvent
 from app.services import guest_api_service
 from app.services import guest_access_service
 from app.services.access_policy import can_message_owner
@@ -32,6 +32,15 @@ def _first_non_empty_str(*vals: str | None) -> str:
         if s:
             return s
     return ""
+
+
+def _broadcast_names_for_messages(db: Session, messages) -> dict[int, str]:
+    """Map sender_id -> display name (broadcast name, else first + last)."""
+    ids = {m.sender_id for m in messages if m.sender_id is not None}
+    if not ids:
+        return {}
+    owners = db.query(Owner).filter(Owner.id.in_(ids)).all()
+    return {o.id: o.message_display_name for o in owners}
 
 
 @router.post(
@@ -288,6 +297,7 @@ async def create_message(
         zone_id=sender.zone_id,
         sender_id=db_message.sender_id,
         receiver_id=db_message.receiver_id,
+        broadcast_name=sender.message_display_name,
         type=db_message.message_type,
         category=type_category(canonical_type).value,
         scope=derived_scope.value,
@@ -429,12 +439,14 @@ async def _list_zone_messages_for_owner(
             skip=skip,
             limit=limit,
         )
+        peer_names = _broadcast_names_for_messages(db, peer_rows)
         peer_responses = [
             ZoneMessageResponse(
                 id=message.id,
                 zone_id=owner.zone_id,
                 sender_id=message.sender_id,
                 receiver_id=message.receiver_id,
+                broadcast_name=peer_names.get(message.sender_id),
                 type=message.message_type,
                 category=type_category(normalize_message_type(message.message_type)).value,
                 scope=type_scope(normalize_message_type(message.message_type)).value,
@@ -454,12 +466,14 @@ async def _list_zone_messages_for_owner(
         skip=0,
         limit=fetch_cap,
     )
+    inbox_names = _broadcast_names_for_messages(db, inbox_rows)
     msg_responses = [
         ZoneMessageResponse(
             id=message.id,
             zone_id=owner.zone_id,
             sender_id=message.sender_id,
             receiver_id=message.receiver_id,
+            broadcast_name=inbox_names.get(message.sender_id),
             type=message.message_type,
             category=type_category(normalize_message_type(message.message_type)).value,
             scope=type_scope(normalize_message_type(message.message_type)).value,

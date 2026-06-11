@@ -553,6 +553,14 @@ class ZoneMessageResponse(BaseModel):
             "member→guest Access **CHAT** often **`null`** (guest is **`guest_id`** field)."
         ),
     )
+    broadcast_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Display name for the sender: the owner's **`broadcast_name`** when set, "
+            "otherwise their first + last name. Use this to label messages instead of "
+            "the numeric **`sender_id`**."
+        ),
+    )
     type: str = Field(description="Canonical message type string (e.g. **CHAT**, **PERMISSION**).")
     category: str = Field(description="Derived **Access** / **Alarm** / **Alert** grouping.")
     scope: str = Field(description="**public** or **private** scope for this type.")

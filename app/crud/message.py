@@ -51,6 +51,7 @@ def list_visible_messages(
         .join(sender_owner, sender_owner.id == Message.sender_id)
         .where(sender_owner.zone_id == owner_zone_subquery)
         .where(visibility_filter)
+        .where(Message.is_template.is_(False))
         .order_by(Message.created_at.desc())
         .offset(skip)
         .limit(limit)

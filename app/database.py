@@ -83,6 +83,54 @@ def patch_owner_location_columns() -> None:
         )
         conn.execute(
             text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS broadcast_name "
+                "VARCHAR(255) NOT NULL DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS sn_webhook "
+                "VARCHAR(255) NOT NULL DEFAULT '/alertname';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS sn_periodical_check_sec "
+                "VARCHAR(32) NOT NULL DEFAULT '86400';"
+            )
+        )
+        # Migrate any data from the now-removed owner_settings table into the
+        # canonical owners columns, then drop it. Idempotent: the table is gone
+        # after the first successful run.
+        if conn.execute(text("SELECT to_regclass('public.owner_settings')")).scalar() is not None:
+            conn.execute(
+                text(
+                    """
+                    UPDATE owners o
+                    SET broadcast_name = os.broadcast_name
+                    FROM owner_settings os
+                    WHERE o.id = os.owner_id
+                      AND COALESCE(os.broadcast_name, '') <> ''
+                      AND COALESCE(o.broadcast_name, '') = '';
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE owners o
+                    SET sn_webhook = COALESCE(NULLIF(os.sn_webhook, ''), o.sn_webhook),
+                        sn_periodical_check_sec = COALESCE(
+                            NULLIF(os.sn_periodical_check_sec, ''), o.sn_periodical_check_sec
+                        )
+                    FROM owner_settings os
+                    WHERE o.id = os.owner_id;
+                    """
+                )
+            )
+            conn.execute(text("DROP TABLE IF EXISTS owner_settings;"))
+        conn.execute(
+            text(
                 """
                 UPDATE owners o
                 SET latitude = ml.latitude,
@@ -149,6 +197,20 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
     if engine.dialect.name == "postgresql":
+        # Quick-alert templates live in `messages` flagged with is_template.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_template "
+                    "BOOLEAN NOT NULL DEFAULT FALSE;"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_messages_is_template "
+                    "ON messages (is_template);"
+                )
+            )
         # Guest arrival copy: tiny transaction so ORM never hits UndefinedColumn if a later patch fails.
         with engine.begin() as conn:
             conn.execute(

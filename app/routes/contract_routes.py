@@ -14,7 +14,8 @@ from app.crud import owner as owner_crud
 from app.database import get_db
 from app.middleware.auth import require_auth
 from app.core.config import settings
-from app.models import Device, Owner, OwnerSettings, PushToken, ZoneMessageEvent
+from app.models import Device, Message, Owner, PushToken, ZoneMessageEvent
+from app.models.message import MessageVisibility
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.utils.api_response import success_response
 from app.websocket.manager import ws_manager
@@ -1067,6 +1068,21 @@ def _seed_address_from_owner(raw_address: str | None) -> AddressSettingsModel:
     )
 
 
+def _address_model_to_single_line(addr: AddressSettingsModel) -> str:
+    """Compose the structured address fields into one signup-style string."""
+    line1 = " ".join(
+        part
+        for part in [(addr.number_street or "").strip(), (addr.street_name or "").strip()]
+        if part
+    )
+    parts = [line1] if line1 else []
+    for part in [addr.city, addr.state_province, addr.city_code]:
+        value = (part or "").strip()
+        if value:
+            parts.append(value)
+    return ", ".join(parts)
+
+
 def _seed_empty_shared_fields(
     sn: SharedNotificationSettingsModel,
     owner: Owner,
@@ -1107,25 +1123,70 @@ def _seed_empty_shared_fields(
         sn.network_id = (push.token if push else "") or ""
 
 
-def _settings_to_model(row: OwnerSettings) -> AppSettingsModel:
-    return AppSettingsModel(
-        broadcast_name=row.broadcast_name or "",
-        address=AddressSettingsModel(
-            number_street=row.address_number_street or "",
-            street_name=row.address_street_name or "",
-            city=row.address_city or "",
-            state_province=row.address_state_province or "",
-            city_code=row.address_city_code or "",
-        ),
-        shared_notification=SharedNotificationSettingsModel(
-            hid=row.sn_hid or "",
-            network_id=row.sn_network_id or "",
-            api_key=row.sn_api_key or "",
-            webhook=row.sn_webhook or "/alertname",
-            periodical_check_sec=row.sn_periodical_check_sec or "86400",
-        ),
-        quick_messages=dict(row.quick_messages or {}),
+def _load_quick_messages(db: Session, owner_id: int) -> dict[str, str]:
+    """Read this owner's quick-alert templates from the `messages` table.
+
+    Templates are `messages` rows flagged `is_template=True`, one per message
+    type, keyed here by the canonical message type string.
+    """
+    rows = (
+        db.query(Message)
+        .filter(Message.sender_id == owner_id, Message.is_template.is_(True))
+        .all()
     )
+    return {row.message_type: row.message or "" for row in rows}
+
+
+def _save_quick_messages(db: Session, owner_id: int, quick_messages: dict[str, str]) -> None:
+    """Replace this owner's quick-alert templates in the `messages` table.
+
+    Existing template rows are removed and re-created from the payload so the
+    stored set always matches what the client sent. Blank bodies are skipped.
+    """
+    db.query(Message).filter(
+        Message.sender_id == owner_id, Message.is_template.is_(True)
+    ).delete(synchronize_session=False)
+
+    for raw_type, body in (quick_messages or {}).items():
+        text = (body or "").strip()
+        if not text:
+            continue
+        try:
+            canonical = normalize_message_type(raw_type)
+        except ValueError:
+            continue
+        scope = type_scope(canonical)
+        db.add(
+            Message(
+                sender_id=owner_id,
+                receiver_id=owner_id,
+                visibility=MessageVisibility(scope.value),
+                scope=scope,
+                message_type=canonical.value,
+                message=text,
+                is_template=True,
+            )
+        )
+
+
+def _owner_to_settings_model(owner: Owner, db: Session) -> AppSettingsModel:
+    """Build the Settings-page payload from the owner profile + live sources.
+
+    - broadcast name / address / webhook / periodical check -> `owners`
+    - HID / network id / api key -> derived from devices / push tokens / api_key
+    - quick messages -> `messages` template rows
+    """
+    model = AppSettingsModel(
+        broadcast_name=(owner.broadcast_name or "").strip(),
+        address=_seed_address_from_owner(owner.address),
+        shared_notification=SharedNotificationSettingsModel(
+            webhook=owner.sn_webhook or "/alertname",
+            periodical_check_sec=owner.sn_periodical_check_sec or "86400",
+        ),
+        quick_messages=_load_quick_messages(db, owner.id),
+    )
+    _seed_empty_shared_fields(model.shared_notification, owner, db)
+    return model
 
 
 @router.get(
@@ -1134,63 +1195,49 @@ def _settings_to_model(row: OwnerSettings) -> AppSettingsModel:
     description=(
         "Return the authenticated owner's broadcast identity, structured home "
         "address, shared-notification integration, and quick-alert messages. "
-        "On first load (no saved settings) the broadcast name and address are "
-        "seeded from the account created at signup."
+        "Broadcast name + address + webhook/periodical check come from the "
+        "`owners` row; HID/network id/api key are derived from the owner's "
+        "devices, push tokens and account api key; quick messages come from the "
+        "`messages` table (template rows)."
     ),
 )
 async def get_my_settings(
     owner: Owner = Depends(require_auth),
     db: Session = Depends(get_db),
 ):
-    row = db.get(OwnerSettings, owner.id)
-    if row is not None:
-        model = _settings_to_model(row)
-        _seed_empty_shared_fields(model.shared_notification, owner, db)
-        return success_response(model.model_dump(by_alias=True))
-
-    # First load: seed only the structured address from the signup account.
-    # `broadcast_name` is intentionally left blank — it is the optional
-    # message-display name and falls back to the owner's first/last name at
-    # send time (see `resolveBroadcastName` on the clients). Persisting the
-    # account name here would conflate the two distinct concepts.
-    seeded = AppSettingsModel(
-        broadcast_name="",
-        address=_seed_address_from_owner(owner.address),
-    )
-    _seed_empty_shared_fields(seeded.shared_notification, owner, db)
-    return success_response(seeded.model_dump(by_alias=True))
+    model = _owner_to_settings_model(owner, db)
+    return success_response(model.model_dump(by_alias=True))
 
 
 @router.put(
     "/me/settings",
     summary="Update owner application settings",
-    description="Create or replace the authenticated owner's application settings.",
+    description=(
+        "Persist the authenticated owner's editable settings. Broadcast name, "
+        "address and the webhook / periodical-check values are stored on the "
+        "`owners` row; quick messages are stored as `messages` template rows. "
+        "The HID / network id / api key fields are derived and ignored on save."
+    ),
 )
 async def put_my_settings(
     payload: AppSettingsModel,
     owner: Owner = Depends(require_auth),
     db: Session = Depends(get_db),
 ):
-    row = db.get(OwnerSettings, owner.id)
-    if row is None:
-        row = OwnerSettings(owner_id=owner.id)
-        db.add(row)
+    owner.broadcast_name = (payload.broadcast_name or "").strip()
 
-    row.broadcast_name = payload.broadcast_name
-    row.address_number_street = payload.address.number_street
-    row.address_street_name = payload.address.street_name
-    row.address_city = payload.address.city
-    row.address_state_province = payload.address.state_province
-    row.address_city_code = payload.address.city_code
-    row.sn_hid = payload.shared_notification.hid
-    row.sn_network_id = payload.shared_notification.network_id
-    row.sn_api_key = payload.shared_notification.api_key
-    row.sn_webhook = payload.shared_notification.webhook
-    row.sn_periodical_check_sec = payload.shared_notification.periodical_check_sec
-    row.quick_messages = dict(payload.quick_messages or {})
+    formatted_address = _address_model_to_single_line(payload.address)
+    if formatted_address:
+        owner.address = formatted_address
+
+    owner.sn_webhook = (payload.shared_notification.webhook or "/alertname").strip() or "/alertname"
+    owner.sn_periodical_check_sec = (
+        (payload.shared_notification.periodical_check_sec or "86400").strip() or "86400"
+    )
+
+    _save_quick_messages(db, owner.id, payload.quick_messages)
 
     db.commit()
-    db.refresh(row)
-    model = _settings_to_model(row)
-    _seed_empty_shared_fields(model.shared_notification, owner, db)
+    db.refresh(owner)
+    model = _owner_to_settings_model(owner, db)
     return success_response(model.model_dump(by_alias=True))
