@@ -23,12 +23,16 @@ COPY . .
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Expose port
-EXPOSE 8000
+# Expose port. DigitalOcean App Platform (and most PaaS) inject a PORT env var
+# and probe that port; their default is 8080. Default to 8080 here so the
+# readiness probe reaches us even when PORT is not injected; an injected PORT
+# still wins at runtime.
+ENV PORT=8080
+EXPOSE 8080
 
-# Health check
+# Health check honours the runtime PORT so it matches the bound port.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10).read()"
+  CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','8080'), timeout=10).read()"
 
-# Run application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run application. Bind to the platform-provided $PORT (falls back to 8080).
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

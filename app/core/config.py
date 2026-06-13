@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     # JWT
     SECRET_KEY: str = "your-secret-key-change-in-production-minimum-32-chars-required"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    # 7 days. Keeps members signed in between sessions so a momentary token
+    # expiry (e.g. while composing a message) no longer forces a re-login.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080
 
     # API
     API_TITLE: str = "Zone Weaver API"
