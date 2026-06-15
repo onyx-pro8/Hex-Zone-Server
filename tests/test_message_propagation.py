@@ -1,4 +1,4 @@
-"""Message propagation: account union + acceptable-zone + UNKNOWN origin."""
+"""Message propagation: realtime in-zone delivery + UNKNOWN origin."""
 from datetime import datetime
 
 import pytest
@@ -57,15 +57,6 @@ def _owner(
     db.add(owner)
     db.flush()
     return owner
-
-
-def test_merge_propagation_recipients_unions_and_excludes_sender():
-    result = mfs._merge_propagation_recipients(
-        sender_id=1,
-        account_owner_ids=[1, 2, 3],
-        acceptable_zone_owner_ids=[3, 4, 5],
-    )
-    assert result == [2, 3, 4, 5]
 
 
 def test_resolve_unknown_origin_prefers_owner_record():
@@ -156,8 +147,8 @@ def test_unknown_uses_message_position_when_owner_coords_missing(prop_db, monkey
     assert sender.longitude == -74.0060
 
 
-def test_user_role_sender_reaches_same_account_members(prop_db, monkeypatch):
-    admin = _owner(prop_db, oid=20, email="admin@x.com", lat=0.0, lon=0.0)
+def test_user_role_sender_reaches_users_located_in_zone(prop_db, monkeypatch):
+    _owner(prop_db, oid=20, email="admin@x.com", lat=0.5, lon=0.5)
     user_sender = _owner(
         prop_db,
         oid=21,
@@ -167,11 +158,17 @@ def test_user_role_sender_reaches_same_account_members(prop_db, monkeypatch):
         account_owner_id=20,
         role=OwnerRole.USER,
     )
+    prop_db.commit()
 
     monkeypatch.setattr(
         mfs,
-        "owner_ids_whose_acceptable_zones_contain_point",
-        lambda db, latitude, longitude: ([], []),
+        "evaluate_zones_containing_point",
+        lambda db, latitude, longitude: ["zone-x"],
+    )
+    monkeypatch.setattr(
+        mfs,
+        "owner_ids_located_within_zone_ids",
+        lambda db, zone_ids, exclude_owner_id=None: [20],
     )
 
     payload = PropagationMessageCreate(
@@ -187,21 +184,24 @@ def test_user_role_sender_reaches_same_account_members(prop_db, monkeypatch):
     assert 21 not in delivered
 
 
-def test_zone_propagation_merges_account_and_acceptable_zone_owners(prop_db, monkeypatch):
+def test_zone_propagation_delivers_to_users_located_in_zone(prop_db, monkeypatch):
     sender = _owner(prop_db, oid=10, email="sender@x.com", lat=0.0, lon=0.0)
-    _owner(prop_db, oid=11, email="member@x.com", account_owner_id=10, role=OwnerRole.USER)
+    _owner(prop_db, oid=11, email="inzone@x.com", lat=0.5, lon=0.5)
     _owner(prop_db, oid=99, email="outsider@x.com", lat=1.0, lon=1.0)
+    prop_db.commit()
 
-    def fake_zone_owners(db, latitude, longitude):
+    def fake_sender_zones(db, latitude, longitude):
         assert latitude == 0.5
         assert longitude == 0.5
-        return ["zone-match"], [99]
+        return ["zone-match"]
 
-    monkeypatch.setattr(
-        mfs,
-        "owner_ids_whose_acceptable_zones_contain_point",
-        fake_zone_owners,
-    )
+    def fake_located(db, zone_ids, exclude_owner_id=None):
+        assert zone_ids == ["zone-match"]
+        assert exclude_owner_id == 10
+        return [11]
+
+    monkeypatch.setattr(mfs, "evaluate_zones_containing_point", fake_sender_zones)
+    monkeypatch.setattr(mfs, "owner_ids_located_within_zone_ids", fake_located)
 
     payload = PropagationMessageCreate(
         type=MessageFeatureType.PANIC,
@@ -211,8 +211,65 @@ def test_zone_propagation_merges_account_and_acceptable_zone_owners(prop_db, mon
     )
     result = mfs.create_geo_propagated_message(prop_db, sender, payload)
     assert result["skipped"] is False
-    assert result["fanout"]["strategy"] == "account_plus_acceptable_zone"
+    assert result["fanout"]["strategy"] == "recipients_located_in_zone"
     delivered = set(result["delivered_owner_ids"])
     assert 11 in delivered
-    assert 99 in delivered
+    assert 99 not in delivered
     assert 10 not in delivered
+
+
+def test_private_requires_receiver_located_in_sender_zone(prop_db, monkeypatch):
+    sender = _owner(prop_db, oid=30, email="psender@x.com", lat=0.5, lon=0.5)
+    receiver = _owner(prop_db, oid=31, email="preceiver@x.com", lat=0.5, lon=0.5)
+    _owner(prop_db, oid=32, email="poutsider@x.com", lat=9.0, lon=9.0)
+    prop_db.commit()
+
+    monkeypatch.setattr(
+        mfs,
+        "evaluate_zones_containing_point",
+        lambda db, latitude, longitude: ["zone-p"],
+    )
+    monkeypatch.setattr(
+        mfs,
+        "owner_ids_located_within_zone_ids",
+        lambda db, zone_ids, exclude_owner_id=None: [30, 31],
+    )
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.PRIVATE,
+        hid="device-1",
+        position=CoordinatePayload(latitude=0.5, longitude=0.5),
+        msg={"description": "dm"},
+        receiver_owner_id=receiver.id,
+    )
+    result = mfs.create_geo_propagated_message(prop_db, sender, payload)
+    assert result["skipped"] is False
+    assert result["fanout"]["strategy"] == "private_same_zone"
+    assert set(result["delivered_owner_ids"]) == {31}
+
+
+def test_private_rejects_receiver_outside_zone(prop_db, monkeypatch):
+    sender = _owner(prop_db, oid=40, email="qsender@x.com", lat=0.5, lon=0.5)
+    receiver = _owner(prop_db, oid=41, email="qreceiver@x.com", lat=9.0, lon=9.0)
+    prop_db.commit()
+
+    monkeypatch.setattr(
+        mfs,
+        "evaluate_zones_containing_point",
+        lambda db, latitude, longitude: ["zone-q"],
+    )
+    monkeypatch.setattr(
+        mfs,
+        "owner_ids_located_within_zone_ids",
+        lambda db, zone_ids, exclude_owner_id=None: [40],
+    )
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.PRIVATE,
+        hid="device-1",
+        position=CoordinatePayload(latitude=0.5, longitude=0.5),
+        msg={"description": "dm"},
+        receiver_owner_id=receiver.id,
+    )
+    with pytest.raises(mfs.PrivateScopeRecipientError):
+        mfs.create_geo_propagated_message(prop_db, sender, payload)

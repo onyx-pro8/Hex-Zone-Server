@@ -154,3 +154,11 @@ class PropagationMessageResponse(BaseModel):
     metadata: dict | None = None
     push_sent: int | None = None
     push_failed: int | None = None
+    priority: str | None = Field(
+        default=None,
+        description="Delivery priority: MAX | HIGH | MEDIUM | LOW.",
+    )
+    response_tracking_enabled: bool | None = Field(
+        default=None,
+        description="When true, recipients may POST wellness acknowledgements.",
+    )

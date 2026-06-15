@@ -7,8 +7,20 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user
 from app.crud import owner as owner_crud
 from app.database import get_db
-from app.models import AccessSchedule, GuestAccessSession, MessageBlock, ZoneMessageEvent
+from app.models import (
+    AccessSchedule,
+    EmergencyEvent,
+    GuestAccessSession,
+    MessageBlock,
+    Owner,
+    ZoneMessageEvent,
+)
 from app.models.owner import OwnerRole
+from app.services.geospatial_service import (
+    evaluate_zones_containing_point,
+    owner_ids_located_within_zone_ids,
+)
+from sqlalchemy import and_, or_
 from app.schemas.access_guest import (
     GuestAccessHttpError,
     GuestAccessSessionListItem,
@@ -16,7 +28,7 @@ from app.schemas.access_guest import (
     GuestRequestDecisionData,
     GuestRequestDecisionEnvelope,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.schemas.message_feature import (
     AccessScheduleCreate,
@@ -27,10 +39,21 @@ from app.schemas.message_feature import (
     PropagationMessageCreate,
     PropagationMessageResponse,
 )
-from app.domain.message_types import is_pushable_geo_type
+from app.domain.message_types import (
+    MessageScope,
+    is_pushable_geo_type,
+    normalize_message_type,
+    requires_admin_to_send,
+)
 from app.services import guest_access_service, message_block_service, message_feature_service, permission_service
-from app.services.message_feature_service import GeoMessageSkipped, UnknownRateLimitError
+from app.services.message_feature_service import (
+    GeoMessageSkipped,
+    PrivateScopeRecipientError,
+    SensorRateLimitError,
+    UnknownRateLimitError,
+)
 from app.services import push_notification_service
+from app.services import wellness_ack_service
 from app.services.zone_membership_service import refresh_owner_memberships
 from app.websocket.manager import ws_manager
 
@@ -53,6 +76,7 @@ async def _finalize_geo_propagation(db: Session, result: dict) -> dict:
     if is_pushable_geo_type(str(result.get("type") or "")):
         push_stats = await push_notification_service.send_alarm_push_to_owners(db, delivered, result)
         result.update(push_stats)
+        push_notification_service.schedule_panic_retries_if_needed(delivered, result, push_stats)
     return result
 
 
@@ -63,6 +87,22 @@ def _handle_geo_propagation_errors(exc: Exception) -> None:
             detail={
                 "error_code": "RATE_LIMIT_UNKNOWN",
                 "message": "Only one UNKNOWN message is allowed every 10 seconds.",
+            },
+        ) from exc
+    if isinstance(exc, SensorRateLimitError):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error_code": "RATE_LIMIT_SENSOR",
+                "message": "SENSOR telemetry is throttled. Please wait a few seconds before sending again.",
+            },
+        ) from exc
+    if isinstance(exc, PrivateScopeRecipientError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "INVALID_PRIVATE_RECIPIENT",
+                "message": str(exc) or "PRIVATE receiver must be in your zone or account.",
             },
         ) from exc
     if isinstance(exc, ValueError):
@@ -94,6 +134,63 @@ async def update_member_location(
     matched = refresh_owner_memberships(db, sender, float(latitude), float(longitude))
     db.commit()
     return {"zone_ids": matched}
+
+
+@router.get(
+    "/members/in-zone",
+    summary="List members currently located in the caller's zone(s)",
+    description=(
+        "Resolves the zone(s) that contain the caller's location, then returns "
+        "every active owner whose **own current location** falls inside one of "
+        "those zone(s) — across all accounts. Used to populate the PRIVATE "
+        "message recipient picker so it matches server-side delivery rules. "
+        "Pass **`latitude`/`longitude`** to use a live fix; otherwise the "
+        "caller's stored `owners.latitude/longitude` is used."
+    ),
+)
+async def list_in_zone_members(
+    latitude: float | None = Query(default=None, ge=-90, le=90),
+    longitude: float | None = Query(default=None, ge=-180, le=180),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    me = owner_crud.get_owner(db, current_user["user_id"])
+    if not me:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+
+    lat = latitude if latitude is not None else me.latitude
+    lon = longitude if longitude is not None else me.longitude
+    if lat is None or lon is None:
+        return {"zone_ids": [], "members": []}
+
+    zone_ids = evaluate_zones_containing_point(db, float(lat), float(lon))
+    if not zone_ids:
+        return {"zone_ids": [], "members": []}
+
+    located_ids = owner_ids_located_within_zone_ids(
+        db, zone_ids, exclude_owner_id=me.id
+    )
+    if not located_ids:
+        return {"zone_ids": zone_ids, "members": []}
+
+    rows = (
+        db.query(Owner)
+        .filter(Owner.id.in_(located_ids), Owner.active.is_(True))
+        .all()
+    )
+    members = [
+        {
+            "id": row.id,
+            "name": f"{row.first_name or ''} {row.last_name or ''}".strip() or row.email,
+            "first_name": row.first_name,
+            "last_name": row.last_name,
+            "email": row.email,
+            "zone_id": row.zone_id,
+        }
+        for row in rows
+    ]
+    members.sort(key=lambda m: (m["name"] or "").lower())
+    return {"zone_ids": zone_ids, "members": members}
 
 
 @router.post("/messages/propagate", response_model=PropagationMessageResponse, status_code=status.HTTP_201_CREATED)
@@ -129,13 +226,80 @@ async def create_geo_message(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sender owner not found")
 
     try:
+        canonical = normalize_message_type(parsed_payload.type.value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error_code": "UNSUPPORTED_MESSAGE_TYPE", "message": str(exc)},
+        ) from exc
+    if requires_admin_to_send(canonical) and str(sender.role.value) != "administrator":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "ADMIN_ONLY_MESSAGE_TYPE",
+                "message": "Only administrators can send SERVICE messages.",
+            },
+        )
+
+    try:
         result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
     except GeoMessageSkipped as skipped:
         return skipped.detail
-    except (UnknownRateLimitError, ValueError) as exc:
+    except (UnknownRateLimitError, SensorRateLimitError, ValueError) as exc:
         _handle_geo_propagation_errors(exc)
     db.commit()
     return await _finalize_geo_propagation(db, result)
+
+
+class WellnessAckRequest(BaseModel):
+    status: str = Field(default="ok", description="Recipient status: ok | need_help")
+    note: str | None = Field(default=None, max_length=500)
+
+
+@router.get(
+    "/messages/{message_event_id}/wellness-acks",
+    summary="List wellness check acknowledgements",
+)
+async def list_wellness_acks(
+    message_event_id: str = Path(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ = current_user
+    return wellness_ack_service.list_wellness_acknowledgements(
+        db, message_event_id=message_event_id
+    )
+
+
+@router.post(
+    "/messages/{message_event_id}/wellness-ack",
+    status_code=status.HTTP_201_CREATED,
+    summary="Acknowledge a wellness check message",
+)
+async def acknowledge_wellness_check(
+    body: WellnessAckRequest,
+    message_event_id: str = Path(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = wellness_ack_service.record_wellness_acknowledgement(
+        db,
+        message_event_id=message_event_id,
+        owner=owner,
+        status_value=body.status,
+        note=body.note,
+    )
+    db.commit()
+    sender_id = None
+    event = db.get(ZoneMessageEvent, message_event_id)
+    if event and event.sender_id:
+        sender_id = event.sender_id
+    notify_ids = list({int(owner.id), int(sender_id)} if sender_id else {int(owner.id)})
+    await ws_manager.broadcast_to_users(notify_ids, "WELLNESS_ACK", result)
+    return result
 
 
 @router.post(
@@ -179,7 +343,7 @@ async def create_geo_message_with_api_key(
         result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
     except GeoMessageSkipped as skipped:
         return skipped.detail
-    except (UnknownRateLimitError, ValueError) as exc:
+    except (UnknownRateLimitError, SensorRateLimitError, ValueError) as exc:
         _handle_geo_propagation_errors(exc)
     db.commit()
     return await _finalize_geo_propagation(db, result)
@@ -586,24 +750,56 @@ async def reject_guest_request_message_feature(
     )
 
 
-@router.get("/messages/new")
+@router.get(
+    "/messages/new",
+    summary="Polling fallback for new zone message events",
+    description=(
+        "Returns `ZoneMessageEvent` rows created at/after the **`since`** cursor. "
+        "Optional **`type`** filters to a single message type (e.g. `SERVICE`) so "
+        "low-priority clients can poll instead of holding a WebSocket."
+    ),
+)
 async def list_new_feature_messages(
     since: str = Query(...),
+    type: str | None = Query(
+        default=None,
+        description="Optional message type filter, e.g. SERVICE / PA / SENSOR.",
+    ),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ = current_user
+    viewer_id = int(current_user["user_id"])
     try:
         since_dt = datetime.fromisoformat(since.replace("Z", "+00:00")).replace(tzinfo=None)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid since cursor") from exc
+    query = db.query(ZoneMessageEvent).filter(ZoneMessageEvent.created_at >= since_dt)
+    if type:
+        try:
+            canonical = normalize_message_type(type)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error_code": "UNSUPPORTED_MESSAGE_TYPE", "message": str(exc)},
+            ) from exc
+        query = query.filter(ZoneMessageEvent.type == canonical.value)
     rows = (
-        db.query(ZoneMessageEvent)
-        .filter(ZoneMessageEvent.created_at >= since_dt)
+        query
         .order_by(ZoneMessageEvent.created_at.asc())
         .limit(500)
         .all()
     )
+
+    def _visible_to_viewer(row: ZoneMessageEvent) -> bool:
+        # Mirror the inbox rule: a caller only sees events they sent, that target
+        # them, or that they were a delivered recipient of. Prevents the polling
+        # fallback from leaking every zone event to every authenticated user.
+        if row.sender_id == viewer_id or row.receiver_id == viewer_id:
+            return True
+        meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+        delivered = meta.get("delivered_owner_ids")
+        return isinstance(delivered, list) and viewer_id in delivered
+
     return [
         {
             "id": row.id,
@@ -614,6 +810,116 @@ async def list_new_feature_messages(
             "text": row.text,
             "body": row.body_json,
             "metadata": row.metadata_json,
+            "createdAt": row.created_at.isoformat(),
+        }
+        for row in rows
+        if _visible_to_viewer(row)
+    ]
+
+
+@router.get(
+    "/messages/private-thread",
+    summary="Fetch the PRIVATE direct-message thread with another member",
+    description=(
+        "Returns PRIVATE-scope `ZoneMessageEvent` rows exchanged between the "
+        "authenticated member and **`other_owner_id`** (both directions), oldest "
+        "first. Reconstructs the private conversation thread from the event store."
+    ),
+)
+async def get_private_thread(
+    other_owner_id: int = Query(..., ge=1),
+    limit: int = Query(100, ge=1, le=500),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    me = int(current_user["user_id"])
+    rows = (
+        db.query(ZoneMessageEvent)
+        .filter(
+            ZoneMessageEvent.scope == MessageScope.PRIVATE,
+            or_(
+                and_(
+                    ZoneMessageEvent.sender_id == me,
+                    ZoneMessageEvent.receiver_id == other_owner_id,
+                ),
+                and_(
+                    ZoneMessageEvent.sender_id == other_owner_id,
+                    ZoneMessageEvent.receiver_id == me,
+                ),
+            ),
+        )
+        .order_by(ZoneMessageEvent.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "type": row.type,
+            "senderId": row.sender_id,
+            "receiverId": row.receiver_id,
+            "text": row.text,
+            "body": row.body_json,
+            "createdAt": row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
+
+
+@router.get(
+    "/emergency-events",
+    summary="List recent emergency (PANIC / NS_PANIC) events",
+    description=(
+        "Administrator-only forensic log of MAX-priority alarms. Each row records "
+        "the alarm type, sender, zone, recipient count, and origin coordinates, "
+        "independent of the editable message feed."
+    ),
+)
+async def list_emergency_events(
+    limit: int = Query(100, ge=1, le=500),
+    skip: int = Query(0, ge=0, le=10_000),
+    type: str | None = Query(default=None, description="Optional filter: PANIC or NS_PANIC."),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    viewer = owner_crud.get_owner(db, current_user["user_id"])
+    if not viewer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    if viewer.role != OwnerRole.ADMINISTRATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "ADMIN_ONLY",
+                "message": "Administrator role is required to view emergency events.",
+            },
+        )
+    query = db.query(EmergencyEvent)
+    if type:
+        try:
+            canonical = normalize_message_type(type)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error_code": "UNSUPPORTED_MESSAGE_TYPE", "message": str(exc)},
+            ) from exc
+        query = query.filter(EmergencyEvent.type == canonical.value)
+    rows = (
+        query.order_by(EmergencyEvent.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "messageEventId": row.message_event_id,
+            "type": row.type,
+            "senderId": row.sender_id,
+            "zoneId": row.zone_id,
+            "recipientCount": row.recipient_count,
+            "latitude": row.latitude,
+            "longitude": row.longitude,
+            "text": row.text,
             "createdAt": row.created_at.isoformat(),
         }
         for row in rows

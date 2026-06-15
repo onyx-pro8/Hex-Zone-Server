@@ -46,12 +46,19 @@ MODEL_TO_CONTRACT_ZONE_TYPE = {
 
 
 def _extract_geojson_polygon(geometry: object) -> dict | None:
-    """Return GeoJSON Polygon/MultiPolygon dict, otherwise None."""
+    """Return GeoJSON Polygon/MultiPolygon dict, otherwise None.
+
+    Dashboard clients send ``geometry: { geo_fence_polygon: { type, coordinates } }``
+    while some legacy callers pass a top-level Polygon/MultiPolygon object.
+    """
     if not isinstance(geometry, dict):
         return None
     geometry_type = geometry.get("type")
     if geometry_type in {"Polygon", "MultiPolygon"}:
         return geometry
+    nested = geometry.get("geo_fence_polygon")
+    if isinstance(nested, dict) and nested.get("type") in {"Polygon", "MultiPolygon"}:
+        return nested
     return None
 
 

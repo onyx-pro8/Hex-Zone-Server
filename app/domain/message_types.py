@@ -15,6 +15,15 @@ class MessageScope(str, Enum):
     PRIVATE = "private"
 
 
+class MessagePriority(str, Enum):
+    """Delivery priority for geo-propagated message types."""
+
+    MAX = "MAX"
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
 class CanonicalMessageType(str, Enum):
     SENSOR = "SENSOR"
     PANIC = "PANIC"
@@ -27,6 +36,34 @@ class CanonicalMessageType(str, Enum):
     PERMISSION = "PERMISSION"
     CHAT = "CHAT"
 
+
+TYPE_PRIORITY_MAP: dict[CanonicalMessageType, MessagePriority] = {
+    CanonicalMessageType.PANIC: MessagePriority.MAX,
+    CanonicalMessageType.NS_PANIC: MessagePriority.MAX,
+    CanonicalMessageType.UNKNOWN: MessagePriority.HIGH,
+    CanonicalMessageType.WELLNESS_CHECK: MessagePriority.HIGH,
+    CanonicalMessageType.SENSOR: MessagePriority.MEDIUM,
+    CanonicalMessageType.PRIVATE: MessagePriority.MEDIUM,
+    CanonicalMessageType.PA: MessagePriority.MEDIUM,
+    CanonicalMessageType.SERVICE: MessagePriority.LOW,
+    CanonicalMessageType.PERMISSION: MessagePriority.MEDIUM,
+    CanonicalMessageType.CHAT: MessagePriority.MEDIUM,
+}
+
+# Only administrators may originate these types from member clients.
+ADMIN_ONLY_SEND_TYPES: frozenset[CanonicalMessageType] = frozenset(
+    {CanonicalMessageType.SERVICE}
+)
+
+# Emergency types bypass member block filters so zone-wide distress reaches everyone.
+BLOCK_BYPASS_TYPES: frozenset[CanonicalMessageType] = frozenset(
+    {CanonicalMessageType.PANIC, CanonicalMessageType.NS_PANIC}
+)
+
+# Types that enable recipient acknowledgement tracking (wellness checks).
+RESPONSE_TRACKING_TYPES: frozenset[CanonicalMessageType] = frozenset(
+    {CanonicalMessageType.WELLNESS_CHECK}
+)
 
 TYPE_CATEGORY_MAP: dict[CanonicalMessageType, MessageCategory] = {
     CanonicalMessageType.SENSOR: MessageCategory.ALARM,
@@ -83,6 +120,22 @@ def type_scope(message_type: CanonicalMessageType) -> MessageScope:
 
 def type_category(message_type: CanonicalMessageType) -> MessageCategory:
     return TYPE_CATEGORY_MAP[message_type]
+
+
+def type_priority(message_type: CanonicalMessageType) -> MessagePriority:
+    return TYPE_PRIORITY_MAP.get(message_type, MessagePriority.MEDIUM)
+
+
+def requires_admin_to_send(message_type: CanonicalMessageType) -> bool:
+    return message_type in ADMIN_ONLY_SEND_TYPES
+
+
+def bypasses_delivery_blocks(message_type: CanonicalMessageType) -> bool:
+    return message_type in BLOCK_BYPASS_TYPES
+
+
+def enables_response_tracking(message_type: CanonicalMessageType) -> bool:
+    return message_type in RESPONSE_TRACKING_TYPES
 
 
 # Alarm types that trigger mobile push (FCM/APNS) in addition to WebSocket fan-out.

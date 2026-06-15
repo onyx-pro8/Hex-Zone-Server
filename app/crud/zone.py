@@ -5,7 +5,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.future import select
 from sqlalchemy import func
 from app.models import Zone
-from app.models.zone import ZoneType
+from app.models.zone import ZoneType, _normalize_latitude, _normalize_longitude
 from app.schemas.schemas import ZoneCreate, ZoneUpdate
 from app.core.h3_utils import has_h3_overlap, lat_lng_to_h3_cell, validate_h3_cell
 from typing import Optional, List, Any, Sequence
@@ -14,7 +14,14 @@ from typing import Optional, List, Any, Sequence
 def _polygon_coords_to_wkt(polygon_coords: list[list[list[float]]]) -> str:
     rings = []
     for ring in polygon_coords:
-        rings.append("(" + ", ".join(f"{lng} {lat}" for lng, lat in ring) + ")")
+        rings.append(
+            "("
+            + ", ".join(
+                f"{_normalize_longitude(lng)} {_normalize_latitude(lat)}"
+                for lng, lat in ring
+            )
+            + ")"
+        )
     return "(" + ",".join(rings) + ")"
 
 

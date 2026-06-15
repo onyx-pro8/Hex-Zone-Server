@@ -102,6 +102,21 @@ class Settings(BaseSettings):
     EXPO_ACCESS_TOKEN: str = ""
 
     UNKNOWN_MESSAGE_RATE_LIMIT_SECONDS: int = 10
+    # SENSOR telemetry can be high-frequency; throttle repeat sends per sender.
+    SENSOR_MESSAGE_RATE_LIMIT_SECONDS: int = 5
+
+    # PANIC / NS_PANIC are MAX priority: keep re-sending the mobile push in the
+    # background until every recipient token reports delivered (bounded).
+    PANIC_PUSH_RETRY_MAX_ATTEMPTS: int = 4
+    PANIC_PUSH_RETRY_DELAY_SECONDS: int = 15
+
+    # WELLNESS_CHECK reminders: a background job re-pushes recipients who have
+    # not acknowledged after the delay, up to a capped number of reminders.
+    WELLNESS_REMINDER_ENABLED: bool = True
+    WELLNESS_REMINDER_DELAY_SECONDS: int = 300
+    WELLNESS_REMINDER_MAX: int = 3
+    WELLNESS_REMINDER_SCAN_INTERVAL_SECONDS: int = 120
+    WELLNESS_REMINDER_LOOKBACK_HOURS: int = 24
 
     # Registration code HMAC + email delivery (administrator self-service signup).
     # When REGISTRATION_CODE_HMAC_SECRET is empty, the runtime falls back to SECRET_KEY.

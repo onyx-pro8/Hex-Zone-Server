@@ -9,7 +9,14 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.domain.message_types import is_alarm_push_type, is_pushable_geo_type
+from app.database import session_maker
+from app.domain.message_types import (
+    MessagePriority,
+    is_alarm_push_type,
+    is_pushable_geo_type,
+    normalize_message_type,
+    type_priority,
+)
 from app.models import PushToken
 
 logger = logging.getLogger(__name__)
@@ -21,11 +28,40 @@ EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
 # Must match `defaultChannel` in Hex-Zone-Mobile/app.json (expo-notifications).
 ANDROID_DEFAULT_PUSH_CHANNEL = "default"
 ANDROID_ALARM_PUSH_CHANNEL = "alarms"
+# NS_PANIC routes to a dedicated channel so it is audibly/visually distinct
+# from PANIC (see ensureAndroidChannels in Hex-Zone-Mobile/src/lib/notifications.ts).
+ANDROID_NS_PANIC_PUSH_CHANNEL = "ns_panic"
+
+
+def _alert_style(message_type: str) -> str:
+    """Coarse client-side rendering hint carried in the push data payload."""
+    upper = str(message_type or "").strip().upper().replace("-", "_")
+    if upper == "NS_PANIC":
+        return "ns_panic"
+    if upper == "PANIC":
+        return "panic"
+    if is_alarm_push_type(message_type):
+        return "alarm"
+    return "alert"
+
+
+def _android_channel_for(message_type: str) -> str:
+    upper = str(message_type or "").strip().upper().replace("-", "_")
+    if upper == "NS_PANIC":
+        return ANDROID_NS_PANIC_PUSH_CHANNEL
+    if is_alarm_push_type(message_type):
+        return ANDROID_ALARM_PUSH_CHANNEL
+    return ANDROID_DEFAULT_PUSH_CHANNEL
 
 
 def _notification_copy(message_type: str, text: str) -> tuple[str, str]:
-    label = str(message_type or "ALARM").replace("_", " ")
-    body = (text or label).strip()[:240]
+    upper = str(message_type or "").strip().upper().replace("-", "_")
+    body = (text or "").strip()[:240]
+    if upper == "PANIC":
+        return "🚨 PANIC — immediate help needed", body or "A PANIC alarm was raised in your area."
+    if upper == "NS_PANIC":
+        return "🔕 NS-PANIC — silent distress", body or "A non-silent panic alarm was raised in your area."
+    label = upper.replace("_", " ") or "ALARM"
     return f"Hex Zone {label}", body or label
 
 
@@ -131,13 +167,14 @@ async def send_alarm_push_to_owners(
         return {"push_sent": 0, "push_failed": 0, "push_no_tokens": True}
 
     title, body = _notification_copy(msg_type, str(alarm_payload.get("text") or ""))
-    is_alarm = is_alarm_push_type(msg_type)
     data_payload: dict[str, str] = {
         "event": "NEW_GEO_MESSAGE",
         "type": msg_type,
         "category": str(alarm_payload.get("category") or ""),
         "scope": str(alarm_payload.get("scope") or ""),
         "id": str(alarm_payload.get("id") or ""),
+        "alert_style": _alert_style(msg_type),
+        "priority": str(alarm_payload.get("priority") or ""),
     }
     metadata = alarm_payload.get("metadata")
     if isinstance(metadata, dict):
@@ -158,8 +195,77 @@ async def send_alarm_push_to_owners(
         title=title,
         body=body,
         data=data_payload,
-        channel_id=ANDROID_ALARM_PUSH_CHANNEL if is_alarm else ANDROID_DEFAULT_PUSH_CHANNEL,
+        channel_id=_android_channel_for(msg_type),
     )
+
+
+async def _retry_delivery_loop(owner_ids: list[int], payload: dict[str, Any]) -> None:
+    """Re-push MAX-priority alarms until every token delivers (bounded retries).
+
+    Runs as a detached asyncio task so the originating request returns after the
+    first attempt. Each retry opens its own short-lived DB session so it never
+    touches the request-scoped session that has already been closed.
+    """
+    attempts = max(0, int(getattr(settings, "PANIC_PUSH_RETRY_MAX_ATTEMPTS", 4)))
+    delay = max(1, int(getattr(settings, "PANIC_PUSH_RETRY_DELAY_SECONDS", 15)))
+    msg_type = str(payload.get("type") or "")
+    for attempt in range(1, attempts + 1):
+        await asyncio.sleep(delay)
+        db = session_maker()
+        try:
+            stats = await send_alarm_push_to_owners(db, owner_ids, payload)
+        except Exception:  # pragma: no cover - never crash the background task
+            logger.exception("PANIC push retry attempt %d failed (%s)", attempt, msg_type)
+            db.close()
+            continue
+        finally:
+            db.close()
+        sent = int(stats.get("push_sent") or 0)
+        failed = int(stats.get("push_failed") or 0)
+        no_tokens = bool(stats.get("push_no_tokens"))
+        logger.info(
+            "PANIC push retry %d/%d type=%s sent=%d failed=%d no_tokens=%s",
+            attempt, attempts, msg_type, sent, failed, no_tokens,
+        )
+        if failed == 0 and not no_tokens and sent > 0:
+            logger.info("PANIC push retry: delivered to all recipients after attempt %d", attempt)
+            return
+    logger.warning(
+        "PANIC push retry exhausted after %d attempt(s) for %s; some recipients may be undelivered",
+        attempts, msg_type,
+    )
+
+
+def schedule_panic_retries_if_needed(
+    owner_ids: list[int],
+    payload: dict[str, Any],
+    stats: dict[str, Any],
+) -> bool:
+    """Schedule background re-delivery for MAX-priority alarms that did not fully deliver."""
+    if not owner_ids:
+        return False
+    try:
+        canonical = normalize_message_type(str(payload.get("type") or ""))
+    except ValueError:
+        return False
+    if type_priority(canonical) != MessagePriority.MAX:
+        return False
+    failed = int(stats.get("push_failed") or 0)
+    no_tokens = bool(stats.get("push_no_tokens"))
+    if failed <= 0 and not no_tokens:
+        return False
+    if int(getattr(settings, "PANIC_PUSH_RETRY_MAX_ATTEMPTS", 4)) <= 0:
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    loop.create_task(_retry_delivery_loop(list(owner_ids), dict(payload)))
+    logger.info(
+        "PANIC push retry scheduled for %s (owners=%d, failed=%d, no_tokens=%s)",
+        canonical.value, len(owner_ids), failed, no_tokens,
+    )
+    return True
 
 
 async def send_test_push_to_owner(

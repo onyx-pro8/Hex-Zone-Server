@@ -1,6 +1,7 @@
 """Geospatial evaluation using H3, dynamic clusters, and PostGIS-compatible data."""
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass, field
 from math import atan2, cos, radians, sin, sqrt
@@ -9,8 +10,153 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.h3_utils import lat_lng_to_h3_cell
 from app.models import Owner, Zone
+
+
+def point_h3_cells(latitude: float, longitude: float) -> list[str]:
+    """All H3 cell ids that contain ``(latitude, longitude)``, one per resolution.
+
+    Zones store H3 cells at whatever resolution the builder used (the dashboard
+    defaults to 6, the zone builder to 9, etc.). A point lies inside a stored
+    cell of resolution ``R`` exactly when the point's own cell at resolution
+    ``R`` equals that stored cell. Enumerating the point's cell at every
+    supported resolution lets containment work regardless of the resolution the
+    zone was saved at, instead of assuming a single fixed resolution.
+    """
+    cells: list[str] = []
+    for resolution in range(settings.H3_MIN_RESOLUTION, settings.H3_MAX_RESOLUTION + 1):
+        try:
+            cells.append(lat_lng_to_h3_cell(latitude, longitude, resolution))
+        except Exception:  # noqa: BLE001 - skip resolutions h3 rejects
+            continue
+    return cells
+
+
+def _dialect_is_postgresql(db: Session) -> bool:
+    try:
+        return db.get_bind().dialect.name == "postgresql"
+    except Exception:  # noqa: BLE001 - be permissive if bind can't be resolved
+        return False
+
+
+def _geojson_polygon_from_zone(zone: Zone) -> dict | None:
+    """Polygon geometry from zone parameters when the PostGIS column was never set.
+
+    Contract ``POST /zones`` historically stored polygons only under
+    ``parameters.geometry.geo_fence_polygon``, leaving ``zones.geo_fence_polygon``
+    NULL so ``ST_Contains`` queries never matched.
+    """
+    params = zone.parameters if isinstance(zone.parameters, dict) else {}
+    geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
+    nested = geometry.get("geo_fence_polygon")
+    if isinstance(nested, dict) and nested.get("type") in ("Polygon", "MultiPolygon"):
+        return nested
+    if geometry.get("type") in ("Polygon", "MultiPolygon"):
+        return geometry
+    return None
+
+
+def _point_in_geojson_ring(lat: float, lng: float, ring: list[list[float]]) -> bool:
+    """Ray-casting point-in-ring for GeoJSON rings ``[[lng, lat], ...]``."""
+    inside = False
+    n = len(ring)
+    if n < 3:
+        return False
+    j = n - 1
+    for i in range(n):
+        xi, yi = float(ring[i][0]), float(ring[i][1])
+        xj, yj = float(ring[j][0]), float(ring[j][1])
+        intersects = (yi > lat) != (yj > lat) and lng < (
+            (xj - xi) * (lat - yi) / ((yj - yi) or 1e-15) + xi
+        )
+        if intersects:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _point_in_geojson_polygon_python(
+    geojson: dict,
+    latitude: float,
+    longitude: float,
+) -> bool:
+    """Fallback containment when PostGIS is unavailable (tests / SQLite)."""
+    gtype = geojson.get("type")
+    polys: list[list[list[list[float]]]] = []
+    if gtype == "Polygon":
+        polys = [geojson["coordinates"]]
+    elif gtype == "MultiPolygon":
+        polys = geojson["coordinates"]
+    else:
+        return False
+
+    for polygon in polys:
+        if not polygon:
+            continue
+        outer = polygon[0]
+        if not _point_in_geojson_ring(latitude, longitude, outer):
+            continue
+        in_hole = False
+        for hole in polygon[1:]:
+            if _point_in_geojson_ring(latitude, longitude, hole):
+                in_hole = True
+                break
+        if not in_hole:
+            return True
+    return False
+
+
+def _postgis_point_in_geojson_polygon(
+    db: Session,
+    geojson: dict,
+    latitude: float,
+    longitude: float,
+) -> bool:
+    """Test whether ``(latitude, longitude)`` lies inside a GeoJSON polygon."""
+    if not _dialect_is_postgresql(db):
+        return _point_in_geojson_polygon_python(geojson, latitude, longitude)
+
+    sql = text(
+        """
+        SELECT
+            ST_Covers(
+                ST_SetSRID(ST_GeomFromGeoJSON(CAST(:geojson AS json)), 4326),
+                ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)
+            )
+            OR ST_Covers(
+                ST_SetSRID(ST_GeomFromGeoJSON(CAST(:geojson AS json)), 4326),
+                ST_SetSRID(ST_MakePoint(:longitude + 360, :latitude), 4326)
+            )
+            OR ST_Covers(
+                ST_SetSRID(ST_GeomFromGeoJSON(CAST(:geojson AS json)), 4326),
+                ST_SetSRID(ST_MakePoint(:longitude - 360, :latitude), 4326)
+            )
+        """
+    )
+    row = db.execute(
+        sql,
+        {
+            "geojson": json.dumps(geojson),
+            "latitude": latitude,
+            "longitude": longitude,
+        },
+    ).first()
+    return bool(row and row[0])
+
+
+def _point_in_zone_polygon(
+    db: Session,
+    zone: Zone,
+    latitude: float,
+    longitude: float,
+) -> bool:
+    """Containment for a zone polygon stored in PostGIS or parameters JSON."""
+    geojson = _geojson_polygon_from_zone(zone)
+    if geojson is not None:
+        return _postgis_point_in_geojson_polygon(db, geojson, latitude, longitude)
+    return False
 
 # Equirectangular projection scale at the equator. Acceptable inaccuracy for
 # clusters within ~100 km of the projection reference latitude (sub-percent).
@@ -34,29 +180,35 @@ def evaluate_member_zones(
     if not owner_ids:
         return []
 
-    h3_cell = lat_lng_to_h3_cell(latitude, longitude, 13)
-    h3_sql = text(
-        """
-        SELECT z.zone_id
-        FROM zones z
-        WHERE z.owner_id = ANY(:owner_ids)
-          AND z.active = TRUE
-          AND z.h3_cells IS NOT NULL
-          AND EXISTS (
-              SELECT 1
-              FROM json_array_elements_text(z.h3_cells) AS cell
-              WHERE cell = :h3_cell
-          )
-        """
-    )
-    matched = {
-        row[0]
-        for row in db.execute(
-            h3_sql,
-            {"owner_ids": owner_ids, "h3_cell": h3_cell},
+    point_cells = point_h3_cells(latitude, longitude)
+    matched: set[str] = set()
+    if point_cells:
+        h3_sql = text(
+            """
+            SELECT z.zone_id
+            FROM zones z
+            WHERE z.owner_id = ANY(:owner_ids)
+              AND z.active = TRUE
+              AND z.h3_cells IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM json_array_elements_text(z.h3_cells) AS cell
+                  WHERE cell = ANY(:point_cells)
+              )
+            """
         )
-    }
+        matched = {
+            row[0]
+            for row in db.execute(
+                h3_sql,
+                {"owner_ids": owner_ids, "point_cells": point_cells},
+            )
+        }
 
+    # Test the point in each world copy (longitude, ±360). ST_Contains is planar,
+    # so a polygon stored at wrapped longitudes (drawn across repeated world
+    # copies in the map UI) only matches when the point is shifted into the same
+    # copy. Checking all three bands matches such polygons without re-saving them.
     postgis_sql = text(
         """
         SELECT z.zone_id
@@ -64,9 +216,10 @@ def evaluate_member_zones(
         WHERE z.owner_id = ANY(:owner_ids)
           AND z.active = TRUE
           AND z.geo_fence_polygon IS NOT NULL
-          AND ST_Contains(
-              z.geo_fence_polygon,
-              ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)
+          AND (
+              ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326))
+              OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(:longitude + 360, :latitude), 4326))
+              OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(:longitude - 360, :latitude), 4326))
           )
         """
     )
@@ -80,6 +233,12 @@ def evaluate_member_zones(
         .all()
     )
     for zone in circle_candidates:
+        if zone.zone_id in matched:
+            continue
+        if _geojson_polygon_from_zone(zone) is not None:
+            if _point_in_zone_polygon(db, zone, latitude, longitude):
+                matched.add(zone.zone_id)
+                continue
         if include_dynamic_zones and _point_in_dynamic_zone(zone, latitude, longitude):
             matched.add(zone.zone_id)
             continue
@@ -105,7 +264,7 @@ def evaluate_zones_containing_point(db: Session, latitude: float, longitude: flo
         latitude,
         longitude,
         owner_ids,
-        include_dynamic_zones=False,
+        include_dynamic_zones=True,
     )
 
 
@@ -127,6 +286,102 @@ def owner_ids_whose_acceptable_zones_contain_point(
     )
     owner_ids = sorted({int(row[0]) for row in rows})
     return zone_ids, owner_ids
+
+
+def owner_ids_located_within_zone_ids(
+    db: Session,
+    zone_ids: Iterable[str],
+    *,
+    exclude_owner_id: int | None = None,
+) -> list[int]:
+    """Active owners whose **current stored location** falls inside any of ``zone_ids``.
+
+    This implements realtime presence: a recipient is "inside the zone" when
+    their own ``owners.latitude / longitude`` is contained by the geometry of an
+    active zone whose ``zone_id`` is in ``zone_ids`` (regardless of which owner
+    defined that zone). Polygon zones are evaluated in a single batched PostGIS
+    query; H3 and circle-based zone types are evaluated in Python.
+    """
+    target = list(dict.fromkeys(str(z) for z in zone_ids if z))
+    if not target:
+        return []
+
+    matched: set[int] = set()
+
+    if _dialect_is_postgresql(db):
+        poly_sql = text(
+            """
+            SELECT DISTINCT o.id
+            FROM owners o
+            JOIN zones z
+              ON z.zone_id = ANY(:zone_ids)
+             AND z.active = TRUE
+             AND z.geo_fence_polygon IS NOT NULL
+            WHERE o.active = TRUE
+              AND o.latitude IS NOT NULL
+              AND o.longitude IS NOT NULL
+              AND (
+                  ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude, o.latitude), 4326))
+                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude + 360, o.latitude), 4326))
+                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude - 360, o.latitude), 4326))
+              )
+            """
+        )
+        for row in db.execute(poly_sql, {"zone_ids": target}):
+            matched.add(int(row[0]))
+
+    zone_rows = (
+        db.query(Zone)
+        .filter(Zone.zone_id.in_(target), Zone.active.is_(True))
+        .all()
+    )
+    h3_cell_sets: list[set[str]] = []
+    for zone in zone_rows:
+        cells = zone.h3_cells
+        if isinstance(cells, (list, tuple)) and cells:
+            h3_cell_sets.append({str(c) for c in cells})
+
+    if zone_rows:
+        owner_rows = (
+            db.query(Owner.id, Owner.latitude, Owner.longitude)
+            .filter(
+                Owner.active.is_(True),
+                Owner.latitude.isnot(None),
+                Owner.longitude.isnot(None),
+            )
+            .all()
+        )
+        for owner_id, lat, lng in owner_rows:
+            oid = int(owner_id)
+            if oid in matched:
+                continue
+            if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+                continue
+            latf = float(lat)
+            lngf = float(lng)
+
+            if h3_cell_sets:
+                point_cells = set(point_h3_cells(latf, lngf))
+                if any(point_cells & cells for cells in h3_cell_sets):
+                    matched.add(oid)
+                    continue
+
+            for zone in zone_rows:
+                if _geojson_polygon_from_zone(zone) is not None:
+                    if _point_in_zone_polygon(db, zone, latf, lngf):
+                        matched.add(oid)
+                        break
+                if (
+                    _point_in_dynamic_zone(zone, latf, lngf)
+                    or _point_in_proximity_zone(zone, latf, lngf)
+                    or _point_in_object_zone(db, zone, latf, lngf, [])
+                ):
+                    matched.add(oid)
+                    break
+
+    if exclude_owner_id is not None:
+        matched.discard(int(exclude_owner_id))
+    return sorted(matched)
 
 
 def _point_in_dynamic_zone(zone: Zone, latitude: float, longitude: float) -> bool:

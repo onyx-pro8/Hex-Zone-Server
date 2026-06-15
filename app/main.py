@@ -119,6 +119,15 @@ def _owner_geocode_backfill_background() -> None:
     except Exception:  # pragma: no cover - never crash the worker thread
         logging.exception("Owner geocode backfill thread failed")
 
+
+def _wellness_reminder_background() -> None:
+    """Run the WELLNESS_CHECK reminder loop (re-push to non-responders)."""
+    try:
+        from app.services.startup_jobs import wellness_reminder_worker
+        wellness_reminder_worker()
+    except Exception:  # pragma: no cover - never crash the worker thread
+        logging.exception("Wellness reminder worker thread failed")
+
 # Lifespan context
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -134,6 +143,8 @@ async def lifespan(app: FastAPI):
     print("Database initialization started in background")
     threading.Thread(target=_owner_geocode_backfill_background, daemon=True).start()
     print("Owner geocode backfill scheduled in background")
+    threading.Thread(target=_wellness_reminder_background, daemon=True).start()
+    print("Wellness reminder worker scheduled in background")
     yield
     print("Shutting down Zone Weaver backend...")
 
@@ -321,10 +332,32 @@ app.add_middleware(
     max_age=86400,
 )
 
+def _cors_headers_for(request: Request) -> dict[str, str]:
+    """CORS headers for error responses produced by the outermost handler.
+
+    The catch-all ``Exception`` handler runs in Starlette's ServerErrorMiddleware,
+    which sits OUTSIDE CORSMiddleware, so its responses would otherwise lack CORS
+    headers and the browser masks every 500 as a CORS error. We echo the request
+    Origin (not ``*``) so credentialed requests stay valid.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return {}
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+    }
+
+
 @app.exception_handler(Exception)
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     logging.exception("Unhandled error processing request %s %s", request.method, request.url)
-    return JSONResponse(status_code=500, content=error_response("Internal server error"))
+    return JSONResponse(
+        status_code=500,
+        content=error_response("Internal server error"),
+        headers=_cors_headers_for(request),
+    )
 
 
 @app.exception_handler(HTTPException)

@@ -16,6 +16,8 @@ from app.models.guest_access_qr_token import GuestAccessQrToken
 from app.models.guest_access_qr_token_audit import GuestAccessQrTokenAudit
 from app.models.guest_pass import GuestPass
 from app.models.guest_access_zone_message import GuestAccessZoneMessage
+from app.models.wellness_check_acknowledgement import WellnessCheckAcknowledgement
+from app.models.emergency_event import EmergencyEvent
 
 __all__ = [
     "Owner",
@@ -35,4 +37,6 @@ __all__ = [
     "GuestAccessQrTokenAudit",
     "GuestPass",
     "GuestAccessZoneMessage",
+    "WellnessCheckAcknowledgement",
+    "EmergencyEvent",
 ]

@@ -7,10 +7,40 @@ import enum
 from app.database import Base
 
 
+def _normalize_longitude(lng: float) -> float:
+    """Wrap a longitude into [-180, 180].
+
+    Leaflet returns longitudes outside this range when the map is panned across
+    repeated world copies (e.g. 241.76 instead of -118.24). PostGIS ``ST_Contains``
+    is planar, so a polygon stored at the wrapped value never contains a point
+    expressed at the canonical value. Normalizing on write keeps stored geometry
+    in the same coordinate band as the query point.
+    """
+    if -180.0 <= lng <= 180.0:
+        return lng
+    return ((lng + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
+
+
+def _normalize_latitude(lat: float) -> float:
+    """Clamp latitude into the valid [-90, 90] range."""
+    if lat < -90.0:
+        return -90.0
+    if lat > 90.0:
+        return 90.0
+    return lat
+
+
 def _polygon_coords_to_wkt(polygon_coords: list[list[list[float]]]) -> str:
     rings = []
     for ring in polygon_coords:
-        rings.append("(" + ", ".join(f"{lng} {lat}" for lng, lat in ring) + ")")
+        rings.append(
+            "("
+            + ", ".join(
+                f"{_normalize_longitude(lng)} {_normalize_latitude(lat)}"
+                for lng, lat in ring
+            )
+            + ")"
+        )
     return "(" + ",".join(rings) + ")"
 
 
