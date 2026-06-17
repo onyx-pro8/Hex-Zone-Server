@@ -27,7 +27,7 @@ from app.services.geospatial_service import (
 )
 from app.services.unknown_fanout_service import (
     UNKNOWN_RATE_LIMIT_SECONDS,
-    resolve_nearest_owner_ids,
+    resolve_nearest_owner_ids_among,
     unknown_fanout_limit,
 )
 
@@ -276,23 +276,38 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
 
     if canonical_type == CanonicalMessageType.UNKNOWN:
         _assert_unknown_rate_limit_ok(db, sender.id)
+        zone_lat = float(payload.position.latitude)
+        zone_lon = float(payload.position.longitude)
         origin_lat, origin_lon, origin_source = _resolve_unknown_origin(sender, payload)
         if origin_source == "message_position":
             sender.latitude = origin_lat
             sender.longitude = origin_lon
             sender.location_updated_at = datetime.utcnow()
+
+        sender_zone_ids = evaluate_zones_containing_point(db, zone_lat, zone_lon)
         target_x = unknown_fanout_limit(sender)
-        candidate_recipients = resolve_nearest_owner_ids(
+        located_owner_ids = (
+            owner_ids_located_within_zone_ids(
+                db,
+                sender_zone_ids,
+                exclude_owner_id=sender.id,
+            )
+            if sender_zone_ids
+            else []
+        )
+        candidate_recipients = resolve_nearest_owner_ids_among(
             db,
-            origin_lat=origin_lat,
-            origin_lon=origin_lon,
-            sender_id=sender.id,
+            origin_lat=zone_lat,
+            origin_lon=zone_lon,
+            candidate_owner_ids=located_owner_ids,
             limit=target_x,
         )
-        zone_ids: list[str] = []
+        zone_ids = sender_zone_ids
         fanout_meta = {
             "account_type": account_type,
-            "strategy": "unknown_nearest",
+            "strategy": "unknown_nearest_in_zone",
+            "sender_zone_ids": sender_zone_ids,
+            "located_owner_ids": located_owner_ids,
             "target_x": target_x,
             "resolved_x": len(candidate_recipients),
             "origin": {
@@ -301,7 +316,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
                 "source": origin_source,
             },
         }
-        position_for_metadata = {"latitude": origin_lat, "longitude": origin_lon}
+        position_for_metadata = {"latitude": zone_lat, "longitude": zone_lon}
     else:
         if canonical_type == CanonicalMessageType.SENSOR:
             _assert_sensor_rate_limit_ok(db, sender.id)

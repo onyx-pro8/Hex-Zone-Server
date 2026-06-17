@@ -130,6 +130,17 @@ def test_unknown_uses_message_position_when_owner_coords_missing(prop_db, monkey
     _owner(prop_db, oid=3, email="far@x.com", lat=50.0, lon=10.0)
     prop_db.commit()
 
+    monkeypatch.setattr(
+        mfs,
+        "evaluate_zones_containing_point",
+        lambda db, latitude, longitude: ["zone-unknown"],
+    )
+    monkeypatch.setattr(
+        mfs,
+        "owner_ids_located_within_zone_ids",
+        lambda db, zone_ids, exclude_owner_id=None: [2],
+    )
+
     payload = PropagationMessageCreate(
         type=MessageFeatureType.UNKNOWN,
         hid="device-1",
@@ -139,12 +150,78 @@ def test_unknown_uses_message_position_when_owner_coords_missing(prop_db, monkey
 
     result = mfs.create_geo_propagated_message(prop_db, sender, payload)
     assert result["skipped"] is False
-    assert result["fanout"]["strategy"] == "unknown_nearest"
+    assert result["fanout"]["strategy"] == "unknown_nearest_in_zone"
     assert result["fanout"]["origin"]["source"] == "message_position"
+    assert result["fanout"]["sender_zone_ids"] == ["zone-unknown"]
     assert 2 in result["delivered_owner_ids"]
+    assert 3 not in result["delivered_owner_ids"]
     prop_db.refresh(sender)
     assert sender.latitude == 40.7128
     assert sender.longitude == -74.0060
+
+
+def test_unknown_nearest_in_zone_respects_account_limit(prop_db, monkeypatch):
+    sender = _owner(
+        prop_db,
+        oid=1,
+        email="sender@x.com",
+        lat=0.0,
+        lon=0.0,
+        account_type=AccountType.EXCLUSIVE,
+    )
+    _owner(prop_db, oid=2, email="n1@x.com", lat=0.01, lon=0.0)
+    _owner(prop_db, oid=3, email="n2@x.com", lat=0.02, lon=0.0)
+    _owner(prop_db, oid=4, email="n3@x.com", lat=0.03, lon=0.0)
+    _owner(prop_db, oid=5, email="n4@x.com", lat=0.04, lon=0.0)
+    _owner(prop_db, oid=6, email="n5@x.com", lat=0.05, lon=0.0)
+    _owner(prop_db, oid=7, email="n6@x.com", lat=0.06, lon=0.0)
+    prop_db.commit()
+
+    monkeypatch.setattr(
+        mfs,
+        "evaluate_zones_containing_point",
+        lambda db, latitude, longitude: ["zone-x"],
+    )
+    monkeypatch.setattr(
+        mfs,
+        "owner_ids_located_within_zone_ids",
+        lambda db, zone_ids, exclude_owner_id=None: [2, 3, 4, 5, 6, 7],
+    )
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.UNKNOWN,
+        hid="device-1",
+        position=CoordinatePayload(latitude=0.0, longitude=0.0),
+        msg={"description": "test"},
+    )
+
+    result = mfs.create_geo_propagated_message(prop_db, sender, payload)
+    assert result["fanout"]["strategy"] == "unknown_nearest_in_zone"
+    assert result["fanout"]["target_x"] == 5
+    assert result["delivered_owner_ids"] == [2, 3, 4, 5, 6]
+
+
+def test_unknown_delivers_nobody_when_sender_not_in_zone(prop_db, monkeypatch):
+    sender = _owner(prop_db, oid=1, email="sender@x.com", lat=0.0, lon=0.0)
+    _owner(prop_db, oid=2, email="near@x.com", lat=0.01, lon=0.0)
+    prop_db.commit()
+
+    monkeypatch.setattr(
+        mfs,
+        "evaluate_zones_containing_point",
+        lambda db, latitude, longitude: [],
+    )
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.UNKNOWN,
+        hid="device-1",
+        position=CoordinatePayload(latitude=0.0, longitude=0.0),
+        msg={"description": "test"},
+    )
+
+    result = mfs.create_geo_propagated_message(prop_db, sender, payload)
+    assert result["fanout"]["strategy"] == "unknown_nearest_in_zone"
+    assert result["delivered_owner_ids"] == []
 
 
 def test_user_role_sender_reaches_users_located_in_zone(prop_db, monkeypatch):

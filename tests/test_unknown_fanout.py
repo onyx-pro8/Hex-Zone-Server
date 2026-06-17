@@ -12,6 +12,7 @@ from app.domain.message_types import is_alarm_push_type
 from app.services.unknown_fanout_service import (
     FANOUT_LIMIT_BY_ACCOUNT_TYPE,
     resolve_nearest_owner_ids,
+    resolve_nearest_owner_ids_among,
     unknown_fanout_limit,
 )
 
@@ -83,6 +84,23 @@ def test_resolve_nearest_owner_ids_orders_by_distance(fanout_db):
         limit=2,
     )
     assert nearest == [2, 4]
+
+
+def test_resolve_nearest_owner_ids_among_limits_candidates(fanout_db):
+    _owner(fanout_db, oid=2, email="near@x.com", lat=0.01, lon=0.0)
+    _owner(fanout_db, oid=3, email="far@x.com", lat=1.0, lon=1.0)
+    _owner(fanout_db, oid=4, email="mid@x.com", lat=0.1, lon=0.0)
+    _owner(fanout_db, oid=99, email="outsider@x.com", lat=0.005, lon=0.0)
+
+    nearest = resolve_nearest_owner_ids_among(
+        fanout_db,
+        origin_lat=0.0,
+        origin_lon=0.0,
+        candidate_owner_ids=[2, 3, 4],
+        limit=2,
+    )
+    assert nearest == [2, 4]
+    assert 99 not in nearest
 
 
 def test_resolve_nearest_excludes_sender_and_null_coords(fanout_db):
