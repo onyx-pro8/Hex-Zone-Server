@@ -13,6 +13,30 @@ from app.schemas.message_feature import CoordinatePayload, MessageFeatureType, P
 from app.services import message_feature_service as mfs
 
 
+def _mock_zone_fanout(
+    monkeypatch,
+    *,
+    record_ids: list[int],
+    zone_labels: list[str],
+    located_ids: list[int],
+) -> None:
+    monkeypatch.setattr(
+        mfs,
+        "evaluate_zone_records_containing_point",
+        lambda db, latitude, longitude: list(record_ids),
+    )
+    monkeypatch.setattr(
+        mfs,
+        "zone_ids_for_zone_records",
+        lambda db, ids: list(zone_labels) if ids else [],
+    )
+    monkeypatch.setattr(
+        mfs,
+        "owner_ids_located_within_zone_records",
+        lambda db, zone_record_ids, exclude_owner_id=None: list(located_ids),
+    )
+
+
 @pytest.fixture()
 def prop_db():
     engine = create_engine("sqlite:///:memory:", future=True)
@@ -130,15 +154,11 @@ def test_unknown_uses_message_position_when_owner_coords_missing(prop_db, monkey
     _owner(prop_db, oid=3, email="far@x.com", lat=50.0, lon=10.0)
     prop_db.commit()
 
-    monkeypatch.setattr(
-        mfs,
-        "evaluate_zones_containing_point",
-        lambda db, latitude, longitude: ["zone-unknown"],
-    )
-    monkeypatch.setattr(
-        mfs,
-        "owner_ids_located_within_zone_ids",
-        lambda db, zone_ids, exclude_owner_id=None: [2],
+    _mock_zone_fanout(
+        monkeypatch,
+        record_ids=[101],
+        zone_labels=["zone-unknown"],
+        located_ids=[2],
     )
 
     payload = PropagationMessageCreate(
@@ -177,15 +197,11 @@ def test_unknown_nearest_in_zone_respects_account_limit(prop_db, monkeypatch):
     _owner(prop_db, oid=7, email="n6@x.com", lat=0.06, lon=0.0)
     prop_db.commit()
 
-    monkeypatch.setattr(
-        mfs,
-        "evaluate_zones_containing_point",
-        lambda db, latitude, longitude: ["zone-x"],
-    )
-    monkeypatch.setattr(
-        mfs,
-        "owner_ids_located_within_zone_ids",
-        lambda db, zone_ids, exclude_owner_id=None: [2, 3, 4, 5, 6, 7],
+    _mock_zone_fanout(
+        monkeypatch,
+        record_ids=[1],
+        zone_labels=["zone-x"],
+        located_ids=[2, 3, 4, 5, 6, 7],
     )
 
     payload = PropagationMessageCreate(
@@ -208,7 +224,7 @@ def test_unknown_delivers_nobody_when_sender_not_in_zone(prop_db, monkeypatch):
 
     monkeypatch.setattr(
         mfs,
-        "evaluate_zones_containing_point",
+        "evaluate_zone_records_containing_point",
         lambda db, latitude, longitude: [],
     )
 
@@ -237,15 +253,11 @@ def test_user_role_sender_reaches_users_located_in_zone(prop_db, monkeypatch):
     )
     prop_db.commit()
 
-    monkeypatch.setattr(
-        mfs,
-        "evaluate_zones_containing_point",
-        lambda db, latitude, longitude: ["zone-x"],
-    )
-    monkeypatch.setattr(
-        mfs,
-        "owner_ids_located_within_zone_ids",
-        lambda db, zone_ids, exclude_owner_id=None: [20],
+    _mock_zone_fanout(
+        monkeypatch,
+        record_ids=[1],
+        zone_labels=["zone-x"],
+        located_ids=[20],
     )
 
     payload = PropagationMessageCreate(
@@ -267,18 +279,23 @@ def test_zone_propagation_delivers_to_users_located_in_zone(prop_db, monkeypatch
     _owner(prop_db, oid=99, email="outsider@x.com", lat=1.0, lon=1.0)
     prop_db.commit()
 
-    def fake_sender_zones(db, latitude, longitude):
+    def fake_sender_records(db, latitude, longitude):
         assert latitude == 0.5
         assert longitude == 0.5
-        return ["zone-match"]
+        return [42]
 
-    def fake_located(db, zone_ids, exclude_owner_id=None):
-        assert zone_ids == ["zone-match"]
+    def fake_located(db, zone_record_ids, exclude_owner_id=None):
+        assert zone_record_ids == [42]
         assert exclude_owner_id == 10
         return [11]
 
-    monkeypatch.setattr(mfs, "evaluate_zones_containing_point", fake_sender_zones)
-    monkeypatch.setattr(mfs, "owner_ids_located_within_zone_ids", fake_located)
+    monkeypatch.setattr(mfs, "evaluate_zone_records_containing_point", fake_sender_records)
+    monkeypatch.setattr(
+        mfs,
+        "zone_ids_for_zone_records",
+        lambda db, ids: ["zone-match"] if ids else [],
+    )
+    monkeypatch.setattr(mfs, "owner_ids_located_within_zone_records", fake_located)
 
     payload = PropagationMessageCreate(
         type=MessageFeatureType.PANIC,
@@ -301,15 +318,11 @@ def test_private_requires_receiver_located_in_sender_zone(prop_db, monkeypatch):
     _owner(prop_db, oid=32, email="poutsider@x.com", lat=9.0, lon=9.0)
     prop_db.commit()
 
-    monkeypatch.setattr(
-        mfs,
-        "evaluate_zones_containing_point",
-        lambda db, latitude, longitude: ["zone-p"],
-    )
-    monkeypatch.setattr(
-        mfs,
-        "owner_ids_located_within_zone_ids",
-        lambda db, zone_ids, exclude_owner_id=None: [30, 31],
+    _mock_zone_fanout(
+        monkeypatch,
+        record_ids=[1],
+        zone_labels=["zone-p"],
+        located_ids=[30, 31],
     )
 
     payload = PropagationMessageCreate(
@@ -330,15 +343,11 @@ def test_private_rejects_receiver_outside_zone(prop_db, monkeypatch):
     receiver = _owner(prop_db, oid=41, email="qreceiver@x.com", lat=9.0, lon=9.0)
     prop_db.commit()
 
-    monkeypatch.setattr(
-        mfs,
-        "evaluate_zones_containing_point",
-        lambda db, latitude, longitude: ["zone-q"],
-    )
-    monkeypatch.setattr(
-        mfs,
-        "owner_ids_located_within_zone_ids",
-        lambda db, zone_ids, exclude_owner_id=None: [40],
+    _mock_zone_fanout(
+        monkeypatch,
+        record_ids=[1],
+        zone_labels=["zone-q"],
+        located_ids=[40],
     )
 
     payload = PropagationMessageCreate(

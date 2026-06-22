@@ -17,8 +17,9 @@ from app.models import (
 )
 from app.models.owner import OwnerRole
 from app.services.geospatial_service import (
-    evaluate_zones_containing_point,
-    owner_ids_located_within_zone_ids,
+    evaluate_zone_records_containing_point,
+    owner_ids_located_within_zone_records,
+    zone_ids_for_zone_records,
 )
 from sqlalchemy import and_, or_
 from app.schemas.access_guest import (
@@ -54,7 +55,7 @@ from app.services.message_feature_service import (
 )
 from app.services import push_notification_service
 from app.services import wellness_ack_service
-from app.services.zone_membership_service import refresh_owner_memberships
+from app.services.member_service import upsert_member_location
 from app.websocket.manager import ws_manager
 
 router = APIRouter(prefix="/message-feature", tags=["message-feature"])
@@ -131,9 +132,9 @@ async def update_member_location(
     if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="latitude/longitude are required")
 
-    matched = refresh_owner_memberships(db, sender, float(latitude), float(longitude))
+    matched = upsert_member_location(db, sender.id, float(latitude), float(longitude))
     db.commit()
-    return {"zone_ids": matched}
+    return {"zone_ids": matched.get("zones") or []}
 
 
 @router.get(
@@ -163,12 +164,13 @@ async def list_in_zone_members(
     if lat is None or lon is None:
         return {"zone_ids": [], "members": []}
 
-    zone_ids = evaluate_zones_containing_point(db, float(lat), float(lon))
-    if not zone_ids:
+    zone_record_ids = evaluate_zone_records_containing_point(db, float(lat), float(lon))
+    if not zone_record_ids:
         return {"zone_ids": [], "members": []}
 
-    located_ids = owner_ids_located_within_zone_ids(
-        db, zone_ids, exclude_owner_id=me.id
+    zone_ids = zone_ids_for_zone_records(db, zone_record_ids)
+    located_ids = owner_ids_located_within_zone_records(
+        db, zone_record_ids, exclude_owner_id=me.id
     )
     if not located_ids:
         return {"zone_ids": zone_ids, "members": []}

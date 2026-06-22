@@ -22,8 +22,9 @@ from app.models import EmergencyEvent, Owner, ZoneMessageEvent
 from app.schemas.message_feature import MessageFeatureType, PropagationMessageCreate
 from app.services import message_block_service
 from app.services.geospatial_service import (
-    evaluate_zones_containing_point,
-    owner_ids_located_within_zone_ids,
+    evaluate_zone_records_containing_point,
+    owner_ids_located_within_zone_records,
+    zone_ids_for_zone_records,
 )
 from app.services.unknown_fanout_service import (
     UNKNOWN_RATE_LIMIT_SECONDS,
@@ -112,14 +113,14 @@ def _assert_private_receiver_reachable(
     sender: Owner,
     receiver_owner_id: int,
     *,
-    sender_zone_ids: list[str],
+    sender_zone_record_ids: list[int],
 ) -> None:
     """PRIVATE messages target one recipient who is physically inside the sender's zone(s).
 
     The zone here is a *permission/validation boundary*, derived from the sender's
-    current GPS location (``sender_zone_ids``), not a static ``zone_id`` label.
+    current GPS location (``sender_zone_record_ids``), not a static ``zone_id`` label.
     The selected recipient must be an active member whose own realtime location
-    falls inside at least one of those same zones.
+    falls inside at least one of those same zone geometries.
     """
     receiver = db.get(Owner, receiver_owner_id)
     if receiver is None or not bool(receiver.active):
@@ -131,13 +132,13 @@ def _assert_private_receiver_reachable(
             "PRIVATE messages cannot target yourself."
         )
 
-    if not sender_zone_ids:
+    if not sender_zone_record_ids:
         raise PrivateScopeRecipientError(
             "You are not currently inside any zone, so you cannot send a PRIVATE message."
         )
 
     located_owner_ids = set(
-        owner_ids_located_within_zone_ids(db, sender_zone_ids)
+        owner_ids_located_within_zone_records(db, sender_zone_record_ids)
     )
     if receiver.id not in located_owner_ids:
         raise PrivateScopeRecipientError(
@@ -187,14 +188,15 @@ def _zone_based_recipients(
     """
     latitude = float(payload.position.latitude)
     longitude = float(payload.position.longitude)
-    sender_zone_ids = evaluate_zones_containing_point(db, latitude, longitude)
+    sender_zone_record_ids = evaluate_zone_records_containing_point(db, latitude, longitude)
+    sender_zone_ids = zone_ids_for_zone_records(db, sender_zone_record_ids)
 
     if scope == MessageScope.PRIVATE and payload.receiver_owner_id is None:
         raise ValueError("receiver_owner_id is required for private-scope message types")
 
     if scope == MessageScope.PRIVATE:
         _assert_private_receiver_reachable(
-            db, sender, payload.receiver_owner_id, sender_zone_ids=sender_zone_ids
+            db, sender, payload.receiver_owner_id, sender_zone_record_ids=sender_zone_record_ids
         )
         return (
             sender_zone_ids,
@@ -202,17 +204,19 @@ def _zone_based_recipients(
             {
                 "strategy": "private_same_zone",
                 "sender_zone_ids": sender_zone_ids,
+                "sender_zone_record_ids": sender_zone_record_ids,
             },
         )
 
-    located_owner_ids = owner_ids_located_within_zone_ids(
+    located_owner_ids = owner_ids_located_within_zone_records(
         db,
-        sender_zone_ids,
+        sender_zone_record_ids,
         exclude_owner_id=sender.id,
     )
     meta = {
         "strategy": "recipients_located_in_zone",
         "sender_zone_ids": sender_zone_ids,
+        "sender_zone_record_ids": sender_zone_record_ids,
         "located_owner_ids": located_owner_ids,
     }
     return sender_zone_ids, located_owner_ids, meta
@@ -284,15 +288,16 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
             sender.longitude = origin_lon
             sender.location_updated_at = datetime.utcnow()
 
-        sender_zone_ids = evaluate_zones_containing_point(db, zone_lat, zone_lon)
+        sender_zone_record_ids = evaluate_zone_records_containing_point(db, zone_lat, zone_lon)
+        sender_zone_ids = zone_ids_for_zone_records(db, sender_zone_record_ids)
         target_x = unknown_fanout_limit(sender)
         located_owner_ids = (
-            owner_ids_located_within_zone_ids(
+            owner_ids_located_within_zone_records(
                 db,
-                sender_zone_ids,
+                sender_zone_record_ids,
                 exclude_owner_id=sender.id,
             )
-            if sender_zone_ids
+            if sender_zone_record_ids
             else []
         )
         candidate_recipients = resolve_nearest_owner_ids_among(
@@ -307,6 +312,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
             "account_type": account_type,
             "strategy": "unknown_nearest_in_zone",
             "sender_zone_ids": sender_zone_ids,
+            "sender_zone_record_ids": sender_zone_record_ids,
             "located_owner_ids": located_owner_ids,
             "target_x": target_x,
             "resolved_x": len(candidate_recipients),

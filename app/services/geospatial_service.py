@@ -252,20 +252,221 @@ def evaluate_member_zones(
 
 
 def evaluate_zones_containing_point(db: Session, latitude: float, longitude: float) -> list[str]:
-    """Return zone_ids whose geometry contains ``(latitude, longitude)`` across all active owners.
+    """Return zone_id labels for zone rows whose geometry contains the point.
 
-    Used for cross-account message propagation: any owner whose acceptable zone
-    (a zone they own) includes the message coordinates may receive the alarm.
+    Prefer :func:`evaluate_zone_records_containing_point` for message propagation
+    so recipient fan-out keys off the exact matched geometries, not every row that
+    shares the same ``zone_id`` string.
     """
+    record_ids = evaluate_zone_records_containing_point(db, latitude, longitude)
+    return zone_ids_for_zone_records(db, record_ids)
+
+
+def _zone_record_ids_containing_point(
+    db: Session,
+    latitude: float,
+    longitude: float,
+    candidate_owner_ids: Iterable[int],
+    *,
+    include_dynamic_zones: bool = True,
+) -> list[int]:
+    """Primary keys of active zone rows whose geometry contains the point."""
+    owner_ids = list(candidate_owner_ids)
+    if not owner_ids:
+        return []
+
+    point_cells = point_h3_cells(latitude, longitude)
+    matched: set[int] = set()
+    if point_cells:
+        h3_sql = text(
+            """
+            SELECT z.id
+            FROM zones z
+            WHERE z.owner_id = ANY(:owner_ids)
+              AND z.active = TRUE
+              AND z.h3_cells IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM json_array_elements_text(z.h3_cells) AS cell
+                  WHERE cell = ANY(:point_cells)
+              )
+            """
+        )
+        for row in db.execute(
+            h3_sql,
+            {"owner_ids": owner_ids, "point_cells": point_cells},
+        ):
+            matched.add(int(row[0]))
+
+    postgis_sql = text(
+        """
+        SELECT z.id
+        FROM zones z
+        WHERE z.owner_id = ANY(:owner_ids)
+          AND z.active = TRUE
+          AND z.geo_fence_polygon IS NOT NULL
+          AND (
+              ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326))
+              OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(:longitude + 360, :latitude), 4326))
+              OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(:longitude - 360, :latitude), 4326))
+          )
+        """
+    )
+    for row in db.execute(
+        postgis_sql,
+        {"owner_ids": owner_ids, "longitude": longitude, "latitude": latitude},
+    ):
+        matched.add(int(row[0]))
+
+    circle_candidates = (
+        db.query(Zone)
+        .filter(Zone.owner_id.in_(owner_ids), Zone.active.is_(True))
+        .all()
+    )
+    for zone in circle_candidates:
+        if zone.id in matched:
+            continue
+        if _geojson_polygon_from_zone(zone) is not None:
+            if _point_in_zone_polygon(db, zone, latitude, longitude):
+                matched.add(int(zone.id))
+                continue
+        if include_dynamic_zones and _point_in_dynamic_zone(zone, latitude, longitude):
+            matched.add(int(zone.id))
+            continue
+        if _point_in_proximity_zone(zone, latitude, longitude):
+            matched.add(int(zone.id))
+            continue
+        if _point_in_object_zone(db, zone, latitude, longitude, owner_ids):
+            matched.add(int(zone.id))
+
+    return sorted(matched)
+
+
+def evaluate_zone_records_containing_point(
+    db: Session,
+    latitude: float,
+    longitude: float,
+) -> list[int]:
+    """Zone row ids (``zones.id``) whose geometry contains the message point."""
     active_owner_rows = db.query(Owner.id).filter(Owner.active.is_(True)).all()
     owner_ids = [int(row[0]) for row in active_owner_rows]
-    return evaluate_member_zones(
+    return _zone_record_ids_containing_point(
         db,
         latitude,
         longitude,
         owner_ids,
         include_dynamic_zones=True,
     )
+
+
+def zone_ids_for_zone_records(db: Session, zone_record_ids: Iterable[int]) -> list[str]:
+    """Distinct ``zone_id`` labels for the given zone rows (metadata / display)."""
+    target = [int(z) for z in zone_record_ids if z]
+    if not target:
+        return []
+    rows = (
+        db.query(Zone.zone_id)
+        .filter(Zone.id.in_(target), Zone.active.is_(True))
+        .distinct()
+        .all()
+    )
+    return sorted({str(row[0]) for row in rows if row[0]})
+
+
+def _point_in_zone_row(
+    db: Session,
+    zone: Zone,
+    latitude: float,
+    longitude: float,
+) -> bool:
+    cells = zone.h3_cells
+    if isinstance(cells, (list, tuple)) and cells:
+        point_cells = set(point_h3_cells(latitude, longitude))
+        if point_cells & {str(c) for c in cells}:
+            return True
+    if _geojson_polygon_from_zone(zone) is not None:
+        return _point_in_zone_polygon(db, zone, latitude, longitude)
+    if _point_in_dynamic_zone(zone, latitude, longitude):
+        return True
+    if _point_in_proximity_zone(zone, latitude, longitude):
+        return True
+    return _point_in_object_zone(db, zone, latitude, longitude, [])
+
+
+def owner_ids_located_within_zone_records(
+    db: Session,
+    zone_record_ids: Iterable[int],
+    *,
+    exclude_owner_id: int | None = None,
+) -> list[int]:
+    """Owners whose stored location lies inside one of the given zone rows.
+
+    Unlike :func:`owner_ids_located_within_zone_ids`, this only tests the exact
+    zone geometries that matched the sender — not every row sharing a ``zone_id``.
+    """
+    target = list(dict.fromkeys(int(z) for z in zone_record_ids if z))
+    if not target:
+        return []
+
+    matched: set[int] = set()
+
+    if _dialect_is_postgresql(db):
+        poly_sql = text(
+            """
+            SELECT DISTINCT o.id
+            FROM owners o
+            JOIN zones z
+              ON z.id = ANY(:zone_record_ids)
+             AND z.active = TRUE
+             AND z.geo_fence_polygon IS NOT NULL
+            WHERE o.active = TRUE
+              AND o.latitude IS NOT NULL
+              AND o.longitude IS NOT NULL
+              AND (
+                  ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude, o.latitude), 4326))
+                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude + 360, o.latitude), 4326))
+                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude - 360, o.latitude), 4326))
+              )
+            """
+        )
+        for row in db.execute(poly_sql, {"zone_record_ids": target}):
+            matched.add(int(row[0]))
+
+    zone_rows = (
+        db.query(Zone)
+        .filter(Zone.id.in_(target), Zone.active.is_(True))
+        .all()
+    )
+    if not zone_rows:
+        if exclude_owner_id is not None:
+            matched.discard(int(exclude_owner_id))
+        return sorted(matched)
+
+    owner_rows = (
+        db.query(Owner.id, Owner.latitude, Owner.longitude)
+        .filter(
+            Owner.active.is_(True),
+            Owner.latitude.isnot(None),
+            Owner.longitude.isnot(None),
+        )
+        .all()
+    )
+    for owner_id, lat, lng in owner_rows:
+        oid = int(owner_id)
+        if oid in matched:
+            continue
+        if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+            continue
+        latf = float(lat)
+        lngf = float(lng)
+        for zone in zone_rows:
+            if _point_in_zone_row(db, zone, latf, lngf):
+                matched.add(oid)
+                break
+
+    if exclude_owner_id is not None:
+        matched.discard(int(exclude_owner_id))
+    return sorted(matched)
 
 
 def owner_ids_whose_acceptable_zones_contain_point(
