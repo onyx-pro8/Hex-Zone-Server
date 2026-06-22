@@ -1,6 +1,6 @@
 """Pydantic schemas for request/response validation."""
 from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, model_validator, computed_field
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 from datetime import datetime
 from enum import Enum
 
@@ -468,6 +468,22 @@ class ZoneMessageCreate(BaseModel):
         validation_alias=AliasChoices("zone_id", "zoneId"),
         description="Target zone for member→guest messaging; required when **guest_id** is set.",
     )
+    latitude: Optional[float] = Field(
+        default=None,
+        ge=-90,
+        le=90,
+        description="Sender latitude at message creation time.",
+    )
+    longitude: Optional[float] = Field(
+        default=None,
+        ge=-180,
+        le=180,
+        description="Sender longitude at message creation time.",
+    )
+    msg: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Optional structured payload (e.g. broadcast_name, latitude, longitude).",
+    )
 
     @model_validator(mode="after")
     def merge_message_type_into_type(self):
@@ -567,6 +583,14 @@ class ZoneMessageResponse(BaseModel):
     visibility: MessageVisibilityEnum = Field(description="Legacy visibility; aligns with **scope** for new clients.")
     message: str = Field(description="Body text stored for the message or zone event.")
     created_at: datetime = Field(description="Server **UTC** creation time.")
+    latitude: Optional[float] = Field(
+        default=None,
+        description="Sender latitude when available from geo propagation or client payload.",
+    )
+    longitude: Optional[float] = Field(
+        default=None,
+        description="Sender longitude when available from geo propagation or client payload.",
+    )
     guest_id: Optional[str] = Field(
         default=None,
         description=(

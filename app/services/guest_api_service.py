@@ -415,6 +415,18 @@ def zone_message_event_to_member_zone_message_response(
         if sender_owner is not None:
             broadcast_name = sender_owner.message_display_name
 
+    latitude = None
+    longitude = None
+    for source in (meta, meta.get("position") if isinstance(meta.get("position"), dict) else None):
+        if not isinstance(source, dict):
+            continue
+        lat = source.get("latitude")
+        lng = source.get("longitude")
+        if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+            latitude = float(lat)
+            longitude = float(lng)
+            break
+
     return ZoneMessageResponse(
         id=row.id,
         zone_id=row.zone_id,
@@ -431,6 +443,8 @@ def zone_message_event_to_member_zone_message_response(
         ),
         message=row.text,
         created_at=row.created_at,
+        latitude=latitude,
+        longitude=longitude,
         guest_id=access_thread_guest_marker(row),
         permission_visibility=perm_vis,
         guest_access_session_id=row.guest_access_session_id,
@@ -641,6 +655,9 @@ def create_member_to_guest_zone_message(
     guest_id: str,
     text: str,
     msg_type: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    msg: dict[str, Any] | None = None,
 ) -> ZoneMessageEvent | dict[str, Any]:
     """Persist **ZoneMessageEvent** from a member to a guest thread (same store as **GET /api/guest/messages**).
 
@@ -684,6 +701,13 @@ def create_member_to_guest_zone_message(
         "guest_name": row.guest_name,
         "zone_id": zid,
     }
+    metadata: dict[str, Any] = {"flow": "member_to_guest", "guest_id": gid}
+    if isinstance(msg, dict):
+        metadata.update(msg)
+    if latitude is not None and longitude is not None:
+        metadata["latitude"] = latitude
+        metadata["longitude"] = longitude
+        metadata["position"] = {"latitude": latitude, "longitude": longitude}
     event = ZoneMessageEvent(
         zone_id=zid,
         sender_id=sender.id,
@@ -694,7 +718,7 @@ def create_member_to_guest_zone_message(
         scope=type_scope(canonical),
         text=display_text or "(no text)",
         body_json=body,
-        metadata_json={"flow": "member_to_guest", "guest_id": gid},
+        metadata_json=metadata,
     )
     db.add(event)
     db.flush()

@@ -172,6 +172,9 @@ async def create_message(
             guest_id=gid,
             text=payload.message,
             msg_type=payload.type or "",
+            latitude=payload.latitude,
+            longitude=payload.longitude,
+            msg=payload.msg if isinstance(payload.msg, dict) else None,
         )
         if isinstance(guest_result, dict):
             code = guest_result.get("__reject__")
