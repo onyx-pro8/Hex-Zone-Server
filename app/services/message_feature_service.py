@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -21,18 +22,22 @@ from app.domain.message_types import (
 from app.models import EmergencyEvent, Owner, ZoneMessageEvent
 from app.schemas.message_feature import MessageFeatureType, PropagationMessageCreate
 from app.services import message_block_service
+from app.services.access_policy import messaging_visible_owner_ids
 from app.services.geospatial_service import (
     evaluate_zone_records_containing_point,
-    owner_ids_located_within_zone_records,
+    owner_ids_whose_acceptable_zone_records_contain_point,
     zone_ids_for_zone_records,
 )
 from app.services.unknown_fanout_service import (
     UNKNOWN_RATE_LIMIT_SECONDS,
-    resolve_nearest_owner_ids_among,
+    resolve_nearest_owner_ids,
     unknown_fanout_limit,
 )
 
 logger = logging.getLogger(__name__)
+
+PRIVATE_SEARCH_MIN_QUERY_LEN = 2
+PRIVATE_SEARCH_MAX_RESULTS = 20
 
 
 class UnknownRateLimitError(Exception):
@@ -108,6 +113,15 @@ def _assert_sensor_rate_limit_ok(db: Session, sender_id: int) -> None:
         raise SensorRateLimitError()
 
 
+def _private_recipient_pool(db: Session, sender: Owner) -> set[int]:
+    """Account members the sender may target with PRIVATE (excluding self)."""
+    return {
+        int(oid)
+        for oid in messaging_visible_owner_ids(db, sender, require_same_zone=False)
+        if int(oid) != int(sender.id)
+    }
+
+
 def _assert_private_receiver_reachable(
     db: Session,
     sender: Owner,
@@ -115,12 +129,10 @@ def _assert_private_receiver_reachable(
     *,
     sender_zone_record_ids: list[int],
 ) -> None:
-    """PRIVATE messages target one recipient who is physically inside the sender's zone(s).
+    """PRIVATE: sender must be inside a zone; receiver must be an active account member.
 
-    The zone here is a *permission/validation boundary*, derived from the sender's
-    current GPS location (``sender_zone_record_ids``), not a static ``zone_id`` label.
-    The selected recipient must be an active member whose own realtime location
-    falls inside at least one of those same zone geometries.
+    Recipient realtime location is **not** required — only the sender's GPS is used
+    as a permission gate (must be inside some zone geometry).
     """
     receiver = db.get(Owner, receiver_owner_id)
     if receiver is None or not bool(receiver.active):
@@ -137,13 +149,73 @@ def _assert_private_receiver_reachable(
             "You are not currently inside any zone, so you cannot send a PRIVATE message."
         )
 
-    located_owner_ids = set(
-        owner_ids_located_within_zone_records(db, sender_zone_record_ids)
-    )
-    if receiver.id not in located_owner_ids:
+    if receiver.id not in _private_recipient_pool(db, sender):
         raise PrivateScopeRecipientError(
-            "PRIVATE receiver must be currently located inside the same zone as you."
+            "PRIVATE receiver must be a member of your account."
         )
+
+
+def search_private_message_recipients(
+    db: Session,
+    sender: Owner,
+    query: str,
+    *,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    limit: int = PRIVATE_SEARCH_MAX_RESULTS,
+) -> dict:
+    """Search account members by name or email for PRIVATE compose (single query field)."""
+    lat = latitude if latitude is not None else sender.latitude
+    lon = longitude if longitude is not None else sender.longitude
+    if lat is None or lon is None:
+        return {"zone_ids": [], "members": []}
+
+    zone_record_ids = evaluate_zone_records_containing_point(db, float(lat), float(lon))
+    zone_ids = zone_ids_for_zone_records(db, zone_record_ids)
+    if not zone_record_ids:
+        return {"zone_ids": [], "members": []}
+
+    q = (query or "").strip()
+    if len(q) < PRIVATE_SEARCH_MIN_QUERY_LEN:
+        return {"zone_ids": zone_ids, "members": []}
+
+    candidate_ids = sorted(_private_recipient_pool(db, sender))
+    if not candidate_ids:
+        return {"zone_ids": zone_ids, "members": []}
+
+    pattern = f"%{q.lower()}%"
+    cap = max(1, min(int(limit), PRIVATE_SEARCH_MAX_RESULTS))
+    rows = (
+        db.query(Owner)
+        .filter(
+            Owner.id.in_(candidate_ids),
+            Owner.active.is_(True),
+            or_(
+                func.lower(Owner.broadcast_name).like(pattern),
+                func.lower(Owner.first_name).like(pattern),
+                func.lower(Owner.last_name).like(pattern),
+                func.lower(Owner.email).like(pattern),
+            ),
+        )
+        .order_by(Owner.first_name.asc(), Owner.last_name.asc(), Owner.id.asc())
+        .limit(cap)
+        .all()
+    )
+
+    members = [
+        {
+            "id": int(row.id),
+            "display_name": row.message_display_name,
+            "broadcast_name": (row.broadcast_name or "").strip() or None,
+            "first_name": row.first_name,
+            "last_name": row.last_name,
+            "email": row.email,
+            "zone_id": row.zone_id,
+            "subtitle": row.email,
+        }
+        for row in rows
+    ]
+    return {"zone_ids": zone_ids, "members": members}
 
 
 def _apply_delivery_blocks(
@@ -177,14 +249,12 @@ def _zone_based_recipients(
 ) -> tuple[list[str], list[int], dict]:
     """Resolve recipients for geo alarm/alert types (not UNKNOWN).
 
-    The sender's current GPS location (``payload.position``) is matched against
-    zone geometry to determine which zone(s) the sender is inside. Recipients are
-    then every active owner whose own **realtime location** falls inside one of
-    those same zone(s) — i.e. "everyone currently in the zone".
+    The sender's GPS (``payload.position``) is tested against each owner's
+    acceptable zone geometry (primary + secondary). Owners whose zone contains
+    the sender receive the message regardless of the recipient's own location.
 
-    For PRIVATE scope the same zone(s) are used purely as a permission boundary:
-    exactly one explicitly-selected recipient is delivered to, and only if that
-    recipient is currently located inside one of the sender's zone(s).
+    For PRIVATE scope the sender must be inside a zone; exactly one explicitly
+    selected account member receives the message.
     """
     latitude = float(payload.position.latitude)
     longitude = float(payload.position.longitude)
@@ -202,24 +272,25 @@ def _zone_based_recipients(
             sender_zone_ids,
             [payload.receiver_owner_id],
             {
-                "strategy": "private_same_zone",
+                "strategy": "private_sender_in_zone",
                 "sender_zone_ids": sender_zone_ids,
                 "sender_zone_record_ids": sender_zone_record_ids,
             },
         )
 
-    located_owner_ids = owner_ids_located_within_zone_records(
+    acceptable_zone_ids, recipient_owner_ids = owner_ids_whose_acceptable_zone_records_contain_point(
         db,
-        sender_zone_record_ids,
+        latitude,
+        longitude,
         exclude_owner_id=sender.id,
     )
     meta = {
-        "strategy": "recipients_located_in_zone",
-        "sender_zone_ids": sender_zone_ids,
+        "strategy": "acceptable_zone_contains_sender",
+        "sender_zone_ids": acceptable_zone_ids or sender_zone_ids,
         "sender_zone_record_ids": sender_zone_record_ids,
-        "located_owner_ids": located_owner_ids,
+        "recipient_owner_ids": recipient_owner_ids,
     }
-    return sender_zone_ids, located_owner_ids, meta
+    return acceptable_zone_ids or sender_zone_ids, recipient_owner_ids, meta
 
 
 def _log_emergency_event(
@@ -280,40 +351,24 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
 
     if canonical_type == CanonicalMessageType.UNKNOWN:
         _assert_unknown_rate_limit_ok(db, sender.id)
-        zone_lat = float(payload.position.latitude)
-        zone_lon = float(payload.position.longitude)
         origin_lat, origin_lon, origin_source = _resolve_unknown_origin(sender, payload)
         if origin_source == "message_position":
             sender.latitude = origin_lat
             sender.longitude = origin_lon
             sender.location_updated_at = datetime.utcnow()
 
-        sender_zone_record_ids = evaluate_zone_records_containing_point(db, zone_lat, zone_lon)
-        sender_zone_ids = zone_ids_for_zone_records(db, sender_zone_record_ids)
         target_x = unknown_fanout_limit(sender)
-        located_owner_ids = (
-            owner_ids_located_within_zone_records(
-                db,
-                sender_zone_record_ids,
-                exclude_owner_id=sender.id,
-            )
-            if sender_zone_record_ids
-            else []
-        )
-        candidate_recipients = resolve_nearest_owner_ids_among(
+        candidate_recipients = resolve_nearest_owner_ids(
             db,
-            origin_lat=zone_lat,
-            origin_lon=zone_lon,
-            candidate_owner_ids=located_owner_ids,
+            origin_lat=origin_lat,
+            origin_lon=origin_lon,
+            sender_id=sender.id,
             limit=target_x,
         )
-        zone_ids = sender_zone_ids
+        zone_ids: list[str] = []
         fanout_meta = {
             "account_type": account_type,
-            "strategy": "unknown_nearest_in_zone",
-            "sender_zone_ids": sender_zone_ids,
-            "sender_zone_record_ids": sender_zone_record_ids,
-            "located_owner_ids": located_owner_ids,
+            "strategy": "unknown_nearest_global",
             "target_x": target_x,
             "resolved_x": len(candidate_recipients),
             "origin": {
@@ -322,7 +377,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
                 "source": origin_source,
             },
         }
-        position_for_metadata = {"latitude": zone_lat, "longitude": zone_lon}
+        position_for_metadata = {"latitude": origin_lat, "longitude": origin_lon}
     else:
         if canonical_type == CanonicalMessageType.SENSOR:
             _assert_sensor_rate_limit_ok(db, sender.id)

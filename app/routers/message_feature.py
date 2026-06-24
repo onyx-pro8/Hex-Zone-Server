@@ -195,6 +195,36 @@ async def list_in_zone_members(
     return {"zone_ids": zone_ids, "members": members}
 
 
+@router.get(
+    "/members/search",
+    summary="Search account members for PRIVATE message recipient",
+    description=(
+        "Single-field search by name or email. The caller must be inside a zone "
+        "(``latitude``/``longitude`` or stored location). Returns account members "
+        "matching the query — recipient location is not required."
+    ),
+)
+async def search_members_for_private(
+    q: str = Query(..., min_length=1, max_length=120, description="Name or email fragment"),
+    latitude: float | None = Query(default=None, ge=-90, le=90),
+    longitude: float | None = Query(default=None, ge=-180, le=180),
+    limit: int = Query(default=20, ge=1, le=50),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    me = owner_crud.get_owner(db, current_user["user_id"])
+    if not me:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    return message_feature_service.search_private_message_recipients(
+        db,
+        me,
+        q,
+        latitude=latitude,
+        longitude=longitude,
+        limit=limit,
+    )
+
+
 @router.post("/messages/propagate", response_model=PropagationMessageResponse, status_code=status.HTTP_201_CREATED)
 async def create_geo_message(
     payload: dict,

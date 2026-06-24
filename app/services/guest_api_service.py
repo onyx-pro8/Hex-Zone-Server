@@ -417,6 +417,7 @@ def zone_message_event_to_member_zone_message_response(
 
     latitude = None
     longitude = None
+    delivered_owner_ids: list[int] | None = None
     for source in (meta, meta.get("position") if isinstance(meta.get("position"), dict) else None):
         if not isinstance(source, dict):
             continue
@@ -426,6 +427,11 @@ def zone_message_event_to_member_zone_message_response(
             latitude = float(lat)
             longitude = float(lng)
             break
+    raw_delivered = meta.get("delivered_owner_ids")
+    if isinstance(raw_delivered, list):
+        delivered_owner_ids = [
+            int(x) for x in raw_delivered if isinstance(x, (int, float)) and not isinstance(x, bool)
+        ]
 
     return ZoneMessageResponse(
         id=row.id,
@@ -445,6 +451,7 @@ def zone_message_event_to_member_zone_message_response(
         created_at=row.created_at,
         latitude=latitude,
         longitude=longitude,
+        delivered_owner_ids=delivered_owner_ids,
         guest_id=access_thread_guest_marker(row),
         permission_visibility=perm_vis,
         guest_access_session_id=row.guest_access_session_id,

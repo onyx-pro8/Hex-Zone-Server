@@ -591,6 +591,13 @@ class ZoneMessageResponse(BaseModel):
         default=None,
         description="Sender longitude when available from geo propagation or client payload.",
     )
+    delivered_owner_ids: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "Owner ids that received this geo-propagated message (from propagation metadata). "
+            "Omitted for non-broadcast rows."
+        ),
+    )
     guest_id: Optional[str] = Field(
         default=None,
         description=(

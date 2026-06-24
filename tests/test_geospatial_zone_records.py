@@ -15,6 +15,7 @@ from app.services.geospatial_service import (
     evaluate_zone_records_containing_point,
     owner_ids_located_within_zone_ids,
     owner_ids_located_within_zone_records,
+    owner_ids_whose_acceptable_zone_records_contain_point,
 )
 
 
@@ -125,6 +126,14 @@ def test_shared_zone_id_does_not_fan_out_to_other_geometries(geo_db):
     )
     _proximity_zone(
         geo_db,
+        record_id=103,
+        owner_id=seattle_peer.id,
+        zone_id=shared,
+        center_lat=47.6062,
+        center_lon=-122.3321,
+    )
+    _proximity_zone(
+        geo_db,
         record_id=102,
         owner_id=miami_peer.id,
         zone_id=shared,
@@ -135,7 +144,13 @@ def test_shared_zone_id_does_not_fan_out_to_other_geometries(geo_db):
 
     send_lat, send_lon = 47.6062, -122.3321
     matched_records = evaluate_zone_records_containing_point(geo_db, send_lat, send_lon)
-    assert matched_records == [seattle_zone.id]
+    assert matched_records == [101, 103]
+
+    _, acceptable_owners = owner_ids_whose_acceptable_zone_records_contain_point(
+        geo_db, send_lat, send_lon, exclude_owner_id=sender.id
+    )
+    assert seattle_peer.id in acceptable_owners
+    assert miami_peer.id not in acceptable_owners
 
     by_records = owner_ids_located_within_zone_records(
         geo_db, matched_records, exclude_owner_id=sender.id

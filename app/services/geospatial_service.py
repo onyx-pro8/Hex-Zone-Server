@@ -489,6 +489,36 @@ def owner_ids_whose_acceptable_zones_contain_point(
     return zone_ids, owner_ids
 
 
+def owner_ids_whose_acceptable_zone_records_contain_point(
+    db: Session,
+    latitude: float,
+    longitude: float,
+    *,
+    exclude_owner_id: int | None = None,
+) -> tuple[list[str], list[int]]:
+    """Owners whose owned zone **row geometry** contains the point.
+
+    Uses exact matched ``zones.id`` rows (primary + secondary acceptable zones),
+    not shared ``zone_id`` labels — so Seattle geometry never fans out to Miami
+    rows that share the same account label.
+    """
+    zone_record_ids = evaluate_zone_records_containing_point(db, latitude, longitude)
+    zone_ids = zone_ids_for_zone_records(db, zone_record_ids)
+    if not zone_record_ids:
+        return zone_ids, []
+
+    rows = (
+        db.query(Zone.owner_id)
+        .filter(Zone.id.in_(zone_record_ids), Zone.active.is_(True))
+        .distinct()
+        .all()
+    )
+    owner_ids = sorted({int(row[0]) for row in rows})
+    if exclude_owner_id is not None:
+        owner_ids = [oid for oid in owner_ids if oid != int(exclude_owner_id)]
+    return zone_ids, owner_ids
+
+
 def owner_ids_located_within_zone_ids(
     db: Session,
     zone_ids: Iterable[str],
