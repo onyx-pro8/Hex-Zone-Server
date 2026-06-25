@@ -198,11 +198,12 @@ async def list_in_zone_members(
 
 @router.get(
     "/members/search",
-    summary="Search account members for PRIVATE message recipient",
+    summary="Search owners with the same zone id for PRIVATE message recipient",
     description=(
         "Single-field search by name or email. The caller must be inside a zone "
-        "(``latitude``/``longitude`` or stored location). Returns admin and members "
-        "reachable from that zone context (same pool as PANIC/PA), excluding the caller."
+        "(``latitude``/``longitude`` or stored location). Returns all active owners "
+        "whose profile ``zone_id`` matches the zone at that location (same pool as "
+        "PANIC/PA), excluding the caller."
     ),
 )
 async def search_members_for_private(

@@ -13,15 +13,12 @@ from app.schemas.message_feature import CoordinatePayload, MessageFeatureType, P
 from app.services import message_feature_service as mfs
 
 
-def _mock_acceptable_zone_fanout(
+def _mock_zone_id_fanout(
     monkeypatch,
     *,
     record_ids: list[int],
     zone_labels: list[str],
-    recipient_ids: list[int],
 ) -> None:
-    from app.services.access_policy import account_propagation_owner_ids
-
     def fake_resolve(
         db,
         *,
@@ -29,18 +26,7 @@ def _mock_acceptable_zone_fanout(
         longitude,
         exclude_owner_id=None,
     ):
-        pool: set[int] = set(int(oid) for oid in recipient_ids)
-        matched = {int(rid) for rid in record_ids}
-        zone_owners = {int(oid) for oid in recipient_ids}
-        for oid in list(recipient_ids):
-            owner = db.get(Owner, int(oid))
-            if owner is None:
-                continue
-            for member_id in account_propagation_owner_ids(db, owner):
-                if mfs._member_relevant_to_matched_zone_records(
-                    db, int(member_id), matched, zone_owners
-                ):
-                    pool.add(int(member_id))
+        pool = set(mfs._owner_ids_for_zone_id_labels(db, zone_labels))
         if exclude_owner_id is not None:
             pool.discard(int(exclude_owner_id))
         sorted_pool = sorted(pool)
@@ -49,10 +35,9 @@ def _mock_acceptable_zone_fanout(
             list(record_ids),
             sorted_pool,
             {
-                "strategy": "zone_context_account_members",
+                "strategy": "matching_zone_id_owners",
                 "sender_zone_ids": list(zone_labels),
                 "sender_zone_record_ids": list(record_ids),
-                "zone_owner_ids": sorted(int(oid) for oid in recipient_ids),
                 "recipient_owner_ids": sorted_pool,
             },
         )
@@ -84,11 +69,12 @@ def _owner(
     account_owner_id: int | None = None,
     first_name: str = "T",
     last_name: str = "U",
+    zone_id: str | None = None,
 ) -> Owner:
     owner = Owner(
         id=oid,
         email=email,
-        zone_id=f"zone-{oid}",
+        zone_id=zone_id if zone_id is not None else f"zone-{oid}",
         first_name=first_name,
         last_name=last_name,
         account_type=account_type,
@@ -245,7 +231,8 @@ def test_unknown_delivers_nearest_even_when_zones_ignored(prop_db):
 
 
 def test_user_role_sender_reaches_zone_owner_when_sender_in_zone(prop_db, monkeypatch):
-    _owner(prop_db, oid=20, email="admin@x.com", lat=0.5, lon=0.5)
+    zone_label = "zone-x"
+    _owner(prop_db, oid=20, email="admin@x.com", lat=0.5, lon=0.5, zone_id=zone_label)
     user_sender = _owner(
         prop_db,
         oid=21,
@@ -254,14 +241,14 @@ def test_user_role_sender_reaches_zone_owner_when_sender_in_zone(prop_db, monkey
         lon=0.0,
         account_owner_id=20,
         role=OwnerRole.USER,
+        zone_id=zone_label,
     )
     prop_db.commit()
 
-    _mock_acceptable_zone_fanout(
+    _mock_zone_id_fanout(
         monkeypatch,
         record_ids=[1],
-        zone_labels=["zone-x"],
-        recipient_ids=[20],
+        zone_labels=[zone_label],
     )
 
     payload = PropagationMessageCreate(
@@ -277,17 +264,17 @@ def test_user_role_sender_reaches_zone_owner_when_sender_in_zone(prop_db, monkey
     assert 21 not in delivered
 
 
-def test_zone_propagation_delivers_to_acceptable_zone_owners(prop_db, monkeypatch):
-    sender = _owner(prop_db, oid=10, email="sender@x.com", lat=0.0, lon=0.0)
-    _owner(prop_db, oid=11, email="inzone@x.com", lat=1.0, lon=1.0)
-    _owner(prop_db, oid=99, email="outsider@x.com", lat=1.0, lon=1.0)
+def test_zone_propagation_delivers_to_owners_with_matching_zone_id(prop_db, monkeypatch):
+    zone_label = "zone-match"
+    sender = _owner(prop_db, oid=10, email="sender@x.com", lat=0.0, lon=0.0, zone_id=zone_label)
+    _owner(prop_db, oid=11, email="inzone@x.com", lat=1.0, lon=1.0, zone_id=zone_label)
+    _owner(prop_db, oid=99, email="outsider@x.com", lat=1.0, lon=1.0, zone_id="zone-other")
     prop_db.commit()
 
-    _mock_acceptable_zone_fanout(
+    _mock_zone_id_fanout(
         monkeypatch,
         record_ids=[42],
-        zone_labels=["zone-match"],
-        recipient_ids=[11],
+        zone_labels=[zone_label],
     )
 
     payload = PropagationMessageCreate(
@@ -298,7 +285,7 @@ def test_zone_propagation_delivers_to_acceptable_zone_owners(prop_db, monkeypatc
     )
     result = mfs.create_geo_propagated_message(prop_db, sender, payload)
     assert result["skipped"] is False
-    assert result["fanout"]["strategy"] == "zone_context_account_members"
+    assert result["fanout"]["strategy"] == "matching_zone_id_owners"
     delivered = set(result["delivered_owner_ids"])
     assert 11 in delivered
     assert 99 not in delivered
@@ -306,7 +293,16 @@ def test_zone_propagation_delivers_to_acceptable_zone_owners(prop_db, monkeypatc
 
 
 def test_private_requires_sender_in_zone(prop_db, monkeypatch):
-    sender = _owner(prop_db, oid=30, email="psender@x.com", lat=0.5, lon=0.5, account_owner_id=30)
+    zone_label = "zone-p"
+    sender = _owner(
+        prop_db,
+        oid=30,
+        email="psender@x.com",
+        lat=0.5,
+        lon=0.5,
+        account_owner_id=30,
+        zone_id=zone_label,
+    )
     receiver = _owner(
         prop_db,
         oid=31,
@@ -315,14 +311,14 @@ def test_private_requires_sender_in_zone(prop_db, monkeypatch):
         lon=9.0,
         account_owner_id=30,
         role=OwnerRole.USER,
+        zone_id=zone_label,
     )
     prop_db.commit()
 
-    _mock_acceptable_zone_fanout(
+    _mock_zone_id_fanout(
         monkeypatch,
         record_ids=[1],
-        zone_labels=["zone-p"],
-        recipient_ids=[30],
+        zone_labels=[zone_label],
     )
 
     payload = PropagationMessageCreate(
@@ -368,7 +364,53 @@ def test_private_rejects_when_sender_not_in_zone(prop_db, monkeypatch):
         mfs.create_geo_propagated_message(prop_db, sender, payload)
 
 
+def test_resolve_geo_propagation_matches_owners_by_zone_id_label(prop_db, monkeypatch):
+    zone_label = "ZN-6DV321"
+    sender = _owner(prop_db, oid=1, email="tester2@test.com", zone_id=zone_label)
+    _owner(
+        prop_db,
+        oid=3,
+        email="tester3@test.com",
+        zone_id=zone_label,
+        first_name="tester",
+        last_name="3",
+    )
+    _owner(
+        prop_db,
+        oid=14,
+        email="tester4@test.com",
+        zone_id=zone_label,
+        first_name="tester",
+        last_name="4",
+    )
+    _owner(prop_db, oid=99, email="outsider@x.com", zone_id="OTHER-ZONE")
+    prop_db.commit()
+
+    monkeypatch.setattr(
+        mfs,
+        "evaluate_zone_records_containing_point",
+        lambda db, lat, lon: [101],
+    )
+    monkeypatch.setattr(
+        mfs,
+        "zone_ids_for_zone_records",
+        lambda db, record_ids: [zone_label],
+    )
+
+    zone_ids, record_ids, recipients, meta = mfs.resolve_geo_propagation_recipient_owner_ids(
+        prop_db,
+        latitude=49.651,
+        longitude=23.851,
+        exclude_owner_id=sender.id,
+    )
+    assert zone_ids == [zone_label]
+    assert record_ids == [101]
+    assert set(recipients) == {3, 14}
+    assert meta["strategy"] == "matching_zone_id_owners"
+
+
 def test_private_search_by_name(prop_db, monkeypatch):
+    zone_label = "zone-s"
     sender = _owner(
         prop_db,
         oid=50,
@@ -378,6 +420,7 @@ def test_private_search_by_name(prop_db, monkeypatch):
         account_owner_id=50,
         first_name="Admin",
         last_name="Root",
+        zone_id=zone_label,
     )
     _owner(
         prop_db,
@@ -389,22 +432,18 @@ def test_private_search_by_name(prop_db, monkeypatch):
         role=OwnerRole.USER,
         first_name="Ann",
         last_name="Johnson",
+        zone_id=zone_label,
     )
     prop_db.commit()
 
-    monkeypatch.setattr(
-        mfs,
-        "resolve_geo_propagation_recipient_owner_ids",
-        lambda db, *, latitude, longitude, exclude_owner_id=None: (
-            ["zone-s"],
-            [99],
-            [oid for oid in [51] if exclude_owner_id is None or oid != exclude_owner_id],
-            {"strategy": "zone_context_account_members"},
-        ),
+    _mock_zone_id_fanout(
+        monkeypatch,
+        record_ids=[99],
+        zone_labels=[zone_label],
     )
 
     result = mfs.search_private_message_recipients(prop_db, sender, "ann")
-    assert result["zone_ids"] == ["zone-s"]
+    assert result["zone_ids"] == [zone_label]
     assert len(result["members"]) == 1
     assert result["members"][0]["id"] == 51
     assert "Ann" in result["members"][0]["display_name"]

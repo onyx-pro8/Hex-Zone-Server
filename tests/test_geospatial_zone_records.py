@@ -89,8 +89,8 @@ def _proximity_zone(
     return zone
 
 
-def test_shared_zone_id_does_not_fan_out_to_other_geometries(geo_db):
-    """Regression: Seattle send must not notify Miami member on same zone_id label."""
+def test_shared_zone_id_fans_out_to_all_owners_with_label(geo_db):
+    """Owners with the same profile zone_id receive PANIC when sender is inside that zone."""
     shared = "FAMILY-ACCOUNT"
     sender = _owner(
         geo_db,
@@ -169,5 +169,6 @@ def test_shared_zone_id_does_not_fan_out_to_other_geometries(geo_db):
     result = mfs.create_geo_propagated_message(geo_db, sender, payload)
     delivered = set(result["delivered_owner_ids"])
     assert seattle_peer.id in delivered
-    assert miami_peer.id not in delivered
+    assert miami_peer.id in delivered
     assert sender.id not in delivered
+    assert result["fanout"]["strategy"] == "matching_zone_id_owners"
