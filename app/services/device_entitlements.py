@@ -1,9 +1,12 @@
 """Account type constraints for devices and member invitations."""
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.crud import device as device_crud
 from app.models import Owner
 
 
@@ -36,6 +39,57 @@ def max_devices_for_account_type(account_type: str) -> int | None:
 def max_user_members_for_account_type(account_type: str) -> int | None:
     """Return max invited user-members allowed for an admin of this tier."""
     return USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE.get(str(account_type).strip().lower())
+
+
+ACCOUNT_IN_USE_DETAIL = (
+    "This account is already in use on another device. Sign out there first."
+)
+
+
+def assert_no_conflicting_online_session(
+    db: Session,
+    owner_id: int,
+    enrolling_hid: str,
+) -> None:
+    """Reject enrollment when another device for this owner is still online."""
+    devices = device_crud.list_devices(db, owner_id=owner_id)
+    normalized_hid = str(enrolling_hid).strip().upper()
+    for device in devices:
+        if str(device.hid).strip().upper() == normalized_hid:
+            continue
+        if device.is_online:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=ACCOUNT_IN_USE_DETAIL,
+            )
+
+
+def _device_recency(device) -> datetime:
+    for value in (device.last_seen, device.updated_at, device.created_at):
+        if value is not None:
+            return value
+    return datetime.min
+
+
+def evict_offline_devices_to_make_room(db: Session, owner: Owner) -> None:
+    """Remove oldest offline devices until the owner is under their tier cap."""
+    max_devices = max_devices_for_account_type(owner.account_type.value)
+    if max_devices is None:
+        return
+    devices = device_crud.list_devices(db, owner_id=owner.id)
+    while len(devices) >= max_devices:
+        offline = [device for device in devices if not device.is_online]
+        if not offline:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Account type '{owner.account_type.value}' allows at most "
+                    f"{max_devices} device(s) per owner"
+                ),
+            )
+        oldest = min(offline, key=_device_recency)
+        device_crud.delete_device(db, oldest.id, owner_id=owner.id)
+        devices = [device for device in devices if device.id != oldest.id]
 
 
 def assert_owner_device_capacity(owner: Owner, current_device_count: int) -> None:

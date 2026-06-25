@@ -55,6 +55,7 @@ from app.services.message_feature_service import (
 )
 from app.services import push_notification_service
 from app.services import wellness_ack_service
+from app.services import alarm_read_service
 from app.services.member_service import upsert_member_location
 from app.websocket.manager import ws_manager
 
@@ -200,12 +201,12 @@ async def list_in_zone_members(
     summary="Search account members for PRIVATE message recipient",
     description=(
         "Single-field search by name or email. The caller must be inside a zone "
-        "(``latitude``/``longitude`` or stored location). Returns account members "
-        "matching the query — recipient location is not required."
+        "(``latitude``/``longitude`` or stored location). Returns admin and members "
+        "reachable from that zone context (same pool as PANIC/PA), excluding the caller."
     ),
 )
 async def search_members_for_private(
-    q: str = Query(..., min_length=1, max_length=120, description="Name or email fragment"),
+    q: str = Query(default="", max_length=120, description="Optional name or email fragment"),
     latitude: float | None = Query(default=None, ge=-90, le=90),
     longitude: float | None = Query(default=None, ge=-180, le=180),
     limit: int = Query(default=20, ge=1, le=50),
@@ -286,6 +287,56 @@ async def create_geo_message(
 class WellnessAckRequest(BaseModel):
     status: str = Field(default="ok", description="Recipient status: ok | need_help")
     note: str | None = Field(default=None, max_length=500)
+
+
+class AlarmMarkReadRequest(BaseModel):
+    message_ids: list[str] = Field(
+        default_factory=list,
+        description="Alarm message event UUIDs to mark as read for the authenticated viewer.",
+    )
+
+
+@router.post(
+    "/messages/{message_event_id}/alarm-read",
+    status_code=status.HTTP_201_CREATED,
+    summary="Mark an alarm message as read",
+)
+async def mark_alarm_read(
+    message_event_id: str = Path(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = alarm_read_service.record_alarm_read(
+        db,
+        message_event_id=message_event_id,
+        owner=owner,
+    )
+    db.commit()
+    return result
+
+
+@router.post(
+    "/alarms/mark-read",
+    summary="Mark multiple alarm messages as read",
+)
+async def mark_alarms_read(
+    body: AlarmMarkReadRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = alarm_read_service.record_alarm_reads(
+        db,
+        message_event_ids=body.message_ids,
+        owner=owner,
+    )
+    db.commit()
+    return result
 
 
 @router.get(

@@ -622,6 +622,17 @@ class ZoneMessageResponse(BaseModel):
         default=None,
         description="When **`permission_visibility`** is **`zone_pending_broadcast`**, whether the linked session is still **`pending`**.",
     )
+    read_by_owner_ids: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "For **`category`** **`Alarm`** (**`ZoneMessageEvent`** UUID rows): owner ids that have "
+            "opened/viewed this alarm."
+        ),
+    )
+    is_read_by_viewer: Optional[bool] = Field(
+        default=None,
+        description="When **`category`** is **`Alarm`**, whether the authenticated viewer has read this alarm.",
+    )
 
     model_config = ConfigDict(
         from_attributes=True,

@@ -21,9 +21,19 @@ from app.services import guest_api_service
 from app.services import guest_access_service
 from app.services.access_policy import can_message_owner
 from app.services import message_block_service
+from app.services import alarm_read_service
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 logger = logging.getLogger(__name__)
+
+
+def _finalize_inbox_responses(
+    db: Session,
+    owner_id: int,
+    responses: list[ZoneMessageResponse],
+) -> list[ZoneMessageResponse]:
+    visible = message_block_service.filter_zone_message_responses_for_viewer(db, owner_id, responses)
+    return alarm_read_service.enrich_responses_with_alarm_reads(visible, owner_id, db)
 
 
 def _first_non_empty_str(*vals: str | None) -> str:
@@ -421,7 +431,7 @@ async def _list_zone_messages_for_owner(
         responses = [
             guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db) for event in rows
         ]
-        return message_block_service.filter_zone_message_responses_for_viewer(db, owner_id, responses)
+        return _finalize_inbox_responses(db, owner_id, responses)
 
     if other_owner_id is not None:
         other_owner = owner_crud.get_owner(db, other_owner_id)
@@ -459,7 +469,7 @@ async def _list_zone_messages_for_owner(
             )
             for message in peer_rows
         ]
-        return message_block_service.filter_zone_message_responses_for_viewer(db, owner_id, peer_responses)
+        return _finalize_inbox_responses(db, owner_id, peer_responses)
 
     fetch_cap = min(max(skip + limit + 128, limit * 2), 2500)
     inbox_rows = message_crud.list_visible_messages(
@@ -515,7 +525,7 @@ async def _list_zone_messages_for_owner(
         key=lambda item: item.created_at,
         reverse=True,
     )
-    visible = message_block_service.filter_zone_message_responses_for_viewer(db, owner_id, merged)
+    visible = _finalize_inbox_responses(db, owner_id, merged)
     return visible[skip : skip + limit]
 
 

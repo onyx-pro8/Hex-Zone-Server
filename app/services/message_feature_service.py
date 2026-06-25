@@ -19,10 +19,10 @@ from app.domain.message_types import (
     type_priority,
     type_scope,
 )
-from app.models import EmergencyEvent, Owner, ZoneMessageEvent
+from app.models import EmergencyEvent, Owner, Zone, ZoneMessageEvent
 from app.schemas.message_feature import MessageFeatureType, PropagationMessageCreate
 from app.services import message_block_service
-from app.services.access_policy import messaging_visible_owner_ids
+from app.services.access_policy import account_propagation_owner_ids, account_root_id
 from app.services.geospatial_service import (
     evaluate_zone_records_containing_point,
     owner_ids_whose_acceptable_zone_records_contain_point,
@@ -113,13 +113,89 @@ def _assert_sensor_rate_limit_ok(db: Session, sender_id: int) -> None:
         raise SensorRateLimitError()
 
 
-def _private_recipient_pool(db: Session, sender: Owner) -> set[int]:
-    """Account members the sender may target with PRIVATE (excluding self)."""
-    return {
-        int(oid)
-        for oid in messaging_visible_owner_ids(db, sender, require_same_zone=False)
-        if int(oid) != int(sender.id)
+def _member_relevant_to_matched_zone_records(
+    db: Session,
+    member_id: int,
+    matched_zone_record_ids: set[int],
+    zone_owner_ids: set[int],
+) -> bool:
+    """Include zone owners plus account members tied to matched geometry."""
+    if member_id in zone_owner_ids:
+        return True
+    owned_rows = (
+        db.query(Zone.id)
+        .filter(Zone.owner_id == member_id, Zone.active.is_(True))
+        .all()
+    )
+    if not owned_rows:
+        return True
+    owned_record_ids = {int(row[0]) for row in owned_rows}
+    return bool(owned_record_ids & matched_zone_record_ids)
+
+
+def resolve_geo_propagation_recipient_owner_ids(
+    db: Session,
+    *,
+    latitude: float,
+    longitude: float,
+    exclude_owner_id: int | None = None,
+) -> tuple[list[str], list[int], list[int], dict]:
+    """Resolve PANIC/PA/PRIVATE recipients from the sender's GPS inside zone geometry.
+
+    Zone owners at the sender point plus active account members on those owners'
+    accounts. Members who own only non-matching zone geometry (e.g. another city
+    on the same account label) are excluded. Recipient GPS is not required.
+    """
+    zone_record_ids = evaluate_zone_records_containing_point(db, float(latitude), float(longitude))
+    zone_ids = zone_ids_for_zone_records(db, zone_record_ids)
+    if not zone_record_ids:
+        return [], [], [], {
+            "strategy": "zone_context_account_members",
+            "sender_zone_record_ids": [],
+            "sender_zone_ids": [],
+            "zone_owner_ids": [],
+            "account_root_ids": [],
+            "recipient_owner_ids": [],
+        }
+
+    acceptable_zone_ids, zone_owner_ids_list = owner_ids_whose_acceptable_zone_records_contain_point(
+        db,
+        float(latitude),
+        float(longitude),
+        exclude_owner_id=None,
+    )
+    matched_record_set = {int(rid) for rid in zone_record_ids}
+    zone_owner_set = {int(oid) for oid in zone_owner_ids_list}
+
+    recipient_ids: set[int] = set(zone_owner_set)
+    account_root_ids: set[int] = set()
+    for zone_owner_id in zone_owner_ids_list:
+        owner = db.get(Owner, int(zone_owner_id))
+        if owner is None:
+            continue
+        account_root_ids.add(account_root_id(owner))
+        for member_id in account_propagation_owner_ids(db, owner):
+            if _member_relevant_to_matched_zone_records(
+                db,
+                int(member_id),
+                matched_record_set,
+                zone_owner_set,
+            ):
+                recipient_ids.add(int(member_id))
+
+    if exclude_owner_id is not None:
+        recipient_ids.discard(int(exclude_owner_id))
+
+    sorted_recipients = sorted(recipient_ids)
+    meta = {
+        "strategy": "zone_context_account_members",
+        "sender_zone_ids": acceptable_zone_ids or zone_ids,
+        "sender_zone_record_ids": zone_record_ids,
+        "zone_owner_ids": sorted(zone_owner_set),
+        "account_root_ids": sorted(account_root_ids),
+        "recipient_owner_ids": sorted_recipients,
     }
+    return acceptable_zone_ids or zone_ids, zone_record_ids, sorted_recipients, meta
 
 
 def _assert_private_receiver_reachable(
@@ -127,13 +203,11 @@ def _assert_private_receiver_reachable(
     sender: Owner,
     receiver_owner_id: int,
     *,
+    latitude: float,
+    longitude: float,
     sender_zone_record_ids: list[int],
 ) -> None:
-    """PRIVATE: sender must be inside a zone; receiver must be an active account member.
-
-    Recipient realtime location is **not** required — only the sender's GPS is used
-    as a permission gate (must be inside some zone geometry).
-    """
+    """PRIVATE: sender must be inside a zone; receiver must be in the PANIC/PA pool."""
     receiver = db.get(Owner, receiver_owner_id)
     if receiver is None or not bool(receiver.active):
         raise PrivateScopeRecipientError(
@@ -149,9 +223,15 @@ def _assert_private_receiver_reachable(
             "You are not currently inside any zone, so you cannot send a PRIVATE message."
         )
 
-    if receiver.id not in _private_recipient_pool(db, sender):
+    _, _, pool, _ = resolve_geo_propagation_recipient_owner_ids(
+        db,
+        latitude=latitude,
+        longitude=longitude,
+        exclude_owner_id=None,
+    )
+    if receiver.id not in pool:
         raise PrivateScopeRecipientError(
-            "PRIVATE receiver must be a member of your account."
+            "PRIVATE receiver must be an admin or member reachable from your current zone."
         )
 
 
@@ -164,43 +244,51 @@ def search_private_message_recipients(
     longitude: float | None = None,
     limit: int = PRIVATE_SEARCH_MAX_RESULTS,
 ) -> dict:
-    """Search account members by name or email for PRIVATE compose (single query field)."""
+    """Search reachable zone-context members by name or email for PRIVATE compose."""
     lat = latitude if latitude is not None else sender.latitude
     lon = longitude if longitude is not None else sender.longitude
     if lat is None or lon is None:
         return {"zone_ids": [], "members": []}
 
-    zone_record_ids = evaluate_zone_records_containing_point(db, float(lat), float(lon))
-    zone_ids = zone_ids_for_zone_records(db, zone_record_ids)
+    zone_ids, zone_record_ids, candidate_ids, _ = resolve_geo_propagation_recipient_owner_ids(
+        db,
+        latitude=float(lat),
+        longitude=float(lon),
+        exclude_owner_id=sender.id,
+    )
     if not zone_record_ids:
         return {"zone_ids": [], "members": []}
 
     q = (query or "").strip()
-    if len(q) < PRIVATE_SEARCH_MIN_QUERY_LEN:
-        return {"zone_ids": zone_ids, "members": []}
-
-    candidate_ids = sorted(_private_recipient_pool(db, sender))
     if not candidate_ids:
         return {"zone_ids": zone_ids, "members": []}
 
-    pattern = f"%{q.lower()}%"
     cap = max(1, min(int(limit), PRIVATE_SEARCH_MAX_RESULTS))
-    rows = (
+    query_builder = (
         db.query(Owner)
         .filter(
             Owner.id.in_(candidate_ids),
             Owner.active.is_(True),
+        )
+        .order_by(Owner.first_name.asc(), Owner.last_name.asc(), Owner.id.asc())
+    )
+    if len(q) >= PRIVATE_SEARCH_MIN_QUERY_LEN:
+        pattern = f"%{q.lower()}%"
+        full_name = func.lower(
+            func.trim(func.concat(func.coalesce(Owner.first_name, ""), " ", func.coalesce(Owner.last_name, "")))
+        )
+        query_builder = query_builder.filter(
             or_(
                 func.lower(Owner.broadcast_name).like(pattern),
                 func.lower(Owner.first_name).like(pattern),
                 func.lower(Owner.last_name).like(pattern),
                 func.lower(Owner.email).like(pattern),
-            ),
+                full_name.like(pattern),
+            )
         )
-        .order_by(Owner.first_name.asc(), Owner.last_name.asc(), Owner.id.asc())
-        .limit(cap)
-        .all()
-    )
+    elif len(q) > 0:
+        return {"zone_ids": zone_ids, "members": []}
+    rows = query_builder.limit(cap).all()
 
     members = [
         {
@@ -249,48 +337,45 @@ def _zone_based_recipients(
 ) -> tuple[list[str], list[int], dict]:
     """Resolve recipients for geo alarm/alert types (not UNKNOWN).
 
-    The sender's GPS (``payload.position``) is tested against each owner's
-    acceptable zone geometry (primary + secondary). Owners whose zone contains
-    the sender receive the message regardless of the recipient's own location.
+    Uses the same zone-context pool as PRIVATE search: zone owners at the sender
+    point plus all active members on those accounts. Recipient GPS is not required.
 
-    For PRIVATE scope the sender must be inside a zone; exactly one explicitly
-    selected account member receives the message.
+    For PRIVATE scope the sender must be inside a zone; exactly one selected
+    member from that pool receives the message.
     """
     latitude = float(payload.position.latitude)
     longitude = float(payload.position.longitude)
-    sender_zone_record_ids = evaluate_zone_records_containing_point(db, latitude, longitude)
-    sender_zone_ids = zone_ids_for_zone_records(db, sender_zone_record_ids)
+    sender_zone_ids, sender_zone_record_ids, recipient_owner_ids, zone_meta = (
+        resolve_geo_propagation_recipient_owner_ids(
+            db,
+            latitude=latitude,
+            longitude=longitude,
+            exclude_owner_id=sender.id,
+        )
+    )
 
     if scope == MessageScope.PRIVATE and payload.receiver_owner_id is None:
         raise ValueError("receiver_owner_id is required for private-scope message types")
 
     if scope == MessageScope.PRIVATE:
         _assert_private_receiver_reachable(
-            db, sender, payload.receiver_owner_id, sender_zone_record_ids=sender_zone_record_ids
+            db,
+            sender,
+            payload.receiver_owner_id,
+            latitude=latitude,
+            longitude=longitude,
+            sender_zone_record_ids=sender_zone_record_ids,
         )
         return (
             sender_zone_ids,
             [payload.receiver_owner_id],
             {
+                **zone_meta,
                 "strategy": "private_sender_in_zone",
-                "sender_zone_ids": sender_zone_ids,
-                "sender_zone_record_ids": sender_zone_record_ids,
             },
         )
 
-    acceptable_zone_ids, recipient_owner_ids = owner_ids_whose_acceptable_zone_records_contain_point(
-        db,
-        latitude,
-        longitude,
-        exclude_owner_id=sender.id,
-    )
-    meta = {
-        "strategy": "acceptable_zone_contains_sender",
-        "sender_zone_ids": acceptable_zone_ids or sender_zone_ids,
-        "sender_zone_record_ids": sender_zone_record_ids,
-        "recipient_owner_ids": recipient_owner_ids,
-    }
-    return acceptable_zone_ids or sender_zone_ids, recipient_owner_ids, meta
+    return sender_zone_ids, recipient_owner_ids, zone_meta
 
 
 def _log_emergency_event(

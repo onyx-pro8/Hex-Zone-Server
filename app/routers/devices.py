@@ -13,7 +13,11 @@ from app.crud import device as device_crud
 from app.crud import owner as owner_crud
 from app.core.security import get_current_user
 from app.services.access_policy import visible_owner_ids
-from app.services.device_entitlements import assert_owner_device_capacity
+from app.services.device_entitlements import (
+    assert_no_conflicting_online_session,
+    assert_owner_device_capacity,
+    evict_offline_devices_to_make_room,
+)
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -62,6 +66,8 @@ async def create_device(
             detail="Owner not found",
         )
     try:
+        assert_no_conflicting_online_session(db, owner.id, device.hid)
+        evict_offline_devices_to_make_room(db, owner)
         current_count = device_crud.count_devices(db, owner.id)
         assert_owner_device_capacity(owner, current_count)
         db_device = device_crud.create_device(db, current_user["user_id"], device)
