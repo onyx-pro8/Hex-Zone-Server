@@ -633,6 +633,18 @@ class ZoneMessageResponse(BaseModel):
         default=None,
         description="When **`category`** is **`Alarm`**, whether the authenticated viewer has read this alarm.",
     )
+    subject: Optional[str] = Field(
+        default=None,
+        description="PA / SERVICE headline from **`body_json.subject`**.",
+    )
+    topic: Optional[str] = Field(
+        default=None,
+        description="PA / SERVICE Kijiji-style topic id from **`body_json.topic`**.",
+    )
+    subtopic: Optional[str] = Field(
+        default=None,
+        description="SERVICE Products subtopic id from **`body_json.subtopic`**.",
+    )
 
     model_config = ConfigDict(
         from_attributes=True,

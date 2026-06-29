@@ -433,6 +433,27 @@ def zone_message_event_to_member_zone_message_response(
             int(x) for x in raw_delivered if isinstance(x, (int, float)) and not isinstance(x, bool)
         ]
 
+    body = row.body_json if isinstance(row.body_json, dict) else {}
+    subject = None
+    topic = None
+    subtopic = None
+    message_text = row.text
+    if row.type in (CanonicalMessageType.PA.value, CanonicalMessageType.SERVICE.value):
+        raw_subject = body.get("subject")
+        raw_topic = body.get("topic")
+        raw_subtopic = body.get("subtopic")
+        raw_description = body.get("description") or body.get("text")
+        if isinstance(raw_subject, str) and raw_subject.strip():
+            subject = raw_subject.strip()
+        if isinstance(raw_topic, str) and raw_topic.strip():
+            topic = raw_topic.strip()
+        if isinstance(raw_subtopic, str) and raw_subtopic.strip():
+            subtopic = raw_subtopic.strip()
+        if isinstance(raw_description, str) and raw_description.strip():
+            message_text = raw_description.strip()
+        elif subject:
+            message_text = subject
+
     return ZoneMessageResponse(
         id=row.id,
         zone_id=row.zone_id,
@@ -447,7 +468,7 @@ def zone_message_event_to_member_zone_message_response(
             if type_scope(gtype) == MessageScope.PRIVATE
             else MessageVisibilityEnum.PUBLIC
         ),
-        message=row.text,
+        message=message_text,
         created_at=row.created_at,
         latitude=latitude,
         longitude=longitude,
@@ -456,6 +477,9 @@ def zone_message_event_to_member_zone_message_response(
         permission_visibility=perm_vis,
         guest_access_session_id=row.guest_access_session_id,
         session_pending=session_pending,
+        subject=subject,
+        topic=topic,
+        subtopic=subtopic,
     )
 
 
