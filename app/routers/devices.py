@@ -19,6 +19,7 @@ from app.services.device_entitlements import (
     assert_no_conflicting_online_session,
     assert_owner_device_capacity,
     evict_offline_devices_to_make_room,
+    expire_stale_device_sessions,
     release_other_device_sessions,
 )
 
@@ -147,6 +148,9 @@ async def list_devices(
             detail="Owner not found",
         )
     owner_ids = visible_owner_ids(db, owner, include_inactive=True)
+    for owner_id in owner_ids:
+        expire_stale_device_sessions(db, owner_id)
+    db.commit()
     devices = device_crud.list_devices(
         db,
         owner_ids=owner_ids,
