@@ -1,6 +1,6 @@
 """Authentication business logic for contract endpoints."""
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -184,7 +184,7 @@ def login_user(db: Session, email: str, password: str) -> dict:
         except Exception as exc:  # pragma: no cover - never block login
             logger.warning("Address geocoding failed for owner %s: %s", owner.id, exc)
 
-    token = create_access_token({"sub": str(owner.id)}, expires_delta=timedelta(minutes=30))
+    token = create_access_token({"sub": str(owner.id)})
     return {
         "token": token,
         "user": {

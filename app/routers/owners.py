@@ -20,8 +20,6 @@ from app.services.registration_code_service import (
     require_and_consume_admin_registration_code,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
-from datetime import timedelta
-
 router = APIRouter(prefix="/owners", tags=["owners"])
 
 
@@ -132,12 +130,7 @@ async def login(
             detail="Account is inactive or expired",
         )
     
-    # Create access token
-    access_token_expires = timedelta(minutes=30)
-    access_token = create_access_token(
-        data={"sub": str(owner.id)},
-        expires_delta=access_token_expires,
-    )
+    access_token = create_access_token(data={"sub": str(owner.id)})
     
     return TokenResponse(
         access_token=access_token,
