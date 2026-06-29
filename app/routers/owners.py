@@ -19,6 +19,7 @@ from app.services.registration_code_service import (
     mint_registration_code,
     require_and_consume_admin_registration_code,
 )
+from app.services.member_join_welcome_service import notify_members_of_new_join
 from datetime import timedelta
 
 router = APIRouter(prefix="/owners", tags=["owners"])
@@ -85,7 +86,10 @@ async def register_owner(
 
     db_owner = owner_crud.create_owner(db, owner, api_key=preallocated_api_key)
     db.commit()
-    
+
+    if owner.role == OwnerRoleEnum.USER:
+        await notify_members_of_new_join(db, db_owner)
+
     return OwnerResponse.model_validate(_normalize_owner_name(db_owner))
 
 

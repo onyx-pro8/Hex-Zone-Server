@@ -20,6 +20,7 @@ from app.services.registration_code_service import (
     mint_registration_code,
 )
 from app.services.device_entitlements import assert_admin_user_member_capacity
+from app.services.member_join_welcome_service import notify_members_of_new_join
 
 router = APIRouter(prefix="/utils", tags=["utilities"])
 
@@ -322,5 +323,7 @@ async def join_with_qr(
     # Mark QR as used
     qr_crud.mark_qr_registration_used(db, qr.token)
     db.commit()
+
+    await notify_members_of_new_join(db, new_owner)
 
     return OwnerResponse.model_validate(new_owner)
