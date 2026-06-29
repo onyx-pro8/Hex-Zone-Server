@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     # enforces the "Enhanced Security for Push Notifications" setting).
     EXPO_ACCESS_TOKEN: str = ""
 
+    # Devices marked online but without a heartbeat within this window are treated
+    # as offline for session conflict checks and claim-session flows.
+    DEVICE_PRESENCE_TIMEOUT_SECONDS: int = 1800
+
     UNKNOWN_MESSAGE_RATE_LIMIT_SECONDS: int = 10
     # SENSOR telemetry can be high-frequency; throttle repeat sends per sender.
     SENSOR_MESSAGE_RATE_LIMIT_SECONDS: int = 5

@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.schemas import (
     DeviceCreate,
+    DeviceClaimSessionRequest,
+    DeviceClaimSessionResponse,
     DeviceResponse,
     DeviceUpdate,
     DeviceLocationUpdate,
@@ -17,6 +19,7 @@ from app.services.device_entitlements import (
     assert_no_conflicting_online_session,
     assert_owner_device_capacity,
     evict_offline_devices_to_make_room,
+    release_other_device_sessions,
 )
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -152,6 +155,50 @@ async def list_devices(
         load_owner=True,
     )
     return [DeviceResponse.model_validate(device) for device in devices]
+
+
+@router.post(
+    "/claim-session",
+    response_model=DeviceClaimSessionResponse,
+    summary="Claim device session",
+    description=(
+        "Sign out other devices for the authenticated owner so this device can "
+        "take over the account session. Use when logging in on a new phone."
+    ),
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Authenticated owner was not found.",
+        },
+    },
+    response_description="Count of other devices that were signed out.",
+)
+async def claim_device_session(
+    payload: DeviceClaimSessionRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Release other online sessions for the current owner."""
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Owner not found",
+        )
+    before = device_crud.list_devices(db, owner_id=owner.id)
+    online_others = [
+        device
+        for device in before
+        if device.is_online
+        and (
+            not payload.hid
+            or str(device.hid).strip().upper()
+            != str(payload.hid).strip().upper()
+        )
+    ]
+    release_other_device_sessions(db, owner.id, keep_hid=payload.hid)
+    evict_offline_devices_to_make_room(db, owner)
+    db.commit()
+    return DeviceClaimSessionResponse(released=len(online_others))
 
 
 @router.post(

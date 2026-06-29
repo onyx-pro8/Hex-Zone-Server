@@ -34,11 +34,11 @@ class Owner(Base):
     # API fall back to ``first_name`` + ``last_name``. Distinct from the
     # account identity fields — never auto-filled from them.
     broadcast_name = Column(String(255), nullable=False, default="")
-    # Shared-notification (sharednotification.com) integration settings that are
-    # owner-scoped and editable. The other integration fields shown on the
-    # Settings page (HID / network id / api key) are derived live from the
-    # owner's devices / push tokens / api_key and are not stored here.
-    sn_webhook = Column(String(255), nullable=False, default="/alertname")
+    # Smart-home integration settings that are owner-scoped and editable.
+    # The other integration fields shown on the Settings page (HID / network id /
+    # api key) are derived live from the owner's smart-home device / zone_id /
+    # api_key and are not stored here.
+    sn_webhook = Column(String(255), nullable=False, default="")
     sn_periodical_check_sec = Column(String(32), nullable=False, default="86400")
     account_type = Column(Enum(AccountType), nullable=False, default=AccountType.PRIVATE)
     role = Column(Enum(OwnerRole), nullable=False, default=OwnerRole.ADMINISTRATOR)

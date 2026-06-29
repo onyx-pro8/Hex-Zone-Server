@@ -242,6 +242,24 @@ class DeviceOwnerBrief(BaseModel):
         from_attributes = True
 
 
+class DeviceClaimSessionRequest(BaseModel):
+    """Release other device sessions so the caller can sign in on this device."""
+
+    hid: Optional[str] = Field(
+        default=None,
+        description="Hardware id of the device taking over the session (optional).",
+    )
+
+
+class DeviceClaimSessionResponse(BaseModel):
+    """Result of a device session claim."""
+
+    released: int = Field(
+        ...,
+        description="Number of other devices signed out for this owner.",
+    )
+
+
 class DeviceResponse(BaseModel):
     """Device response schema."""
     id: int

@@ -1018,7 +1018,7 @@ class SharedNotificationSettingsModel(BaseModel):
     hid: str = Field(default="")
     network_id: str = Field(default="", validation_alias=AliasChoices("networkId", "network_id"), serialization_alias="networkId")
     api_key: str = Field(default="", validation_alias=AliasChoices("apiKey", "api_key"), serialization_alias="apiKey")
-    webhook: str = Field(default="/alertname")
+    webhook: str = Field(default="")
     periodical_check_sec: str = Field(default="86400", validation_alias=AliasChoices("periodicalCheckSec", "periodical_check_sec"), serialization_alias="periodicalCheckSec")
 
 
@@ -1083,6 +1083,21 @@ def _address_model_to_single_line(addr: AddressSettingsModel) -> str:
     return ", ".join(parts)
 
 
+def _smart_home_device_for_owner(db: Session, owner_id: int) -> Device | None:
+    """Prefer a dedicated smart-home hardware id over mobile/browser clients."""
+    devices = (
+        db.query(Device)
+        .filter(Device.owner_id == owner_id, Device.active.is_(True))
+        .order_by(Device.created_at.asc())
+        .all()
+    )
+    for device in devices:
+        hid = (device.hid or "").strip().upper()
+        if hid and not hid.startswith(("MOB-", "WEB-")):
+            return device
+    return devices[0] if devices else None
+
+
 def _seed_empty_shared_fields(
     sn: SharedNotificationSettingsModel,
     owner: Owner,
@@ -1090,14 +1105,11 @@ def _seed_empty_shared_fields(
 ) -> None:
     """Fall back to the owner's live account data for any blank integration field.
 
-    The HID, Network ID and API Key on the Settings page describe how this
-    account is reachable. Until the operator overrides them with external
-    sharednotification.com credentials we surface the real values we already
-    hold instead of leaving the fields blank:
+    Smart-home integration values shown on the Settings page:
 
-    - API Key   -> ``owners.api_key`` (the account's own Hex Zone key)
-    - HID       -> the owner's primary device hardware id (``devices.hid``)
-    - Network ID-> the owner's most recent active push token (``push_tokens.token``)
+    - API Key        -> ``owners.api_key`` (authenticates the device to Hex Zone)
+    - HID            -> smart-home device hardware id (``devices.hid``)
+    - Network ID     -> the owner's zone id (``owners.zone_id``)
 
     Any value the operator has saved (non-empty) always takes precedence.
     """
@@ -1105,22 +1117,11 @@ def _seed_empty_shared_fields(
         sn.api_key = owner.api_key or ""
 
     if not sn.hid:
-        device = (
-            db.query(Device)
-            .filter(Device.owner_id == owner.id)
-            .order_by(Device.created_at.asc())
-            .first()
-        )
+        device = _smart_home_device_for_owner(db, owner.id)
         sn.hid = (device.hid if device else "") or ""
 
     if not sn.network_id:
-        push = (
-            db.query(PushToken)
-            .filter(PushToken.owner_id == owner.id, PushToken.active.is_(True))
-            .order_by(PushToken.updated_at.desc())
-            .first()
-        )
-        sn.network_id = (push.token if push else "") or ""
+        sn.network_id = (owner.zone_id or "").strip()
 
 
 def _load_quick_messages(db: Session, owner_id: int) -> dict[str, str]:
@@ -1173,14 +1174,14 @@ def _owner_to_settings_model(owner: Owner, db: Session) -> AppSettingsModel:
     """Build the Settings-page payload from the owner profile + live sources.
 
     - broadcast name / address / webhook / periodical check -> `owners`
-    - HID / network id / api key -> derived from devices / push tokens / api_key
+    - HID / network id / api key -> derived from smart-home device / zone_id / api_key
     - quick messages -> `messages` template rows
     """
     model = AppSettingsModel(
         broadcast_name=(owner.broadcast_name or "").strip(),
         address=_seed_address_from_owner(owner.address),
         shared_notification=SharedNotificationSettingsModel(
-            webhook=owner.sn_webhook or "/alertname",
+            webhook=(owner.sn_webhook or "").strip(),
             periodical_check_sec=owner.sn_periodical_check_sec or "86400",
         ),
         quick_messages=_load_quick_messages(db, owner.id),
@@ -1194,10 +1195,10 @@ def _owner_to_settings_model(owner: Owner, db: Session) -> AppSettingsModel:
     summary="Get owner application settings",
     description=(
         "Return the authenticated owner's broadcast identity, structured home "
-        "address, shared-notification integration, and quick-alert messages. "
+        "address, smart-home integration, and quick-alert messages. "
         "Broadcast name + address + webhook/periodical check come from the "
         "`owners` row; HID/network id/api key are derived from the owner's "
-        "devices, push tokens and account api key; quick messages come from the "
+        "smart-home device, zone id and account api key; quick messages come from the "
         "`messages` table (template rows)."
     ),
 )
@@ -1230,7 +1231,7 @@ async def put_my_settings(
     if formatted_address:
         owner.address = formatted_address
 
-    owner.sn_webhook = (payload.shared_notification.webhook or "/alertname").strip() or "/alertname"
+    owner.sn_webhook = (payload.shared_notification.webhook or "").strip()
     owner.sn_periodical_check_sec = (
         (payload.shared_notification.periodical_check_sec or "86400").strip() or "86400"
     )

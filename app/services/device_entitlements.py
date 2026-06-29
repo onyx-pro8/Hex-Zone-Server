@@ -1,11 +1,12 @@
 """Account type constraints for devices and member invitations."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.crud import device as device_crud
 from app.models import Owner
 
@@ -42,8 +43,51 @@ def max_user_members_for_account_type(account_type: str) -> int | None:
 
 
 ACCOUNT_IN_USE_DETAIL = (
-    "This account is already in use on another device. Sign out there first."
+    "This account is already in use on another device. Sign out there first, "
+    "or use this device instead from the login screen."
 )
+
+
+def _presence_cutoff() -> datetime:
+    return datetime.utcnow() - timedelta(
+        seconds=max(60, int(settings.DEVICE_PRESENCE_TIMEOUT_SECONDS)),
+    )
+
+
+def device_presence_is_active(device) -> bool:
+    """True when a device is marked online and its presence is still fresh."""
+    if not device.is_online:
+        return False
+    return _device_recency(device) >= _presence_cutoff()
+
+
+def expire_stale_device_sessions(db: Session, owner_id: int) -> None:
+    """Mark online devices as offline when their last_seen is too old."""
+    devices = device_crud.list_devices(db, owner_id=owner_id)
+    cutoff = _presence_cutoff()
+    for device in devices:
+        if not device.is_online:
+            continue
+        if _device_recency(device) < cutoff:
+            device.is_online = False
+            db.flush()
+
+
+def release_other_device_sessions(
+    db: Session,
+    owner_id: int,
+    keep_hid: str | None = None,
+) -> None:
+    """Sign out every other device for this owner so the caller can take over."""
+    expire_stale_device_sessions(db, owner_id)
+    normalized_keep = str(keep_hid).strip().upper() if keep_hid else None
+    devices = device_crud.list_devices(db, owner_id=owner_id)
+    for device in devices:
+        if normalized_keep and str(device.hid).strip().upper() == normalized_keep:
+            continue
+        if device.is_online:
+            device.is_online = False
+            db.flush()
 
 
 def assert_no_conflicting_online_session(
@@ -52,12 +96,13 @@ def assert_no_conflicting_online_session(
     enrolling_hid: str,
 ) -> None:
     """Reject enrollment when another device for this owner is still online."""
+    expire_stale_device_sessions(db, owner_id)
     devices = device_crud.list_devices(db, owner_id=owner_id)
     normalized_hid = str(enrolling_hid).strip().upper()
     for device in devices:
         if str(device.hid).strip().upper() == normalized_hid:
             continue
-        if device.is_online:
+        if device_presence_is_active(device):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=ACCOUNT_IN_USE_DETAIL,
@@ -73,6 +118,7 @@ def _device_recency(device) -> datetime:
 
 def evict_offline_devices_to_make_room(db: Session, owner: Owner) -> None:
     """Remove oldest offline devices until the owner is under their tier cap."""
+    expire_stale_device_sessions(db, owner.id)
     max_devices = max_devices_for_account_type(owner.account_type.value)
     if max_devices is None:
         return
