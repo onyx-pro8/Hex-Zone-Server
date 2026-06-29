@@ -26,6 +26,10 @@ from app.services.geospatial_service import (
     evaluate_zone_records_containing_point,
     zone_ids_for_zone_records,
 )
+from app.domain.service_pa_topics import (
+    display_text_for_service_pa,
+    validate_service_pa_message_fields,
+)
 from app.services.unknown_fanout_service import (
     UNKNOWN_RATE_LIMIT_SECONDS,
     resolve_nearest_owner_ids,
@@ -394,6 +398,7 @@ def _log_emergency_event(
 
 def create_geo_propagated_message(db: Session, sender: Owner, payload: PropagationMessageCreate) -> dict:
     canonical_type = _to_canonical_type(payload.type)
+    validate_service_pa_message_fields(canonical_type, payload.msg)
     scope = type_scope(canonical_type)
     account_type = str(sender.account_type.value).strip().lower()
 
@@ -485,7 +490,9 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
         type=canonical_type.value,
         category=type_category(canonical_type),
         scope=scope,
-        text=str(payload.msg.get("description") or payload.msg.get("title") or payload.type.value),
+        text=display_text_for_service_pa(payload.msg)
+        if canonical_type in (CanonicalMessageType.PA, CanonicalMessageType.SERVICE)
+        else str(payload.msg.get("description") or payload.msg.get("title") or payload.type.value),
         body_json=payload.msg,
         metadata_json=metadata,
         created_at=datetime.utcnow(),

@@ -53,6 +53,7 @@ from app.services.message_feature_service import (
     SensorRateLimitError,
     UnknownRateLimitError,
 )
+from app.domain.service_pa_topics import ServicePaValidationError
 from app.services import push_notification_service
 from app.services import wellness_ack_service
 from app.services import alarm_read_service
@@ -105,6 +106,14 @@ def _handle_geo_propagation_errors(exc: Exception) -> None:
             detail={
                 "error_code": "INVALID_PRIVATE_RECIPIENT",
                 "message": str(exc) or "PRIVATE receiver must be in your zone or account.",
+            },
+        ) from exc
+    if isinstance(exc, ServicePaValidationError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "SERVICE_PA_VALIDATION",
+                "message": str(exc) or "Invalid PA or SERVICE message fields.",
             },
         ) from exc
     if isinstance(exc, ValueError):
@@ -279,7 +288,7 @@ async def create_geo_message(
         result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
     except GeoMessageSkipped as skipped:
         return skipped.detail
-    except (UnknownRateLimitError, SensorRateLimitError, ValueError) as exc:
+    except (UnknownRateLimitError, SensorRateLimitError, ServicePaValidationError, ValueError) as exc:
         _handle_geo_propagation_errors(exc)
     db.commit()
     return await _finalize_geo_propagation(db, result)
@@ -427,7 +436,7 @@ async def create_geo_message_with_api_key(
         result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
     except GeoMessageSkipped as skipped:
         return skipped.detail
-    except (UnknownRateLimitError, SensorRateLimitError, ValueError) as exc:
+    except (UnknownRateLimitError, SensorRateLimitError, ServicePaValidationError, ValueError) as exc:
         _handle_geo_propagation_errors(exc)
     db.commit()
     return await _finalize_geo_propagation(db, result)
