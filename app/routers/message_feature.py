@@ -44,7 +44,6 @@ from app.domain.message_types import (
     MessageScope,
     is_pushable_geo_type,
     normalize_message_type,
-    requires_admin_to_send,
 )
 from app.services import guest_access_service, message_block_service, message_feature_service, permission_service
 from app.services.message_feature_service import (
@@ -275,15 +274,6 @@ async def create_geo_message(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"error_code": "UNSUPPORTED_MESSAGE_TYPE", "message": str(exc)},
         ) from exc
-    if requires_admin_to_send(canonical) and str(sender.role.value) != "administrator":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error_code": "ADMIN_ONLY_MESSAGE_TYPE",
-                "message": "Only administrators can send SERVICE messages.",
-            },
-        )
-
     try:
         result = message_feature_service.create_geo_propagated_message(db, sender, parsed_payload)
     except GeoMessageSkipped as skipped:

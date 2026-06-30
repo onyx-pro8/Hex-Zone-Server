@@ -50,10 +50,8 @@ TYPE_PRIORITY_MAP: dict[CanonicalMessageType, MessagePriority] = {
     CanonicalMessageType.CHAT: MessagePriority.MEDIUM,
 }
 
-# Only administrators may originate these types from member clients.
-ADMIN_ONLY_SEND_TYPES: frozenset[CanonicalMessageType] = frozenset(
-    {CanonicalMessageType.SERVICE}
-)
+# Message types restricted to administrators on member clients (none currently).
+ADMIN_ONLY_SEND_TYPES: frozenset[CanonicalMessageType] = frozenset()
 
 # Emergency types bypass member block filters so zone-wide distress reaches everyone.
 BLOCK_BYPASS_TYPES: frozenset[CanonicalMessageType] = frozenset(
