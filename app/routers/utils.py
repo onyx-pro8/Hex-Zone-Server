@@ -19,7 +19,10 @@ from app.services.registration_code_service import (
     issue_registration_code_for_email_tier,
     mint_registration_code,
 )
-from app.services.device_entitlements import assert_admin_user_member_capacity
+from app.services.device_entitlements import (
+    account_type_supports_member_invite,
+    assert_admin_user_member_capacity,
+)
 from app.services.member_join_welcome_service import notify_members_of_new_join
 
 router = APIRouter(prefix="/utils", tags=["utilities"])
@@ -164,9 +167,6 @@ async def convert_to_h3(
     )
 
 
-QR_INVITE_ALLOWED_ACCOUNT_TYPES = {"private", "exclusive"}
-
-
 @router.post(
     "/qr/generate",
     response_model=QRRegistrationResponse,
@@ -174,8 +174,9 @@ QR_INVITE_ALLOWED_ACCOUNT_TYPES = {"private", "exclusive"}
     description=(
         "Generate invite token used by **account/member join** QR flow only. "
         "Not for door guest access — use **`GET /api/access/qr-link`** for canonical **`/access?zid=`** URLs. "
-        "Available to administrators of **Private** (multi-user) and **Exclusive** "
-        "(admin + 1 invited user) account tiers."
+        "Available to administrators of account tiers that support invited user members: "
+        "**Private**, **Private+**, **Exclusive** (admin + 1 user), and **Enhanced+**. "
+        "**Enhanced** (solo) accounts cannot generate member invites."
     ),
     responses={
         status.HTTP_403_FORBIDDEN: {
@@ -208,11 +209,12 @@ async def generate_qr_registration(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only administrators can generate QR registration codes",
         )
-    if owner.account_type.value not in QR_INVITE_ALLOWED_ACCOUNT_TYPES:
+    if not account_type_supports_member_invite(owner.account_type.value):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "Only Private and Exclusive accounts can generate QR registration codes"
+                "This account type does not support member invite QR codes "
+                "(Enhanced accounts are solo administrator only)"
             ),
         )
 
@@ -283,7 +285,7 @@ async def join_with_qr(
     if (
         not owner
         or owner.role.value != "administrator"
-        or owner.account_type.value not in QR_INVITE_ALLOWED_ACCOUNT_TYPES
+        or not account_type_supports_member_invite(owner.account_type.value)
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -12,7 +12,7 @@ class QRRegistration(Base):
     id = Column(Integer, primary_key=True, index=True)
     token = Column(String(255), unique=True, nullable=False, index=True)
     
-    # Owner reference (for private accounts only)
+    # Owner reference (administrator who issued the member invite)
     owner_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # Status

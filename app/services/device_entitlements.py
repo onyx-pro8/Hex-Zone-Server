@@ -27,9 +27,15 @@ USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE: dict[str, int | None] = {
     "private": None,
     "exclusive": 1,
     "private_plus": None,
-    "enhanced": None,
+    "enhanced": 0,
     "enhanced_plus": None,
 }
+
+
+def account_type_supports_member_invite(account_type: str) -> bool:
+    """Whether administrators of this tier may use member-invite QR."""
+    limit = max_user_members_for_account_type(account_type)
+    return limit != 0
 
 
 def max_devices_for_account_type(account_type: str) -> int | None:
