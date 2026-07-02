@@ -1154,6 +1154,42 @@ async def test_get_owners_registration_code_returns_string(test_db, override_get
 
 
 @pytest.mark.asyncio
+async def test_post_registration_code_issue_exclusive_succeeds(test_db, override_get_db):
+    """Exclusive tier is free and may request an HMAC registration code."""
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        r = await client.post(
+            "/utils/registration-code/issue",
+            json={
+                "email": "exclusive-free@example.com",
+                "pricingTier": "exclusive",
+            },
+        )
+        assert r.status_code == 200
+        data = r.json()
+        code = data.get("registration_code")
+        assert isinstance(code, str)
+        assert len(code) > 0
+        assert data.get("pricing_tier") == "exclusive"
+
+
+@pytest.mark.asyncio
+async def test_post_registration_code_issue_paid_tier_requires_upgrade(
+    test_db, override_get_db
+):
+    """Paid tiers are blocked until subscription checkout is implemented."""
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        r = await client.post(
+            "/utils/registration-code/issue",
+            json={
+                "email": "paid-tier@example.com",
+                "pricingTier": "private_plus",
+            },
+        )
+        assert r.status_code == 403
+        assert _http_error_message(r.json()) == "You must upgrade your plan"
+
+
+@pytest.mark.asyncio
 async def test_admin_register_without_registration_code_rejected(test_db, override_get_db):
     """Administrator self-registration must include a registration code."""
     async with AsyncClient(app=app, base_url="http://test") as client:

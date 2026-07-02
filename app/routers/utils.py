@@ -133,6 +133,9 @@ async def issue_utils_registration_code(db: Session = Depends(get_db)):
         "(1–5). Legacy GET /utils/registration-code remains available for mobile clients."
     ),
     responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Paid pricing tier — subscription upgrade required before code issuance.",
+        },
         status.HTTP_409_CONFLICT: {"description": "Email already registered."},
         status.HTTP_422_UNPROCESSABLE_ENTITY: {"description": "Invalid pricing tier or tier_level."},
     },

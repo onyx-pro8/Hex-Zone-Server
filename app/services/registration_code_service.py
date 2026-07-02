@@ -58,6 +58,23 @@ logger = logging.getLogger(__name__)
 
 _REG_CODE_FORMAT = re.compile(r"^[A-F0-9]{6}-[A-F0-9]{6}$")
 
+# Tiers that may self-request a registration code without a paid subscription.
+FREE_SELF_REGISTRATION_PRICING_TIERS: frozenset[str] = frozenset(
+    {PRICING_TIER_EXCLUSIVE}
+)
+
+REGISTRATION_CODE_UPGRADE_REQUIRED_DETAIL = "You must upgrade your plan"
+
+
+def assert_pricing_tier_eligible_for_registration_code_issue(pricing_tier: str) -> None:
+    """Reject paid tiers until subscription checkout is implemented."""
+    key = normalize_pricing_tier_key(pricing_tier)
+    if key not in FREE_SELF_REGISTRATION_PRICING_TIERS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=REGISTRATION_CODE_UPGRADE_REQUIRED_DETAIL,
+        )
+
 
 def normalize_registration_code(code: str) -> str:
     """Canonical form stored in DB and compared at verification time."""
@@ -233,6 +250,7 @@ def issue_registration_code_for_email_tier(
         )
 
     spec = resolve_pricing_tier_spec(pricing_tier, tier_level)
+    assert_pricing_tier_eligible_for_registration_code_issue(spec.pricing_tier)
     secret = _hmac_secret_bytes()
     code = generate_registration_code(normalized_email, spec.price_tier_key, secret)
     api_key = generate_api_key()
