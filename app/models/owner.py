@@ -27,9 +27,6 @@ class Owner(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
-    # Per-user identifier shown in admin UI and smart-home integration (distinct
-    # from account namespace `zone_id` and per-zone `zones.zone_id`).
-    network_id = Column(String(100), nullable=True, unique=True, index=True)
     zone_id = Column(String(100), nullable=False, index=True)
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
@@ -38,9 +35,9 @@ class Owner(Base):
     # account identity fields — never auto-filled from them.
     broadcast_name = Column(String(255), nullable=False, default="")
     # Smart-home integration settings that are owner-scoped and editable.
-    # The other integration fields shown on the Settings page (HID / api key) are
-    # derived live from the owner's smart-home device / api_key and are not
-    # stored here. Network id is stored on this row (`network_id`).
+    # The other integration fields shown on the Settings page (HID / network id /
+    # api key) are derived live from the owner's smart-home device / zone_id /
+    # api_key and are not stored here.
     sn_webhook = Column(String(255), nullable=False, default="")
     sn_periodical_check_sec = Column(String(32), nullable=False, default="86400")
     account_type = Column(Enum(AccountType), nullable=False, default=AccountType.PRIVATE)
@@ -89,7 +86,6 @@ class Owner(Base):
 
     __table_args__ = (
         Index("ix_owner_email", "email"),
-        Index("ix_owner_network_id", "network_id"),
         Index("ix_owner_zone_id", "zone_id"),
         Index("ix_owner_api_key", "api_key"),
     )

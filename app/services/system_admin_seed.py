@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from app.core.security import generate_api_key, get_password_hash, verify_password
 from app.crud import owner as owner_crud
 from app.models.owner import AccountType, Owner, OwnerRole
-from app.services.owner_network_id import ensure_owner_network_id
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,7 @@ SYSTEM_ADMIN_LAST_NAME = "Admin"
 SYSTEM_ADMIN_ZONE_ID = "DISTRICT-11"
 
 
-def _apply_system_admin_defaults(db: Session, owner: Owner) -> None:
+def _apply_system_admin_defaults(owner: Owner) -> None:
     """Keep the built-in system administrator row aligned with product defaults."""
     owner.first_name = SYSTEM_ADMIN_FIRST_NAME
     owner.last_name = SYSTEM_ADMIN_LAST_NAME
@@ -29,7 +28,6 @@ def _apply_system_admin_defaults(db: Session, owner: Owner) -> None:
     owner.expired = False
     if not (owner.zone_id or "").strip():
         owner.zone_id = SYSTEM_ADMIN_ZONE_ID
-    ensure_owner_network_id(db, owner)
     if not (owner.address or "").strip():
         owner.address = "System Administrator"
     if not owner.api_key:
@@ -42,7 +40,7 @@ def ensure_system_admin(db: Session) -> Owner:
     """Create or refresh the default Private system administrator."""
     existing = owner_crud.get_owner_by_email(db, SYSTEM_ADMIN_EMAIL)
     if existing:
-        _apply_system_admin_defaults(db, existing)
+        _apply_system_admin_defaults(existing)
         if existing.account_owner_id is None:
             existing.account_owner_id = existing.id
         db.commit()
@@ -65,7 +63,6 @@ def ensure_system_admin(db: Session) -> Owner:
     )
     db.add(owner)
     db.flush()
-    ensure_owner_network_id(db, owner)
     owner.account_owner_id = owner.id
     db.commit()
     db.refresh(owner)

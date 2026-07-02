@@ -13,7 +13,6 @@ from app.services.access_policy import resolve_account_owner_id
 from app.services.geocoding_service import geocode_address
 from app.services.registration_code_service import require_and_consume_admin_registration_code
 from app.services.account_type_policy import assert_account_type_allowed_for_public_registration
-from app.services.owner_network_id import ensure_owner_network_id
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +135,6 @@ def register_user(db: Session, payload: dict) -> dict:
     )
     db.add(owner)
     db.flush()
-    ensure_owner_network_id(db, owner)
     if owner.role.value == "administrator" and owner.account_owner_id is None:
         owner.account_owner_id = owner.id
         db.flush()
@@ -151,7 +149,6 @@ def register_user(db: Session, payload: dict) -> dict:
     db.refresh(owner)
     return {
         "id": str(owner.id),
-        "network_id": owner.network_id,
         "email": owner.email,
         "zone_id": owner.zone_id,
         "first_name": owner.first_name,
@@ -195,7 +192,6 @@ def login_user(db: Session, email: str, password: str) -> dict:
         "token": token,
         "user": {
             "id": str(owner.id),
-            "networkId": owner.network_id,
             "name": f"{owner.first_name} {owner.last_name}".strip(),
             "accountType": _to_contract_account_type(owner.account_type.value),
             "registrationType": owner.role.value.upper(),

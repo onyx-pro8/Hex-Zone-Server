@@ -747,32 +747,6 @@ def init_db():
                 text("CREATE INDEX IF NOT EXISTS ix_guest_passes_created_at ON guest_passes (created_at);")
             )
 
-        # Per-user network id (distinct from account zone_id and zones.zone_id).
-        try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        """
-                        ALTER TABLE owners
-                        ADD COLUMN IF NOT EXISTS network_id VARCHAR(100);
-                        """
-                    )
-                )
-                conn.execute(
-                    text(
-                        """
-                        UPDATE owners
-                        SET network_id = 'NET-' || UPPER(SUBSTRING(MD5(id::text || '-' || email) FROM 1 FOR 6))
-                        WHERE COALESCE(TRIM(network_id), '') = '';
-                        """
-                    )
-                )
-                conn.execute(
-                    text("CREATE UNIQUE INDEX IF NOT EXISTS ix_owner_network_id ON owners (network_id);")
-                )
-        except Exception:
-            logging.exception("owners.network_id migration failed")
-
         # Registration code email + pricing tier columns. Run in their own isolated
         # transaction so an unrelated failure earlier in the migration block can never
         # roll these critical patches back — the new POST /utils/registration-code/issue

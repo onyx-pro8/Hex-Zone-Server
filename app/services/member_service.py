@@ -57,7 +57,6 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
         output.append(
             {
                 "id": str(member.id),
-                "network_id": member.network_id,
                 "name": f"{member.first_name} {member.last_name}".strip(),
                 "first_name": member.first_name,
                 "last_name": member.last_name,

@@ -6,7 +6,6 @@ from app.models import Owner, Zone
 from app.schemas.schemas import OwnerCreate, OwnerUpdate
 from app.core.security import get_password_hash, generate_api_key
 from app.crud.zone import apply_zone_geo_fence_geojson
-from app.services.owner_network_id import ensure_owner_network_id
 from typing import Optional
 
 
@@ -28,7 +27,6 @@ def create_owner(db: Session, owner: OwnerCreate, *, api_key: str | None = None)
     )
     db.add(db_owner)
     db.flush()
-    ensure_owner_network_id(db, db_owner)
     if db_owner.role.value == "administrator" and db_owner.account_owner_id is None:
         db_owner.account_owner_id = db_owner.id
         db.flush()
