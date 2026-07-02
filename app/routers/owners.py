@@ -183,6 +183,10 @@ async def get_current_owner(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Owner not found",
         )
+    from app.services.owner_network_id import ensure_owner_network_id
+
+    ensure_owner_network_id(db, owner)
+    db.commit()
     return OwnerDetailResponse.model_validate(_normalize_owner_name(owner))
 
 
@@ -310,7 +314,7 @@ async def update_owner(
             detail="Only administrators can change active status",
         )
 
-    if owner_update.zone_id is not None:
+    if owner_update.network_id is not None:
         target = owner_crud.get_owner(db, owner_id)
         if not target:
             raise HTTPException(
@@ -324,7 +328,7 @@ async def update_owner(
             )
         assert_owner_may_edit_network_id(target)
 
-    if is_admin and current_user["user_id"] != owner_id:
+    if owner_update.zone_id is not None:
         allowed_ids = visible_owner_ids(db, caller, include_inactive=True)
         if owner_id not in allowed_ids:
             raise HTTPException(

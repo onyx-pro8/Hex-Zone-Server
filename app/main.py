@@ -132,6 +132,7 @@ def _wellness_reminder_background() -> None:
 def _ensure_system_admin_background() -> None:
     """Create or refresh admin@test.com after DB init (bounded retries)."""
     from app.database import session_maker
+    from app.services.owner_network_id import backfill_missing_network_ids
     from app.services.system_admin_seed import ensure_system_admin
 
     for attempt in range(1, 11):
@@ -139,6 +140,7 @@ def _ensure_system_admin_background() -> None:
         try:
             with session_maker() as db:
                 ensure_system_admin(db)
+                backfill_missing_network_ids(db)
             logging.info("System administrator bootstrap ok (attempt %d)", attempt)
             return
         except Exception as exc:

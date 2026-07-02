@@ -152,6 +152,11 @@ def generate_api_key() -> str:
     return secrets.token_urlsafe(32)
 
 
+def generate_network_id() -> str:
+    """Generate a human-readable network id for a new owner/user."""
+    return f"NET-{secrets.token_hex(3).upper()}"
+
+
 def generate_qr_token() -> str:
     """Generate a QR registration token."""
     return secrets.token_urlsafe(16)

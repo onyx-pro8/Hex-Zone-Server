@@ -53,7 +53,7 @@ class OwnerCreate(BaseModel):
         ...,
         min_length=1,
         max_length=100,
-        description="Network ID entered, generated, or scanned from QR in setup wizard",
+        description="Zone ID entered, generated, or scanned from QR in setup wizard",
     )
     first_name: Optional[str] = Field(None, min_length=1, max_length=100)
     last_name: Optional[str] = Field(None, min_length=1, max_length=100)
@@ -124,6 +124,7 @@ class OwnerCreate(BaseModel):
 class OwnerUpdate(BaseModel):
     """Owner update schema."""
     zone_id: Optional[str] = Field(None, min_length=1, max_length=100)
+    network_id: Optional[str] = Field(None, min_length=1, max_length=100)
     first_name: Optional[str] = Field(None, min_length=1, max_length=100)
     last_name: Optional[str] = Field(None, min_length=1, max_length=100)
     active: Optional[bool] = None
@@ -132,6 +133,7 @@ class OwnerUpdate(BaseModel):
 class OwnerResponse(OwnerBase):
     """Owner response schema."""
     id: int
+    network_id: str
     api_key: str
     active: bool
     expired: bool
@@ -145,6 +147,7 @@ class OwnerResponse(OwnerBase):
 class OwnerListResponse(BaseModel):
     """Safe owner list schema for receiver discovery."""
     id: int
+    network_id: str
     first_name: str
     last_name: str
     email: EmailStr
@@ -231,6 +234,7 @@ class DeviceUpdate(BaseModel):
 class DeviceOwnerBrief(BaseModel):
     """Minimal owner info returned with device payloads."""
     id: int
+    network_id: str
     email: EmailStr
     first_name: str
     last_name: str
@@ -572,7 +576,7 @@ class ZoneMessageResponse(BaseModel):
             "(Access **PERMISSION**/**CHAT**, member→guest **CHAT**, guest→staff **CHAT** in inbox merge)."
         ),
     )
-    zone_id: str = Field(..., description="Shared network ID string (**not** the internal **`zones.id`** PK).")
+    zone_id: str = Field(..., description="Shared zone id string (**not** the internal **`zones.id`** PK).")
     sender_id: Optional[int] = Field(
         default=None,
         description=(

@@ -25,7 +25,7 @@ def assert_account_type_allowed_for_public_registration(account_type: str) -> No
 
 
 def owner_may_edit_network_id(owner: Owner) -> bool:
-    """Only Private-tier owners may change their network id (zone_id)."""
+    """Only Private-tier owners may change their network id."""
     return normalize_pricing_tier_key(owner.account_type.value) == PRICING_TIER_PRIVATE
 
 
