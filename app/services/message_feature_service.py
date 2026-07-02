@@ -201,7 +201,7 @@ def _assert_private_receiver_reachable(
     )
     if receiver.id not in pool:
         raise PrivateScopeRecipientError(
-            "PRIVATE receiver must be an active owner with the same zone id."
+            "PRIVATE receiver must be an active owner with the same network ID."
         )
 
 

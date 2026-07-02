@@ -1,9 +1,10 @@
 """Sample data for testing and development."""
 from app.database import session_maker, init_db
-from app.crud.owner import create_owner
+from app.crud.owner import create_owner, get_owner_by_email
 from app.crud.device import create_device
 from app.crud.zone import create_zone
 from app.schemas.schemas import OwnerCreate, DeviceCreate, ZoneCreate, AccountTypeEnum, ZoneTypeEnum
+from app.services.system_admin_seed import SYSTEM_ADMIN_EMAIL, SYSTEM_ADMIN_PASSWORD
 
 
 def load_sample_data():
@@ -12,22 +13,17 @@ def load_sample_data():
     
     with session_maker() as db:
         print("Loading sample data...")
-        
-        # Create sample owners
-        owner1_data = OwnerCreate(
-            email="alice@example.com",
-            first_name="Alice",
-            last_name="Johnson",
-            account_type=AccountTypeEnum.PRIVATE,
-            password="SecurePassword123",
-            phone="+1-555-0001",
-            address="123 Market St, San Francisco, CA",
-        )
-        owner1 = create_owner(db, owner1_data)
-        print(f"✓ Created owner: {owner1.email}")
+
+        owner1 = get_owner_by_email(db, SYSTEM_ADMIN_EMAIL)
+        if not owner1:
+            raise RuntimeError(
+                f"Expected system administrator {SYSTEM_ADMIN_EMAIL} after init_db()"
+            )
+        print(f"✓ Using system admin: {owner1.email}")
         
         owner2_data = OwnerCreate(
             email="bob@example.com",
+            zone_id="BOB-EXCLUSIVE",
             first_name="Bob",
             last_name="Smith",
             account_type=AccountTypeEnum.EXCLUSIVE,
@@ -117,7 +113,7 @@ def load_sample_data():
         db.commit()
         print("\n✅ Sample data loaded successfully!")
         print(f"\nSample Credentials:")
-        print(f"  User 1: alice@example.com / SecurePassword123")
+        print(f"  System admin: {SYSTEM_ADMIN_EMAIL} / {SYSTEM_ADMIN_PASSWORD}")
         print(f"  User 2: bob@example.com / SecurePassword456")
 
 

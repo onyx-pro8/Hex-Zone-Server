@@ -11,6 +11,7 @@ from app.models.owner import OwnerRole
 from app.services.access_policy import resolve_account_owner_id
 from app.services.geocoding_service import geocode_address
 from app.services.registration_code_service import require_and_consume_admin_registration_code
+from app.services.account_type_policy import assert_account_type_allowed_for_public_registration
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ def register_user(db: Session, payload: dict) -> dict:
 
     first_name, last_name = _split_name(payload["name"])
     account_type_value = _to_contract_account_type(payload["accountType"]).lower()
+    assert_account_type_allowed_for_public_registration(account_type_value)
     role_value = _to_owner_role(payload.get("registrationType"))
     preallocated_api_key: str | None = None
     if role_value == OwnerRole.ADMINISTRATOR:

@@ -19,6 +19,10 @@ from app.services.registration_code_service import (
     mint_registration_code,
     require_and_consume_admin_registration_code,
 )
+from app.services.account_type_policy import (
+    assert_account_type_allowed_for_public_registration,
+    assert_owner_may_edit_network_id,
+)
 from app.services.member_join_welcome_service import notify_members_of_new_join
 router = APIRouter(prefix="/owners", tags=["owners"])
 
@@ -64,6 +68,8 @@ async def register_owner(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email already registered",
         )
+
+    assert_account_type_allowed_for_public_registration(owner.account_type.value)
 
     owner.account_owner_id = resolve_account_owner_id(
         db,
@@ -303,6 +309,20 @@ async def update_owner(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only administrators can change active status",
         )
+
+    if owner_update.zone_id is not None:
+        target = owner_crud.get_owner(db, owner_id)
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Owner not found",
+            )
+        if current_user["user_id"] != owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to update this owner's network ID",
+            )
+        assert_owner_may_edit_network_id(target)
 
     if is_admin and current_user["user_id"] != owner_id:
         allowed_ids = visible_owner_ids(db, caller, include_inactive=True)

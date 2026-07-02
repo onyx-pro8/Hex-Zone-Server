@@ -53,7 +53,7 @@ class OwnerCreate(BaseModel):
         ...,
         min_length=1,
         max_length=100,
-        description="Zone ID entered, generated, or scanned from QR in setup wizard",
+        description="Network ID entered, generated, or scanned from QR in setup wizard",
     )
     first_name: Optional[str] = Field(None, min_length=1, max_length=100)
     last_name: Optional[str] = Field(None, min_length=1, max_length=100)
@@ -572,7 +572,7 @@ class ZoneMessageResponse(BaseModel):
             "(Access **PERMISSION**/**CHAT**, member→guest **CHAT**, guest→staff **CHAT** in inbox merge)."
         ),
     )
-    zone_id: str = Field(..., description="Shared zone id string (**not** the internal **`zones.id`** PK).")
+    zone_id: str = Field(..., description="Shared network ID string (**not** the internal **`zones.id`** PK).")
     sender_id: Optional[int] = Field(
         default=None,
         description=(

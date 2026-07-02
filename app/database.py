@@ -774,6 +774,14 @@ def init_db():
         except Exception as exc:
             logger.exception("Registration code schema patch failed: %s", exc)
 
+    try:
+        from app.services.system_admin_seed import ensure_system_admin
+
+        with session_maker() as db:
+            ensure_system_admin(db)
+    except Exception as exc:
+        logger.exception("System administrator seed failed: %s", exc)
+
 
 def drop_db():
     """Drop all database tables."""
