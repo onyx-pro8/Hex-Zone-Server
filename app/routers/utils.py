@@ -24,8 +24,20 @@ from app.services.device_entitlements import (
     assert_admin_user_member_capacity,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
+from app.services.system_admin_seed import (
+    SYSTEM_ADMIN_EMAIL,
+    SYSTEM_ADMIN_ZONE_ID,
+    ensure_system_admin,
+)
 
 router = APIRouter(prefix="/utils", tags=["utilities"])
+
+
+class SystemAdminEnsureResponse(BaseModel):
+    email: str
+    zone_id: str
+    account_type: str = "private"
+    message: str
 
 
 class RegistrationCodeResponse(BaseModel):
@@ -137,6 +149,25 @@ async def issue_hmac_registration_code(
     )
     db.commit()
     return result
+
+
+@router.post(
+    "/system-admin/ensure",
+    response_model=SystemAdminEnsureResponse,
+    summary="Ensure built-in system administrator exists",
+    description=(
+        "Idempotent bootstrap for the fixed Private-tier system administrator "
+        f"({SYSTEM_ADMIN_EMAIL}). Safe to call after deploy when the account is missing."
+    ),
+)
+async def ensure_system_admin_endpoint(db: Session = Depends(get_db)):
+    owner = ensure_system_admin(db)
+    return SystemAdminEnsureResponse(
+        email=owner.email,
+        zone_id=owner.zone_id,
+        account_type=owner.account_type.value,
+        message="System administrator is ready.",
+    )
 
 
 @router.post(

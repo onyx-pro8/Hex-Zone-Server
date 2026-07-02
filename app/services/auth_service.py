@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 
 from fastapi import HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, generate_api_key, get_password_hash, verify_password
@@ -167,7 +168,7 @@ def register_user(db: Session, payload: dict) -> dict:
 
 
 def login_user(db: Session, email: str, password: str) -> dict:
-    owner = db.query(Owner).filter(Owner.email == email).first()
+    owner = db.query(Owner).filter(func.lower(Owner.email) == email.strip().lower()).first()
     if not owner or not verify_password(password, owner.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     if not owner.active or owner.expired:

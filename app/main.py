@@ -128,6 +128,27 @@ def _wellness_reminder_background() -> None:
     except Exception:  # pragma: no cover - never crash the worker thread
         logging.exception("Wellness reminder worker thread failed")
 
+
+def _ensure_system_admin_background() -> None:
+    """Create or refresh admin@test.com after DB init (bounded retries)."""
+    from app.database import session_maker
+    from app.services.system_admin_seed import ensure_system_admin
+
+    for attempt in range(1, 11):
+        time.sleep(min(attempt * 3, 20))
+        try:
+            with session_maker() as db:
+                ensure_system_admin(db)
+            logging.info("System administrator bootstrap ok (attempt %d)", attempt)
+            return
+        except Exception as exc:
+            logging.warning(
+                "System admin bootstrap attempt %d/10 failed: %s",
+                attempt,
+                exc,
+            )
+    logging.error("System administrator bootstrap failed after 10 attempts")
+
 # Lifespan context
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -141,6 +162,8 @@ async def lifespan(app: FastAPI):
     print("Starting Zone Weaver backend...")
     threading.Thread(target=_init_db_background, daemon=True).start()
     print("Database initialization started in background")
+    threading.Thread(target=_ensure_system_admin_background, daemon=True).start()
+    print("System administrator bootstrap scheduled in background")
     threading.Thread(target=_owner_geocode_backfill_background, daemon=True).start()
     print("Owner geocode backfill scheduled in background")
     threading.Thread(target=_wellness_reminder_background, daemon=True).start()

@@ -65,8 +65,9 @@ def get_owner(db: Session, owner_id: int) -> Optional[Owner]:
 
 
 def get_owner_by_email(db: Session, email: str) -> Optional[Owner]:
-    """Get an owner by email."""
-    result = db.execute(select(Owner).where(Owner.email == email))
+    """Get an owner by email (case-insensitive)."""
+    normalized = email.strip().lower()
+    result = db.execute(select(Owner).where(func.lower(Owner.email) == normalized))
     return result.scalars().first()
 
 
