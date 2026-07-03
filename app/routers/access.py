@@ -1630,11 +1630,20 @@ async def list_guest_requests_for_access_api(
     for r in rows:
         if r.access_revoked_at is not None:
             row_status = "REJECTED"
+        elif r.kind == "expected":
+            row_status = "ARRIVED"
+        elif r.kind == "network_access":
+            if r.resolution == "approved":
+                row_status = "APPROVED"
+            elif r.resolution == "rejected":
+                row_status = "REJECTED"
+            else:
+                row_status = "PENDING"
         else:
-            row_status = "ARRIVED" if r.kind in ("expected", "network_access") else (
+            row_status = (
                 "PENDING" if r.resolution == "pending" else str(r.resolution or "").upper()
             )
-        expectation = "expected" if r.kind in ("expected", "network_access") else "unexpected"
+        expectation = "expected" if r.kind == "expected" else "unexpected"
         data.append(
             GuestRequestListItemContract(
                 id=str(r.id),

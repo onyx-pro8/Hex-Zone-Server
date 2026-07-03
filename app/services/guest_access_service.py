@@ -27,6 +27,32 @@ from app.services.network_zone_propagation import resolve_network_administrator
 logger = logging.getLogger(__name__)
 
 
+def _network_access_pending(row: GuestAccessSession) -> bool:
+    return row.kind == "network_access" and row.resolution in (None, "pending")
+
+
+def _guest_session_approved_for_access(row: GuestAccessSession) -> bool:
+    if row.access_revoked_at is not None:
+        return False
+    if row.kind == "expected":
+        return True
+    if row.kind == "network_access" and row.resolution == "approved":
+        return True
+    if row.kind == "unexpected" and row.resolution == "approved":
+        return True
+    return False
+
+
+def _pending_approval_filter():
+    return or_(
+        and_(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "pending"),
+        and_(
+            GuestAccessSession.kind == "network_access",
+            or_(GuestAccessSession.resolution == "pending", GuestAccessSession.resolution.is_(None)),
+        ),
+    )
+
+
 def _guest_access_invalidated_exc(message: str) -> None:
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -55,6 +81,12 @@ def require_guest_bearer_session_active(db: Session, *, guest_id: str) -> None:
         _guest_access_invalidated_exc("Guest access was denied or revoked.")
 
     if row.kind == "unexpected" and row.resolution == "pending":
+        _guest_access_invalidated_exc("Guest access is not active.")
+
+    if row.kind == "network_access" and row.resolution == "rejected":
+        _guest_access_invalidated_exc("Guest access was denied or revoked.")
+
+    if _network_access_pending(row):
         _guest_access_invalidated_exc("Guest access is not active.")
 
     gp = db.query(GuestPass).filter(GuestPass.used_by_guest_id == gid).first()
@@ -89,11 +121,7 @@ def ensure_active_guest_exchange_for_poll(db: Session, row: GuestAccessSession) 
     """If the guest is cleared for the guest app but has no usable code, mint one. Returns True if DB was mutated."""
     if row.access_revoked_at is not None:
         return False
-    cleared = (
-        row.kind == "network_access"
-        or row.kind == "expected"
-        or (row.kind == "unexpected" and row.resolution == "approved")
-    )
+    cleared = _guest_session_approved_for_access(row)
     if not cleared or row.exchange_consumed_at is not None:
         return False
     now = datetime.utcnow()
@@ -130,7 +158,7 @@ def process_network_guest_arrival(
     longitude: float | None,
     qr_token_db_id: int | None = None,
 ) -> dict:
-    """Non-invited network QR scan: auto-grant session for geo safety messaging."""
+    """Network QR scan: queue guest access until an administrator approves."""
     nid = (network_id or "").strip()
     if not nid:
         return {"error": "MISSING_NETWORK", "message": "network_id is required.", "http_status": 422}
@@ -145,10 +173,9 @@ def process_network_guest_arrival(
             "http_status": 422,
         }
 
+    msgs = resolve_guest_arrival_messages(db, nid)
+    msg_guest = msgs.unexpected_arrival_message
     guest_token = str(uuid.uuid4())
-    msg_guest = (
-        "Network access granted. You may chat with this network using access messages."
-    )
 
     session_row = GuestAccessSession(
         guest_id=guest_token,
@@ -159,7 +186,7 @@ def process_network_guest_arrival(
         latitude=latitude,
         longitude=longitude,
         kind="network_access",
-        resolution=None,
+        resolution="pending",
         schedule_id=None,
         admin_owner_id=admin.id,
         qr_token_id=qr_token_db_id,
@@ -167,20 +194,64 @@ def process_network_guest_arrival(
     )
     db.add(session_row)
     db.flush()
-    mint_guest_exchange_for_session(session_row)
+
+    broadcast_ids = zone_member_owner_ids(db, nid)
+    ws_unexpected: list[tuple[list[int], dict]] = []
+    if broadcast_ids:
+        ws_unexpected.append(
+            (
+                broadcast_ids,
+                {
+                    "type": "unexpected_guest",
+                    "guest_name": guest_name.strip(),
+                    "zone_id": nid,
+                    "guest_id": guest_token,
+                },
+            )
+        )
+
+    permission_receiver_owner_id = pick_co_owner_for_direct_permission(db, nid, admin.id)
+    perm_event = ZoneMessageEvent(
+        zone_id=nid,
+        sender_id=admin.id,
+        receiver_id=permission_receiver_owner_id,
+        guest_access_session_id=session_row.id,
+        type=CanonicalMessageType.PERMISSION.value,
+        category=type_category(CanonicalMessageType.PERMISSION),
+        scope=type_scope(CanonicalMessageType.PERMISSION),
+        text=f"Network guest access requested for {guest_name.strip()}. Awaiting approval.",
+        body_json={
+            "guest_name": guest_name.strip(),
+            "zone_id": nid,
+            "guest_id": guest_token,
+            "guest_request_id": session_row.id,
+            "device_id": (device_id or "").strip() or None,
+            "location": {"lat": latitude, "lng": longitude},
+            "guest_message": msg_guest,
+        },
+        metadata_json={
+            "flow": "network_guest_arrival",
+            "guest_id": guest_token,
+            "guest_access_session_db_id": session_row.id,
+            "schedule_match": False,
+            "websocket_events": [{"name": "unexpected_guest", "targets": "zone_members"}],
+            "domain_event": "guest_request_created",
+            "permission_visibility": PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST,
+            **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
+        },
+    )
+    db.add(perm_event)
     db.flush()
 
     return {
         "guest_response": {
-            "status": "EXPECTED",
+            "status": "UNEXPECTED",
             "message": msg_guest,
             "guest_id": guest_token,
             "zone_id": nid,
-            "exchange_code": session_row.exchange_code,
-            "exchange_expires_at": guest_exchange_expires_at_iso(session_row),
         },
         "ws_guest_is_here": [],
-        "ws_unexpected_guest": [],
+        "ws_unexpected_guest": ws_unexpected,
     }
 
 
@@ -219,8 +290,14 @@ def _guest_row_client_status(row: GuestAccessSession) -> str:
     """PENDING / APPROVED / REJECTED for dashboard approval UI."""
     if row.access_revoked_at is not None:
         return "REJECTED"
-    if row.kind in ("expected", "network_access"):
+    if row.kind == "expected":
         return "APPROVED"
+    if row.kind == "network_access":
+        if row.resolution == "approved":
+            return "APPROVED"
+        if row.resolution == "rejected":
+            return "REJECTED"
+        return "PENDING"
     if row.resolution == "approved":
         return "APPROVED"
     if row.resolution == "rejected":
@@ -671,7 +748,7 @@ def serialize_guest_session_row(db: Session, row: GuestAccessSession) -> dict:
         "created_at": row.created_at,
         "guest_status": base["status"],
         "status": _guest_row_client_status(row),
-        "expectation": "expected" if row.kind in ("expected", "network_access") else "unexpected",
+        "expectation": "expected" if row.kind == "expected" else "unexpected",
     }
 
 
@@ -696,18 +773,16 @@ def list_guest_sessions_for_zone(
     sk = max(0, min(int(skip), 10_000))
     q = db.query(GuestAccessSession).filter(GuestAccessSession.zone_id == zone_id.strip())
     if pending_only:
-        q = q.filter(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "pending")
+        q = q.filter(_pending_approval_filter())
     elif status and (st := status.strip().upper()):
         if st == "PENDING":
-            q = q.filter(
-                GuestAccessSession.kind == "unexpected",
-                GuestAccessSession.resolution == "pending",
-            )
+            q = q.filter(_pending_approval_filter())
         elif st in ("APPROVED", "GRANTED"):
             q = q.filter(
                 GuestAccessSession.access_revoked_at.is_(None),
                 or_(
-                    GuestAccessSession.kind.in_(("expected", "network_access")),
+                    GuestAccessSession.kind == "expected",
+                    and_(GuestAccessSession.kind == "network_access", GuestAccessSession.resolution == "approved"),
                     and_(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "approved"),
                 ),
             )
@@ -716,6 +791,7 @@ def list_guest_sessions_for_zone(
                 or_(
                     GuestAccessSession.access_revoked_at.isnot(None),
                     and_(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "rejected"),
+                    and_(GuestAccessSession.kind == "network_access", GuestAccessSession.resolution == "rejected"),
                 )
             )
     return q.order_by(GuestAccessSession.created_at.desc()).offset(sk).limit(lim).all()
@@ -731,15 +807,10 @@ def guest_session_public_view(db: Session, row: GuestAccessSession) -> dict:
             "message": "Access has been revoked.",
         }
     resolved = resolve_guest_arrival_messages(db, row.zone_id)
-    if row.kind in ("expected", "network_access"):
+    if row.kind == "expected":
         status = "EXPECTED"
         if row.arrival_guest_message_snapshot is not None:
             message = row.arrival_guest_message_snapshot
-        elif row.kind == "network_access":
-            message = (
-                "Network access granted. You may send safety alerts while inside "
-                "the network's primary acceptable zone."
-            )
         elif (
             db.query(GuestPass.id).filter(GuestPass.used_by_guest_id == row.guest_id).first() is not None
         ):
@@ -747,6 +818,22 @@ def guest_session_public_view(db: Session, row: GuestAccessSession) -> dict:
         else:
             message = resolved.expected_arrival_message
         approval_status = "APPROVED"
+    elif row.kind == "network_access":
+        if row.resolution == "approved":
+            status = "APPROVED"
+            message = "Your visit has been approved. Welcome."
+            approval_status = "APPROVED"
+        elif row.resolution == "rejected":
+            status = "REJECTED"
+            message = "Access was not approved."
+            approval_status = "REJECTED"
+        else:
+            status = "UNEXPECTED"
+            if row.arrival_guest_message_snapshot is not None:
+                message = row.arrival_guest_message_snapshot
+            else:
+                message = resolved.unexpected_arrival_message
+            approval_status = "PENDING"
     elif row.resolution == "approved":
         status = "APPROVED"
         message = "Your visit has been approved. Welcome."
@@ -769,13 +856,7 @@ def guest_session_public_view(db: Session, row: GuestAccessSession) -> dict:
         "approval_status": approval_status,
         "message": message,
     }
-    ready_for_exchange = (
-        row.access_revoked_at is None
-        and (
-            row.kind in ("expected", "network_access")
-            or (row.kind == "unexpected" and row.resolution == "approved")
-        )
-    )
+    ready_for_exchange = row.access_revoked_at is None and _guest_session_approved_for_access(row)
     if ready_for_exchange and row.exchange_consumed_at is None:
         now = datetime.utcnow()
         if row.exchange_code and row.exchange_expires_at and row.exchange_expires_at > now:
@@ -821,11 +902,7 @@ def consume_guest_exchange_and_issue_context(
     if row.access_revoked_at is not None:
         return {"error": "guest_not_approved", "message": "Guest access is not approved.", "http_status": 403}
 
-    cleared = (
-        row.kind == "network_access"
-        or row.kind == "expected"
-        or (row.kind == "unexpected" and row.resolution == "approved")
-    )
+    cleared = _guest_session_approved_for_access(row)
     if not cleared:
         return {"error": "guest_not_approved", "message": "Guest access is not approved.", "http_status": 403}
 
@@ -878,7 +955,7 @@ def approve_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: s
         return {"error": "NOT_FOUND", "message": "Guest session not found.", "http_status": 404}
     if row.access_revoked_at is not None:
         return {"error": "INVALID_STATE", "message": "Guest session is no longer active.", "http_status": 422}
-    if row.kind != "unexpected":
+    if row.kind not in ("unexpected", "network_access"):
         return {"error": "INVALID_STATE", "message": "Guest does not require approval.", "http_status": 422}
     if row.resolution != "pending":
         return {"error": "INVALID_STATE", "message": "Guest session already resolved.", "http_status": 422}
@@ -990,7 +1067,7 @@ def reject_guest(db: Session, *, acting_owner: Owner, zone_id: str, guest_id: st
             },
         }
 
-    if row.kind != "unexpected":
+    if row.kind not in ("unexpected", "network_access"):
         return {"error": "INVALID_STATE", "message": "Guest does not require approval.", "http_status": 422}
 
     if row.resolution == "pending":

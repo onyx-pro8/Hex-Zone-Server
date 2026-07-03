@@ -45,7 +45,7 @@ def _admin(db, network_id: str) -> Owner:
     return owner
 
 
-def test_process_network_guest_arrival_auto_expected(db):
+def test_process_network_guest_arrival_requires_approval(db):
     network = "NET-ACCESS-1"
     _admin(db, network)
     result = gas.process_network_guest_arrival(
@@ -59,9 +59,10 @@ def test_process_network_guest_arrival_auto_expected(db):
     )
     assert "error" not in result
     gr = result["guest_response"]
-    assert gr["status"] == "EXPECTED"
+    assert gr["status"] == "UNEXPECTED"
     assert gr["zone_id"] == network
-    assert gr["exchange_code"]
+    assert "exchange_code" not in gr
+    assert result["ws_unexpected_guest"]
 
 
 def test_session_allows_network_geo_messaging(db):
@@ -88,7 +89,7 @@ def test_session_allows_network_geo_messaging(db):
 
 def test_guest_private_search_requires_coordinates(db):
     network = "NET-ACCESS-3"
-    _admin(db, network)
+    admin = _admin(db, network)
     result = gas.process_network_guest_arrival(
         db,
         network_id=network,
@@ -104,6 +105,9 @@ def test_guest_private_search_requires_coordinates(db):
         .filter(GuestAccessSession.guest_id == result["guest_response"]["guest_id"])
         .first()
     )
+    approved = gas.approve_guest(db, acting_owner=admin, zone_id=network, guest_id=row.guest_id)
+    assert approved.get("ok")
+    db.commit()
     search = mfs.search_network_guest_private_message_recipients(
         db,
         guest_session=row,
@@ -115,9 +119,9 @@ def test_guest_private_search_requires_coordinates(db):
     assert search["members"] == []
 
 
-def test_network_guest_session_poll_is_auto_approved(db):
+def test_network_guest_session_poll_pending_until_approved(db):
     network = "NET-ACCESS-4"
-    _admin(db, network)
+    admin = _admin(db, network)
     result = gas.process_network_guest_arrival(
         db,
         network_id=network,
@@ -134,7 +138,17 @@ def test_network_guest_session_poll_is_auto_approved(db):
         .first()
     )
     view = gas.guest_session_public_view(db, row)
-    assert view["status"] == "EXPECTED"
-    assert view["approval_status"] == "APPROVED"
-    assert view.get("exchange_code")
+    assert view["status"] == "UNEXPECTED"
+    assert view["approval_status"] == "PENDING"
+    assert "exchange_code" not in view
+    assert gas._guest_row_client_status(row) == "PENDING"
+
+    approved = gas.approve_guest(db, acting_owner=admin, zone_id=network, guest_id=row.guest_id)
+    assert approved.get("ok")
+    db.commit()
+    db.refresh(row)
+
+    view_after = gas.guest_session_public_view(db, row)
+    assert view_after["approval_status"] == "APPROVED"
+    assert view_after.get("exchange_code")
     assert gas._guest_row_client_status(row) == "APPROVED"
