@@ -147,8 +147,7 @@ def process_network_guest_arrival(
 
     guest_token = str(uuid.uuid4())
     msg_guest = (
-        "Network access granted. You may send safety alerts from this device while inside "
-        "the network's primary acceptable zone."
+        "Network access granted. You may chat with this network using access messages."
     )
 
     session_row = GuestAccessSession(
