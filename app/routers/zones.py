@@ -12,6 +12,7 @@ from app.crud import zone as zone_crud
 from app.database import get_db
 from app.models.zone import Zone, ZoneType
 from app.services.access_policy import visible_owner_ids, visible_zone_owner_ids
+from app.services.account_type_policy import is_system_administrator
 from app.services.communal_zone_service import (
     generate_communal_reference,
     is_valid_reference_format,
@@ -591,6 +592,7 @@ def _serialize_zone(zone: Zone) -> dict[str, Any]:
         "id": zone.id,
         "zone_id": zone.zone_id,
         "owner_id": zone.owner_id,
+        "creator_id": zone.creator_id,
         "name": zone.name,
         "type": normalized_type,
         "geometry": geometry if isinstance(geometry, dict) else {},
@@ -1223,7 +1225,13 @@ async def update_zone(
     }
 
     normalized_name = normalize_zone_name(merged["name"])
-    owner_ids = account_owner_ids_for_policy(db, owner)
+    zone_owner = owner_crud.get_owner(db, target_zone.owner_id)
+    if zone_owner is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Zone owner not found",
+        )
+    owner_ids = account_owner_ids_for_policy(db, zone_owner)
     ensure_unique_zone_name(db, owner_ids, normalized_name, exclude_zone_record_id=target_zone.id)
     _validate_zone_payload(merged["type"], merged["geometry"], merged["config"])
 
@@ -1292,7 +1300,30 @@ async def delete_zone(
     db: Session = Depends(get_db),
 ):
     """Delete a zone."""
-    deleted = zone_crud.delete_zone(db, zone_id, owner_id=current_user["user_id"])
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Owner not found",
+        )
+
+    if is_system_administrator(owner):
+        target = zone_crud.get_zone(db, zone_id=zone_id)
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Zone not found",
+            )
+        allowed_ids = set(visible_zone_owner_ids(db, owner))
+        if target.owner_id not in allowed_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: cannot delete this zone",
+            )
+        db.delete(target)
+        deleted = True
+    else:
+        deleted = zone_crud.delete_zone(db, zone_id, owner_id=current_user["user_id"])
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

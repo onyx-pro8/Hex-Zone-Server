@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models import Owner, Zone
 from app.services.access_policy import account_root_id
+from app.services.account_type_policy import is_system_administrator
 
 ZONE_NAME_MIN_LENGTH = 1
 ZONE_NAME_MAX_LENGTH = 120
@@ -175,6 +176,9 @@ def capabilities_for_owner(db: Session, owner: Owner) -> ZoneCapabilities:
 
 
 def ensure_zone_edit_allowed(owner: Owner, zone: Zone) -> None:
+    if is_system_administrator(owner):
+        return
+
     # Option A policy: caller may edit only zones they personally created.
     if zone.creator_id != owner.id:
         raise HTTPException(

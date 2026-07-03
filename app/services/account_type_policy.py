@@ -24,9 +24,16 @@ def assert_account_type_allowed_for_public_registration(account_type: str) -> No
         )
 
 
+def is_system_administrator(owner: Owner) -> bool:
+    """True for the built-in Private-tier platform administrator."""
+    if owner.role.value != "administrator":
+        return False
+    return normalize_pricing_tier_key(owner.account_type.value) == PRICING_TIER_PRIVATE
+
+
 def owner_may_edit_network_id(owner: Owner) -> bool:
     """Only Private-tier owners may change their network id (zone_id)."""
-    return normalize_pricing_tier_key(owner.account_type.value) == PRICING_TIER_PRIVATE
+    return is_system_administrator(owner)
 
 
 def assert_owner_may_edit_network_id(owner: Owner) -> None:

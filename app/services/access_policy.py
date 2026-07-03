@@ -6,10 +6,19 @@ from sqlalchemy.orm import Session
 
 from app.models import Owner
 from app.models.owner import AccountType, OwnerRole
+from app.services.account_type_policy import is_system_administrator
 from app.services.device_entitlements import (
     assert_account_allows_user_members,
     assert_admin_user_member_capacity,
 )
+
+
+def _all_owner_ids(db: Session, *, include_inactive: bool = False) -> list[int]:
+    """Return every owner id (platform-wide)."""
+    query = db.query(Owner.id)
+    if not include_inactive:
+        query = query.filter(Owner.active.is_(True))
+    return [row[0] for row in query.all()]
 
 
 def account_root_id(owner: Owner) -> int:
@@ -70,6 +79,9 @@ def resolve_account_owner_id(
 
 def visible_owner_ids(db: Session, owner: Owner, include_inactive: bool = False) -> list[int]:
     """Return owners visible to caller based on role/account type rules."""
+    if is_system_administrator(owner):
+        return _all_owner_ids(db, include_inactive=include_inactive)
+
     # Default-deny for non-admin callers: only explicit administrators can see account-wide owners.
     if owner.role.value != "administrator":
         return [owner.id]
@@ -115,6 +127,9 @@ def messaging_visible_owner_ids(
     require_same_zone: bool = True,
 ) -> list[int]:
     """Return owner ids visible for private-message receiver discovery."""
+    if is_system_administrator(owner):
+        return _all_owner_ids(db, include_inactive=include_inactive)
+
     root_id = account_root_id(owner)
     query = db.query(Owner.id).filter((Owner.id == root_id) | (Owner.account_owner_id == root_id))
     if not include_inactive:
@@ -144,9 +159,13 @@ def can_message_owner(sender: Owner, receiver: Owner, *, require_same_zone: bool
 def zone_listing_owner_ids(db: Session, owner: Owner) -> list[int]:
     """Return owner ids whose zones the caller may list or read.
 
-    Administrators see every linked user's zones (same account root).
+    System administrators see every zone on the platform.
+    Account administrators see every linked user's zones (same account root).
     Users see only their own zones plus the administrator's main zone (account root).
     """
+    if is_system_administrator(owner):
+        return _all_owner_ids(db, include_inactive=True)
+
     if owner.role.value != "administrator":
         root_id = account_root_id(owner)
         if root_id == owner.id:
