@@ -36,8 +36,8 @@ from app.services.unknown_fanout_service import (
     unknown_fanout_limit,
 )
 from app.services.network_zone_propagation import (
+    network_owner_ids_for_unknown_fanout,
     network_owner_ids_with_coordinates,
-    owner_participates_in_network,
     resolve_network_administrator,
     resolve_network_geo_propagation_recipients,
 )
@@ -248,12 +248,10 @@ def _resolve_private_location_status(
     longitude: float | None,
     network_zone_id: str | None = None,
 ) -> str:
-    """Location gate for PRIVATE compose: network membership, coordinates, zone geometry."""
-    if network_zone_id is None and not owner_participates_in_network(db, sender):
-        return "not_in_network"
+    """Location gate for PRIVATE compose: coordinates, then acceptable-zone geometry."""
     if latitude is None or longitude is None:
         return "no_coordinates"
-    zone_ids, zone_record_ids, _, _ = resolve_geo_propagation_recipient_owner_ids(
+    _, zone_record_ids, _, _ = resolve_geo_propagation_recipient_owner_ids(
         db,
         latitude=float(latitude),
         longitude=float(longitude),
@@ -535,9 +533,11 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
             sender.location_updated_at = datetime.utcnow()
 
         target_x = unknown_fanout_limit(sender)
-        network_candidates = network_owner_ids_with_coordinates(
+        network_candidates, matched_network_ids = network_owner_ids_for_unknown_fanout(
             db,
-            sender.zone_id,
+            sender,
+            origin_lat=origin_lat,
+            origin_lon=origin_lon,
             exclude_owner_id=sender.id,
         )
         candidate_recipients = resolve_nearest_owner_ids_among(
@@ -551,7 +551,8 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
         fanout_meta = {
             "account_type": account_type,
             "strategy": "unknown_nearest_network",
-            "network_zone_id": (sender.zone_id or "").strip(),
+            "network_zone_id": matched_network_ids[0] if matched_network_ids else (sender.zone_id or "").strip(),
+            "matched_network_zone_ids": matched_network_ids,
             "target_x": target_x,
             "resolved_x": len(candidate_recipients),
             "origin": {

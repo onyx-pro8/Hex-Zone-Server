@@ -521,7 +521,7 @@ def test_private_search_by_name(prop_db, monkeypatch):
     assert "Ann" in result["members"][0]["display_name"]
 
 
-def test_private_search_not_in_network(prop_db):
+def test_private_search_outside_zone(prop_db, monkeypatch):
     zone_label = "zone-solo"
     sender = _owner(
         prop_db,
@@ -535,7 +535,18 @@ def test_private_search_not_in_network(prop_db):
     )
     prop_db.commit()
 
+    monkeypatch.setattr(
+        mfs,
+        "resolve_geo_propagation_recipient_owner_ids",
+        lambda db, *, latitude, longitude, exclude_owner_id=None, sender=None, network_zone_id=None, **_: (
+            [],
+            [],
+            [],
+            {"sender_zone_record_ids": []},
+        ),
+    )
+
     result = mfs.search_private_message_recipients(prop_db, sender, "ann")
     assert result["zone_ids"] == []
     assert result["members"] == []
-    assert result["location_status"] == "not_in_network"
+    assert result["location_status"] == "outside_zone"

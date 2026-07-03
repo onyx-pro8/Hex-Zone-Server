@@ -318,3 +318,76 @@ def test_owner_not_in_network_without_account_root(net_db):
     net_db.commit()
 
     assert nzp.owner_participates_in_network(net_db, loose) is False
+
+
+def test_non_invited_user_inside_foreign_primary_zone(net_db, monkeypatch):
+    """Tester 1 (solo account) inside Tester 2's primary zone reaches admin + invited member."""
+    network = "NET-HOST"
+    admin = _owner(
+        net_db,
+        oid=10,
+        email="tester2@x.com",
+        network_id=network,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.61,
+        lon=-122.33,
+    )
+    admin.account_owner_id = admin.id
+    invited = _owner(
+        net_db,
+        oid=11,
+        email="tester3@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        lat=47.62,
+        lon=-122.34,
+    )
+    outsider = _owner(
+        net_db,
+        oid=12,
+        email="tester1@x.com",
+        network_id="NET-TESTER1-SOLO",
+        role=OwnerRole.USER,
+        account_owner_id=None,
+        lat=47.61,
+        lon=-122.33,
+    )
+    net_db.commit()
+
+    monkeypatch.setattr(
+        nzp,
+        "evaluate_zone_records_containing_point",
+        lambda db, lat, lon: [301],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "zone_ids_for_zone_records",
+        lambda db, ids: [network],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "_zone_rows_for_records",
+        lambda db, ids: [
+            _zone_row(
+                record_id=301,
+                network_id=network,
+                creator_id=admin.id,
+                owner_id=admin.id,
+            )
+        ],
+    )
+
+    assert nzp.owner_participates_in_network(net_db, outsider) is False
+
+    _, _, recipients, meta = nzp.resolve_network_geo_propagation_recipients(
+        net_db,
+        outsider,
+        latitude=47.61,
+        longitude=-122.33,
+        exclude_owner_id=outsider.id,
+    )
+    assert meta["strategy"] == "primary_zone_network_members"
+    assert meta["network_zone_id"] == network
+    assert set(recipients) == {admin.id, invited.id}
