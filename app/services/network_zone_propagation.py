@@ -46,6 +46,25 @@ def _is_primary_zone_row(zone: Zone, *, network_admin_id: int | None) -> bool:
     return int(zone.creator_id) == int(network_admin_id)
 
 
+def owner_participates_in_network(db: Session, owner: Owner) -> bool:
+    """True when the owner is the network administrator or an invited member."""
+    network_id = (owner.zone_id or "").strip()
+    if not network_id:
+        return False
+    admin = resolve_network_administrator(db, network_id)
+    if admin is None:
+        return False
+    if owner.role == OwnerRole.ADMINISTRATOR:
+        return int(admin.id) == int(owner.id)
+    root_id = owner.account_owner_id
+    if root_id is None:
+        return False
+    root = db.get(Owner, int(root_id))
+    if root is None or not bool(root.active):
+        return False
+    return (root.zone_id or "").strip() == network_id
+
+
 def resolve_network_geo_propagation_recipients(
     db: Session,
     sender: Owner,
@@ -53,6 +72,7 @@ def resolve_network_geo_propagation_recipients(
     latitude: float,
     longitude: float,
     exclude_owner_id: int | None = None,
+    network_zone_id: str | None = None,
 ) -> tuple[list[str], list[int], list[int], dict]:
     """Resolve geo-propagation recipients using primary vs secondary zone rules.
 
@@ -62,9 +82,10 @@ def resolve_network_geo_propagation_recipients(
       secondary zone's **creator** only.
     - Outside primary and not inside any secondary acceptable zone → nobody.
 
-    Only zone rows whose ``zone_id`` matches the sender's network id are considered.
+    Only zone rows whose ``zone_id`` matches the network id are considered. Pass
+    ``network_zone_id`` when the routing owner is a proxy (e.g. network-access guest).
     """
-    network_id = (sender.zone_id or "").strip()
+    network_id = (network_zone_id or sender.zone_id or "").strip()
     zone_record_ids = evaluate_zone_records_containing_point(db, float(latitude), float(longitude))
     zone_rows = _zone_rows_for_records(db, zone_record_ids)
     network_rows = [z for z in zone_rows if (z.zone_id or "").strip() == network_id]

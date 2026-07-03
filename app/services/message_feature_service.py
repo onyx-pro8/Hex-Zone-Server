@@ -37,6 +37,7 @@ from app.services.unknown_fanout_service import (
 )
 from app.services.network_zone_propagation import (
     network_owner_ids_with_coordinates,
+    owner_participates_in_network,
     resolve_network_administrator,
     resolve_network_geo_propagation_recipients,
 )
@@ -176,6 +177,7 @@ def resolve_geo_propagation_recipient_owner_ids(
     longitude: float,
     exclude_owner_id: int | None = None,
     sender: Owner | None = None,
+    network_zone_id: str | None = None,
 ) -> tuple[list[str], list[int], list[int], dict]:
     """Resolve geo alarm/alert recipients from acceptable-zone rules."""
     if sender is None:
@@ -194,6 +196,7 @@ def resolve_geo_propagation_recipient_owner_ids(
         latitude=float(latitude),
         longitude=float(longitude),
         exclude_owner_id=exclude_owner_id,
+        network_zone_id=network_zone_id,
     )
 
 
@@ -205,6 +208,7 @@ def _assert_private_receiver_reachable(
     latitude: float,
     longitude: float,
     sender_zone_record_ids: list[int],
+    network_zone_id: str | None = None,
 ) -> None:
     """PRIVATE: sender must be inside a zone; receiver must be in the PANIC/PA pool."""
     receiver = db.get(Owner, receiver_owner_id)
@@ -228,6 +232,7 @@ def _assert_private_receiver_reachable(
         longitude=longitude,
         exclude_owner_id=None,
         sender=sender,
+        network_zone_id=network_zone_id,
     )
     if receiver.id not in pool:
         raise PrivateScopeRecipientError(
@@ -235,34 +240,42 @@ def _assert_private_receiver_reachable(
         )
 
 
-def search_private_message_recipients(
+def _resolve_private_location_status(
     db: Session,
     sender: Owner,
-    query: str,
     *,
-    latitude: float | None = None,
-    longitude: float | None = None,
-    limit: int = PRIVATE_SEARCH_MAX_RESULTS,
-) -> dict:
-    """Search owners with the same zone id by name or email for PRIVATE compose."""
-    lat = latitude if latitude is not None else sender.latitude
-    lon = longitude if longitude is not None else sender.longitude
-    if lat is None or lon is None:
-        return {"zone_ids": [], "members": []}
-
-    zone_ids, zone_record_ids, candidate_ids, _ = resolve_geo_propagation_recipient_owner_ids(
+    latitude: float | None,
+    longitude: float | None,
+    network_zone_id: str | None = None,
+) -> str:
+    """Location gate for PRIVATE compose: network membership, coordinates, zone geometry."""
+    if network_zone_id is None and not owner_participates_in_network(db, sender):
+        return "not_in_network"
+    if latitude is None or longitude is None:
+        return "no_coordinates"
+    zone_ids, zone_record_ids, _, _ = resolve_geo_propagation_recipient_owner_ids(
         db,
-        latitude=float(lat),
-        longitude=float(lon),
+        latitude=float(latitude),
+        longitude=float(longitude),
         exclude_owner_id=sender.id,
         sender=sender,
+        network_zone_id=network_zone_id,
     )
     if not zone_record_ids:
-        return {"zone_ids": [], "members": []}
+        return "outside_zone"
+    return "inside_zone"
 
+
+def _private_search_members(
+    db: Session,
+    candidate_ids: list[int],
+    query: str,
+    *,
+    limit: int = PRIVATE_SEARCH_MAX_RESULTS,
+) -> list[dict]:
     q = (query or "").strip()
     if not candidate_ids:
-        return {"zone_ids": zone_ids, "members": []}
+        return []
 
     cap = max(1, min(int(limit), PRIVATE_SEARCH_MAX_RESULTS))
     query_builder = (
@@ -288,10 +301,10 @@ def search_private_message_recipients(
             )
         )
     elif len(q) > 0:
-        return {"zone_ids": zone_ids, "members": []}
+        return []
     rows = query_builder.limit(cap).all()
 
-    members = [
+    return [
         {
             "id": int(row.id),
             "display_name": row.message_display_name,
@@ -304,7 +317,75 @@ def search_private_message_recipients(
         }
         for row in rows
     ]
-    return {"zone_ids": zone_ids, "members": members}
+
+
+def search_private_message_recipients(
+    db: Session,
+    sender: Owner,
+    query: str,
+    *,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    limit: int = PRIVATE_SEARCH_MAX_RESULTS,
+) -> dict:
+    """Search network members by name or email for PRIVATE compose (invited members only)."""
+    lat = latitude if latitude is not None else sender.latitude
+    lon = longitude if longitude is not None else sender.longitude
+    location_status = _resolve_private_location_status(
+        db,
+        sender,
+        latitude=lat,
+        longitude=lon,
+    )
+    if location_status != "inside_zone":
+        return {"zone_ids": [], "members": [], "location_status": location_status}
+
+    zone_ids, zone_record_ids, candidate_ids, _ = resolve_geo_propagation_recipient_owner_ids(
+        db,
+        latitude=float(lat),
+        longitude=float(lon),
+        exclude_owner_id=sender.id,
+        sender=sender,
+    )
+    members = _private_search_members(db, candidate_ids, query, limit=limit)
+    return {"zone_ids": zone_ids, "members": members, "location_status": "inside_zone"}
+
+
+def search_network_guest_private_message_recipients(
+    db: Session,
+    *,
+    guest_session: GuestAccessSession,
+    query: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    limit: int = PRIVATE_SEARCH_MAX_RESULTS,
+) -> dict:
+    """PRIVATE recipient search for users not in a network (network-access guest session)."""
+    network_id = (guest_session.zone_id or "").strip()
+    admin = resolve_network_administrator(db, network_id)
+    if admin is None:
+        return {"zone_ids": [], "members": [], "location_status": "not_in_network"}
+
+    location_status = _resolve_private_location_status(
+        db,
+        admin,
+        latitude=latitude,
+        longitude=longitude,
+        network_zone_id=network_id,
+    )
+    if location_status != "inside_zone":
+        return {"zone_ids": [], "members": [], "location_status": location_status}
+
+    zone_ids, _, candidate_ids, _ = resolve_geo_propagation_recipient_owner_ids(
+        db,
+        latitude=float(latitude),
+        longitude=float(longitude),
+        exclude_owner_id=None,
+        sender=admin,
+        network_zone_id=network_id,
+    )
+    members = _private_search_members(db, candidate_ids, query, limit=limit)
+    return {"zone_ids": zone_ids, "members": members, "location_status": "inside_zone"}
 
 
 def _apply_delivery_blocks(
@@ -337,6 +418,7 @@ def _zone_based_recipients(
     scope: MessageScope,
     *,
     exclude_sender_from_recipients: bool = True,
+    network_zone_id: str | None = None,
 ) -> tuple[list[str], list[int], dict]:
     """Resolve recipients for geo alarm/alert types (not UNKNOWN).
 
@@ -354,6 +436,7 @@ def _zone_based_recipients(
             longitude=eval_lon,
             exclude_owner_id=sender.id if exclude_sender_from_recipients else None,
             sender=sender,
+            network_zone_id=network_zone_id,
         )
     )
     zone_meta = {**zone_meta, "geo_evaluation_source": geo_source}
@@ -369,6 +452,7 @@ def _zone_based_recipients(
             latitude=eval_lat,
             longitude=eval_lon,
             sender_zone_record_ids=sender_zone_record_ids,
+            network_zone_id=network_zone_id,
         )
         return (
             sender_zone_ids,
@@ -583,7 +667,7 @@ def create_network_guest_geo_propagated_message(
     guest_session: GuestAccessSession,
     payload: PropagationMessageCreate,
 ) -> dict:
-    """Geo-propagated alarm/alert from a non-invited guest after network QR scan."""
+    """Geo-propagated alarm/alert from a user not in a network (network-access guest after QR scan)."""
     network_id = (guest_session.zone_id or "").strip()
     admin = resolve_network_administrator(db, network_id)
     if admin is None:
@@ -648,6 +732,7 @@ def create_network_guest_geo_propagated_message(
             canonical_type,
             scope,
             exclude_sender_from_recipients=False,
+            network_zone_id=network_id,
         )
         eval_lat, eval_lon, geo_source = _geo_evaluation_coordinates(
             routing_owner, payload, canonical_type

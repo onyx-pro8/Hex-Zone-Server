@@ -38,6 +38,7 @@ from app.services.message_feature_service import (
     UnknownRateLimitError,
     SensorRateLimitError,
     create_network_guest_geo_propagated_message,
+    search_network_guest_private_message_recipients,
 )
 from app.domain.service_pa_topics import ServicePaValidationError
 from app.services import guest_api_service, guest_access_service
@@ -488,6 +489,54 @@ async def guest_post_message(
         payload={"event": created, "zone_id": zone_id},
     )
     return GuestMessageCreatedResponse(status="success", data=_zone_message_item(created))
+
+
+@router.get(
+    "/messages/members/search",
+    summary="Search network members for PRIVATE compose (network-access guest)",
+    description=(
+        "Requires **network access** guest session. Uses the guest's current device coordinates "
+        "and the network id from the QR scan to apply the same zone gate as invited members."
+    ),
+    responses={status.HTTP_401_UNAUTHORIZED: _GUEST_API_UNAUTHORIZED},
+)
+async def guest_search_private_recipients(
+    q: str = Query(default="", max_length=120, description="Optional name or email fragment"),
+    latitude: float | None = Query(default=None, ge=-90, le=90),
+    longitude: float | None = Query(default=None, ge=-180, le=180),
+    limit: int = Query(default=20, ge=1, le=50),
+    guest_ctx: dict = Depends(get_current_guest),
+    db: Session = Depends(get_db),
+):
+    if not guest_ctx.get("network_geo_messaging"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": "PRIVATE search requires a network access guest session.",
+                "error_code": "GUEST_GEO_NOT_ALLOWED",
+            },
+        )
+    row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == guest_ctx["guest_id"])
+        .first()
+    )
+    if not row or not guest_access_service.session_allows_network_geo_messaging(row):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": "PRIVATE search requires a network access guest session.",
+                "error_code": "GUEST_GEO_NOT_ALLOWED",
+            },
+        )
+    return search_network_guest_private_message_recipients(
+        db,
+        guest_session=row,
+        query=q,
+        latitude=latitude,
+        longitude=longitude,
+        limit=limit,
+    )
 
 
 @router.post(

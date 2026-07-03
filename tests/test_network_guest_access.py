@@ -9,6 +9,7 @@ from app.database import Base
 from app.models import GuestAccessSession, Owner
 from app.models.owner import AccountType, OwnerRole
 from app.services import guest_access_service as gas
+from app.services import message_feature_service as mfs
 
 
 @pytest.fixture()
@@ -83,3 +84,32 @@ def test_session_allows_network_geo_messaging(db):
     )
     assert row is not None
     assert gas.session_allows_network_geo_messaging(row)
+
+
+def test_guest_private_search_requires_coordinates(db):
+    network = "NET-ACCESS-3"
+    _admin(db, network)
+    result = gas.process_network_guest_arrival(
+        db,
+        network_id=network,
+        guest_name="Visitor",
+        device_id=None,
+        latitude=None,
+        longitude=None,
+        qr_token_db_id=None,
+    )
+    db.commit()
+    row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == result["guest_response"]["guest_id"])
+        .first()
+    )
+    search = mfs.search_network_guest_private_message_recipients(
+        db,
+        guest_session=row,
+        query="",
+        latitude=None,
+        longitude=None,
+    )
+    assert search["location_status"] == "no_coordinates"
+    assert search["members"] == []

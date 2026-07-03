@@ -26,6 +26,8 @@ def _mock_zone_id_fanout(
         longitude,
         exclude_owner_id=None,
         sender=None,
+        network_zone_id=None,
+        **_,
     ):
         pool = set(mfs._owner_ids_for_zone_id_labels(db, zone_labels))
         if exclude_owner_id is not None:
@@ -384,7 +386,12 @@ def test_private_rejects_when_sender_not_in_zone(prop_db, monkeypatch):
     monkeypatch.setattr(
         mfs,
         "resolve_geo_propagation_recipient_owner_ids",
-        lambda db, *, latitude, longitude, exclude_owner_id=None, sender=None: ([], [], [], {"sender_zone_record_ids": []}),
+        lambda db, *, latitude, longitude, exclude_owner_id=None, sender=None, network_zone_id=None, **_: (
+            [],
+            [],
+            [],
+            {"sender_zone_record_ids": []},
+        ),
     )
 
     payload = PropagationMessageCreate(
@@ -508,6 +515,27 @@ def test_private_search_by_name(prop_db, monkeypatch):
 
     result = mfs.search_private_message_recipients(prop_db, sender, "ann")
     assert result["zone_ids"] == [zone_label]
+    assert result["location_status"] == "inside_zone"
     assert len(result["members"]) == 1
     assert result["members"][0]["id"] == 51
     assert "Ann" in result["members"][0]["display_name"]
+
+
+def test_private_search_not_in_network(prop_db):
+    zone_label = "zone-solo"
+    sender = _owner(
+        prop_db,
+        oid=60,
+        email="solo@x.com",
+        lat=1.0,
+        lon=1.0,
+        role=OwnerRole.USER,
+        account_owner_id=None,
+        zone_id=zone_label,
+    )
+    prop_db.commit()
+
+    result = mfs.search_private_message_recipients(prop_db, sender, "ann")
+    assert result["zone_ids"] == []
+    assert result["members"] == []
+    assert result["location_status"] == "not_in_network"

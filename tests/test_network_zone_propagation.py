@@ -249,3 +249,72 @@ def test_unknown_scoped_to_network_only(net_db):
     assert result["fanout"]["strategy"] == "unknown_nearest_network"
     assert result["delivered_owner_ids"] == [2]
     assert 99 not in result["delivered_owner_ids"]
+
+
+def test_owner_participates_in_network_admin_and_invited(net_db):
+    network = "NET-PART"
+    admin = _owner(
+        net_db,
+        oid=1,
+        email="admin@x.com",
+        network_id=network,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=0.0,
+        lon=0.0,
+    )
+    admin.account_owner_id = admin.id
+    member = _owner(
+        net_db,
+        oid=2,
+        email="member@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        lat=0.0,
+        lon=0.0,
+    )
+    outsider = _owner(
+        net_db,
+        oid=3,
+        email="solo@x.com",
+        network_id="SOLO-NET",
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=0.0,
+        lon=0.0,
+    )
+    outsider.account_owner_id = outsider.id
+    net_db.commit()
+
+    assert nzp.owner_participates_in_network(net_db, admin) is True
+    assert nzp.owner_participates_in_network(net_db, member) is True
+    assert nzp.owner_participates_in_network(net_db, outsider) is True
+
+
+def test_owner_not_in_network_without_account_root(net_db):
+    network = "NET-LOOSE"
+    admin = _owner(
+        net_db,
+        oid=1,
+        email="admin@x.com",
+        network_id=network,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=0.0,
+        lon=0.0,
+    )
+    admin.account_owner_id = admin.id
+    loose = _owner(
+        net_db,
+        oid=2,
+        email="loose@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=None,
+        lat=0.0,
+        lon=0.0,
+    )
+    net_db.commit()
+
+    assert nzp.owner_participates_in_network(net_db, loose) is False
