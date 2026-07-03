@@ -55,7 +55,9 @@ def owner_participates_in_network(db: Session, owner: Owner) -> bool:
     if admin is None:
         return False
     if owner.role == OwnerRole.ADMINISTRATOR:
-        return int(admin.id) == int(owner.id)
+        if not bool(owner.active):
+            return False
+        return (owner.zone_id or "").strip() == network_id
     root_id = owner.account_owner_id
     if root_id is None:
         return False
