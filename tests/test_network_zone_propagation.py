@@ -203,7 +203,7 @@ def test_outside_acceptable_zones_delivers_nobody(net_db, monkeypatch):
     assert recipients == []
 
 
-def test_unknown_scoped_to_network_only(net_db):
+def test_unknown_delivers_global_nearest_regardless_of_zone_id(net_db):
     network = "NET-5"
     sender = _owner(
         net_db,
@@ -226,7 +226,7 @@ def test_unknown_scoped_to_network_only(net_db):
         lat=0.01,
         lon=0.0,
     )
-    outsider = _owner(
+    closer_outsider = _owner(
         net_db,
         oid=99,
         email="outsider@x.com",
@@ -236,7 +236,7 @@ def test_unknown_scoped_to_network_only(net_db):
         lat=0.005,
         lon=0.0,
     )
-    outsider.account_owner_id = outsider.id
+    closer_outsider.account_owner_id = closer_outsider.id
     net_db.commit()
 
     payload = PropagationMessageCreate(
@@ -246,9 +246,10 @@ def test_unknown_scoped_to_network_only(net_db):
         msg={"description": "unknown"},
     )
     result = mfs.create_geo_propagated_message(net_db, sender, payload)
-    assert result["fanout"]["strategy"] == "unknown_nearest_network"
-    assert result["delivered_owner_ids"] == [2]
-    assert 99 not in result["delivered_owner_ids"]
+    assert result["fanout"]["strategy"] == "unknown_nearest_global"
+    assert result["delivered_owner_ids"][0] == 99
+    assert 99 in result["delivered_owner_ids"]
+    assert 2 in result["delivered_owner_ids"]
 
 
 def test_owner_participates_in_network_admin_and_invited(net_db):

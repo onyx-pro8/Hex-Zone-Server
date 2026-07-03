@@ -1,5 +1,5 @@
 """Network access guest arrival and session exchange."""
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import GuestAccessSession, Owner
+from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import AccountType, OwnerRole
 from app.services import guest_access_service as gas
 from app.services import message_feature_service as mfs
@@ -152,3 +153,46 @@ def test_network_guest_session_poll_pending_until_approved(db):
     assert view_after["approval_status"] == "APPROVED"
     assert view_after.get("exchange_code")
     assert gas._guest_row_client_status(row) == "APPROVED"
+
+
+def test_accepted_guest_pass_auto_approves_network_arrival(db):
+    network = "NET-GP-1"
+    admin = _admin(db, network)
+    event_id = "EVT-2026-73"
+    guest_pass = GuestPass(
+        zone_id=network,
+        event_id=event_id,
+        requested_by=admin.id,
+        reviewed_by=admin.id,
+        guest_name="Pass Guest",
+        status=GuestPassStatus.ACCEPTED,
+        expires_at=datetime.utcnow() + timedelta(days=1),
+    )
+    db.add(guest_pass)
+    db.commit()
+
+    result = gas.process_guest_arrival(
+        db,
+        zone_id=network,
+        guest_name="Walk-in",
+        event_id=event_id,
+        device_id="dev-gp",
+        latitude=40.0,
+        longitude=-74.0,
+        qr_token_db_id=None,
+    )
+    assert "error" not in result
+    gr = result["guest_response"]
+    assert gr["status"] == "EXPECTED"
+    assert gr.get("exchange_code")
+    db.commit()
+    row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == gr["guest_id"])
+        .first()
+    )
+    assert row is not None
+    assert row.kind == "expected"
+    assert gas._guest_row_client_status(row) == "APPROVED"
+    db.refresh(guest_pass)
+    assert guest_pass.used_by_guest_id == gr["guest_id"]

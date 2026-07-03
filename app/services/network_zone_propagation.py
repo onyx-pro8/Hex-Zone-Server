@@ -87,7 +87,7 @@ def network_owner_ids_for_unknown_fanout(
     origin_lon: float,
     exclude_owner_id: int | None = None,
 ) -> tuple[list[int], list[str]]:
-    """Candidate owner ids for UNKNOWN: same-network pool from membership or host geometry."""
+    """Legacy zone-scoped pool (unused; UNKNOWN uses global ``resolve_nearest_owner_ids``)."""
     if owner_participates_in_network(db, sender):
         network_ids = [(sender.zone_id or "").strip()]
     else:

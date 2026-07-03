@@ -32,12 +32,10 @@ from app.domain.service_pa_topics import (
 )
 from app.services.unknown_fanout_service import (
     UNKNOWN_RATE_LIMIT_SECONDS,
-    resolve_nearest_owner_ids_among,
+    resolve_nearest_owner_ids,
     unknown_fanout_limit,
 )
 from app.services.network_zone_propagation import (
-    network_owner_ids_for_unknown_fanout,
-    network_owner_ids_with_coordinates,
     resolve_network_administrator,
     resolve_network_geo_propagation_recipients,
 )
@@ -533,26 +531,17 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
             sender.location_updated_at = datetime.utcnow()
 
         target_x = unknown_fanout_limit(sender)
-        network_candidates, matched_network_ids = network_owner_ids_for_unknown_fanout(
-            db,
-            sender,
-            origin_lat=origin_lat,
-            origin_lon=origin_lon,
-            exclude_owner_id=sender.id,
-        )
-        candidate_recipients = resolve_nearest_owner_ids_among(
+        candidate_recipients = resolve_nearest_owner_ids(
             db,
             origin_lat=origin_lat,
             origin_lon=origin_lon,
-            candidate_owner_ids=network_candidates,
+            sender_id=sender.id,
             limit=target_x,
         )
         zone_ids: list[str] = []
         fanout_meta = {
             "account_type": account_type,
-            "strategy": "unknown_nearest_network",
-            "network_zone_id": matched_network_ids[0] if matched_network_ids else (sender.zone_id or "").strip(),
-            "matched_network_zone_ids": matched_network_ids,
+            "strategy": "unknown_nearest_global",
             "target_x": target_x,
             "resolved_x": len(candidate_recipients),
             "origin": {
@@ -695,23 +684,17 @@ def create_network_guest_geo_propagated_message(
             raise exc
 
         target_x = unknown_fanout_limit(routing_owner)
-        network_candidates = network_owner_ids_with_coordinates(
-            db,
-            network_id,
-            exclude_owner_id=None,
-        )
-        candidate_recipients = resolve_nearest_owner_ids_among(
+        candidate_recipients = resolve_nearest_owner_ids(
             db,
             origin_lat=origin_lat,
             origin_lon=origin_lon,
-            candidate_owner_ids=network_candidates,
+            sender_id=-1,
             limit=target_x,
         )
         zone_ids: list[str] = []
         fanout_meta = {
             **fanout_meta,
-            "strategy": "unknown_nearest_network",
-            "network_zone_id": network_id,
+            "strategy": "unknown_nearest_global",
             "target_x": target_x,
             "resolved_x": len(candidate_recipients),
             "origin": {

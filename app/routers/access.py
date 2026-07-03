@@ -791,7 +791,16 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
                     },
                 )
             effective_zone_id = tz_zone
-            effective_event_id = None
+            merged_ev, eerr = guest_access_qr_token_service.merge_event_id_for_arrival(
+                token_event_id=qr_row.event_id,
+                payload_event_id=payload.event_id,
+            )
+            if eerr:
+                raise HTTPException(
+                    status_code=eerr["http_status"],
+                    detail={"error_code": eerr["error"], "message": eerr["message"]},
+                )
+            effective_event_id = merged_ev
         else:
             if payload_zone and payload_zone != tz_zone:
                 raise HTTPException(
@@ -831,7 +840,8 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
 
     guest_name = _sanitize_guest_name_or_422(payload.guest_name)
 
-    if is_network_arrival:
+    has_event_id = bool((effective_event_id or "").strip())
+    if is_network_arrival and not has_event_id:
         result = guest_access_service.process_network_guest_arrival(
             db,
             network_id=effective_zone_id,
