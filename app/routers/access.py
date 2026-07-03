@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.guest_permission_rate_limit import allow_request
-from app.core.security import NETWORK_GUEST_GEO_MESSAGE_TYPES, create_guest_access_token, get_current_user
+from app.core.security import create_guest_access_token, get_current_user
 from app.crud import owner as owner_crud
 from app.database import get_db
 from app.models import GuestAccessSession
@@ -1499,12 +1499,10 @@ async def guest_session_exchange(
             },
         )
     row = result["row"]
-    network_geo = guest_access_service.session_allows_network_geo_messaging(row)
-    allowed_types = list(NETWORK_GUEST_GEO_MESSAGE_TYPES if network_geo else ["CHAT"])
     token, expires_in, _ = create_guest_access_token(
         guest_id=row.guest_id,
         zone_ids=[row.zone_id],
-        network_geo_messaging=network_geo,
+        network_geo_messaging=False,
     )
     db.commit()
     return GuestSessionExchangeResponse(
@@ -1517,7 +1515,7 @@ async def guest_session_exchange(
                 guest_id=row.guest_id,
                 display_name=row.guest_name,
                 zone_ids=[row.zone_id],
-                allowed_message_types=allowed_types,
+                allowed_message_types=["CHAT"],
             ),
         ),
     )
@@ -1636,6 +1634,7 @@ async def list_guest_requests_for_access_api(
             row_status = "ARRIVED" if r.kind in ("expected", "network_access") else (
                 "PENDING" if r.resolution == "pending" else str(r.resolution or "").upper()
             )
+        expectation = "expected" if r.kind in ("expected", "network_access") else "unexpected"
         data.append(
             GuestRequestListItemContract(
                 id=str(r.id),
@@ -1643,7 +1642,7 @@ async def list_guest_requests_for_access_api(
                 zone_id=r.zone_id,
                 guest_name=r.guest_name,
                 status=row_status,
-                expectation=r.kind,
+                expectation=expectation,
                 created_at=r.created_at,
                 hid=r.device_id,
             )

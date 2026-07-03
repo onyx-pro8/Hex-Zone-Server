@@ -83,7 +83,7 @@ def test_session_allows_network_geo_messaging(db):
         .first()
     )
     assert row is not None
-    assert gas.session_allows_network_geo_messaging(row)
+    assert not gas.session_allows_network_geo_messaging(row)
 
 
 def test_guest_private_search_requires_coordinates(db):

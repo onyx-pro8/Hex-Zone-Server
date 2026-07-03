@@ -186,7 +186,8 @@ def process_network_guest_arrival(
 
 
 def session_allows_network_geo_messaging(session: GuestAccessSession) -> bool:
-    return (session.kind or "").strip() == "network_access"
+    """Network QR guests use access messaging (CHAT) only — not geo safety alerts."""
+    return False
 
 
 def can_manage_zone_guest_requests(db: Session, viewer: Owner, zone_id: str) -> bool:
@@ -671,7 +672,7 @@ def serialize_guest_session_row(db: Session, row: GuestAccessSession) -> dict:
         "created_at": row.created_at,
         "guest_status": base["status"],
         "status": _guest_row_client_status(row),
-        "expectation": row.kind,
+        "expectation": "expected" if row.kind in ("expected", "network_access") else "unexpected",
     }
 
 
