@@ -219,7 +219,7 @@ def _guest_row_client_status(row: GuestAccessSession) -> str:
     """PENDING / APPROVED / REJECTED for dashboard approval UI."""
     if row.access_revoked_at is not None:
         return "REJECTED"
-    if row.kind == "expected":
+    if row.kind in ("expected", "network_access"):
         return "APPROVED"
     if row.resolution == "approved":
         return "APPROVED"
@@ -707,7 +707,7 @@ def list_guest_sessions_for_zone(
             q = q.filter(
                 GuestAccessSession.access_revoked_at.is_(None),
                 or_(
-                    GuestAccessSession.kind == "expected",
+                    GuestAccessSession.kind.in_(("expected", "network_access")),
                     and_(GuestAccessSession.kind == "unexpected", GuestAccessSession.resolution == "approved"),
                 ),
             )
@@ -731,10 +731,15 @@ def guest_session_public_view(db: Session, row: GuestAccessSession) -> dict:
             "message": "Access has been revoked.",
         }
     resolved = resolve_guest_arrival_messages(db, row.zone_id)
-    if row.kind == "expected":
+    if row.kind in ("expected", "network_access"):
         status = "EXPECTED"
         if row.arrival_guest_message_snapshot is not None:
             message = row.arrival_guest_message_snapshot
+        elif row.kind == "network_access":
+            message = (
+                "Network access granted. You may send safety alerts while inside "
+                "the network's primary acceptable zone."
+            )
         elif (
             db.query(GuestPass.id).filter(GuestPass.used_by_guest_id == row.guest_id).first() is not None
         ):
@@ -767,7 +772,7 @@ def guest_session_public_view(db: Session, row: GuestAccessSession) -> dict:
     ready_for_exchange = (
         row.access_revoked_at is None
         and (
-            (row.kind == "expected")
+            row.kind in ("expected", "network_access")
             or (row.kind == "unexpected" and row.resolution == "approved")
         )
     )

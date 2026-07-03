@@ -113,3 +113,28 @@ def test_guest_private_search_requires_coordinates(db):
     )
     assert search["location_status"] == "no_coordinates"
     assert search["members"] == []
+
+
+def test_network_guest_session_poll_is_auto_approved(db):
+    network = "NET-ACCESS-4"
+    _admin(db, network)
+    result = gas.process_network_guest_arrival(
+        db,
+        network_id=network,
+        guest_name="Walk-in",
+        device_id="dev-1",
+        latitude=40.0,
+        longitude=-74.0,
+        qr_token_db_id=None,
+    )
+    db.commit()
+    row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == result["guest_response"]["guest_id"])
+        .first()
+    )
+    view = gas.guest_session_public_view(db, row)
+    assert view["status"] == "EXPECTED"
+    assert view["approval_status"] == "APPROVED"
+    assert view.get("exchange_code")
+    assert gas._guest_row_client_status(row) == "APPROVED"

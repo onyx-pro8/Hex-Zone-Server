@@ -1633,7 +1633,7 @@ async def list_guest_requests_for_access_api(
         if r.access_revoked_at is not None:
             row_status = "REJECTED"
         else:
-            row_status = "ARRIVED" if r.kind == "expected" else (
+            row_status = "ARRIVED" if r.kind in ("expected", "network_access") else (
                 "PENDING" if r.resolution == "pending" else str(r.resolution or "").upper()
             )
         data.append(
