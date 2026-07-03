@@ -22,6 +22,7 @@ from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import OwnerRole
 from app.services.access_policy import zone_listing_owner_ids
 from app.services.guest_arrival_zone_messages import resolve_guest_arrival_messages
+from app.services.network_zone_propagation import resolve_network_administrator
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,11 @@ def ensure_active_guest_exchange_for_poll(db: Session, row: GuestAccessSession) 
     """If the guest is cleared for the guest app but has no usable code, mint one. Returns True if DB was mutated."""
     if row.access_revoked_at is not None:
         return False
-    cleared = row.kind == "expected" or (row.kind == "unexpected" and row.resolution == "approved")
+    cleared = (
+        row.kind == "network_access"
+        or row.kind == "expected"
+        or (row.kind == "unexpected" and row.resolution == "approved")
+    )
     if not cleared or row.exchange_consumed_at is not None:
         return False
     now = datetime.utcnow()
@@ -113,6 +118,75 @@ def zone_exists(db: Session, zone_id: str) -> bool:
         .first()
         is not None
     )
+
+
+def process_network_guest_arrival(
+    db: Session,
+    *,
+    network_id: str,
+    guest_name: str,
+    device_id: str | None,
+    latitude: float | None,
+    longitude: float | None,
+    qr_token_db_id: int | None = None,
+) -> dict:
+    """Non-invited network QR scan: auto-grant session for geo safety messaging."""
+    nid = (network_id or "").strip()
+    if not nid:
+        return {"error": "MISSING_NETWORK", "message": "network_id is required.", "http_status": 422}
+    if not zone_exists(db, nid):
+        return {"error": "INVALID_NETWORK", "message": "Unknown or inactive network.", "http_status": 404}
+
+    admin = resolve_network_administrator(db, nid)
+    if admin is None:
+        return {
+            "error": "NO_NETWORK_ADMIN",
+            "message": "No active administrator exists for this network id.",
+            "http_status": 422,
+        }
+
+    guest_token = str(uuid.uuid4())
+    msg_guest = (
+        "Network access granted. You may send safety alerts from this device while inside "
+        "the network's primary acceptable zone."
+    )
+
+    session_row = GuestAccessSession(
+        guest_id=guest_token,
+        zone_id=nid,
+        guest_name=guest_name.strip(),
+        event_id=None,
+        device_id=(device_id or "").strip() or None,
+        latitude=latitude,
+        longitude=longitude,
+        kind="network_access",
+        resolution=None,
+        schedule_id=None,
+        admin_owner_id=admin.id,
+        qr_token_id=qr_token_db_id,
+        arrival_guest_message_snapshot=msg_guest,
+    )
+    db.add(session_row)
+    db.flush()
+    mint_guest_exchange_for_session(session_row)
+    db.flush()
+
+    return {
+        "guest_response": {
+            "status": "EXPECTED",
+            "message": msg_guest,
+            "guest_id": guest_token,
+            "zone_id": nid,
+            "exchange_code": session_row.exchange_code,
+            "exchange_expires_at": guest_exchange_expires_at_iso(session_row),
+        },
+        "ws_guest_is_here": [],
+        "ws_unexpected_guest": [],
+    }
+
+
+def session_allows_network_geo_messaging(session: GuestAccessSession) -> bool:
+    return (session.kind or "").strip() == "network_access"
 
 
 def can_manage_zone_guest_requests(db: Session, viewer: Owner, zone_id: str) -> bool:
@@ -742,7 +816,11 @@ def consume_guest_exchange_and_issue_context(
     if row.access_revoked_at is not None:
         return {"error": "guest_not_approved", "message": "Guest access is not approved.", "http_status": 403}
 
-    cleared = row.kind == "expected" or (row.kind == "unexpected" and row.resolution == "approved")
+    cleared = (
+        row.kind == "network_access"
+        or row.kind == "expected"
+        or (row.kind == "unexpected" and row.resolution == "approved")
+    )
     if not cleared:
         return {"error": "guest_not_approved", "message": "Guest access is not approved.", "http_status": 403}
 

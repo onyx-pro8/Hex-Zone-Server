@@ -89,12 +89,40 @@ def create_guest_qr_token(
     label: str | None,
     max_uses: int | None,
     is_primary: bool = False,
+    is_network_access: bool = False,
 ) -> dict:
     err = _ensure_admin_zone(acting_owner, zone_id)
     if err:
         return err
 
-    if is_primary:
+    if is_primary and is_network_access:
+        return {
+            "error": "INVALID_TOKEN_KIND",
+            "message": "A token cannot be both primary guest and network access.",
+            "http_status": 422,
+        }
+
+    if is_network_access:
+        if expires_at is not None or expires_in_hours is not None:
+            return {
+                "error": "NETWORK_TOKEN_EXPIRY_NOT_ALLOWED",
+                "message": "Network access tokens do not support expires_at or expires_in_hours.",
+                "http_status": 422,
+            }
+        existing_network = (
+            db.query(GuestAccessQrToken)
+            .filter(
+                GuestAccessQrToken.zone_id == zone_id.strip(),
+                GuestAccessQrToken.is_network_access.is_(True),
+                GuestAccessQrToken.revoked_at.is_(None),
+            )
+            .order_by(GuestAccessQrToken.created_at.desc())
+            .first()
+        )
+        if existing_network:
+            return {"row": existing_network}
+        when = None
+    elif is_primary:
         if expires_at is not None or expires_in_hours is not None:
             return {
                 "error": "PRIMARY_TOKEN_EXPIRY_NOT_ALLOWED",
@@ -135,15 +163,21 @@ def create_guest_qr_token(
         expires_at=when,
         revoked_at=None,
         is_primary=is_primary,
+        is_network_access=is_network_access,
         max_uses=max_uses,
         use_count=0,
     )
     db.add(row)
     db.flush()
+    action = "created"
+    if is_primary:
+        action = "created_primary"
+    elif is_network_access:
+        action = "created_network_access"
     _audit_qr_token_action(
         db,
         token_row=row,
-        action="created_primary" if is_primary else "created",
+        action=action,
         actor_owner_id=acting_owner.id,
         metadata={"event_id": ev, "max_uses": max_uses},
     )
@@ -262,6 +296,7 @@ def serialize_guest_qr_token_public(row: GuestAccessQrToken) -> dict:
         "label": row.label,
         "expires_at": row.expires_at,
         "is_primary": bool(row.is_primary),
+        "is_network_access": bool(getattr(row, "is_network_access", False)),
         "revoked_at": row.revoked_at,
         "max_uses": row.max_uses,
         "use_count": row.use_count,
@@ -353,3 +388,85 @@ def rotate_primary_guest_qr_token(
         is_primary=True,
     )
     return created
+
+
+def get_or_create_network_access_qr_token(
+    db: Session,
+    acting_owner: Owner,
+    *,
+    zone_id: str,
+) -> dict:
+    err = _ensure_admin_zone(acting_owner, zone_id)
+    if err:
+        return err
+    zid = zone_id.strip()
+    row = (
+        db.query(GuestAccessQrToken)
+        .filter(
+            GuestAccessQrToken.zone_id == zid,
+            GuestAccessQrToken.is_network_access.is_(True),
+            GuestAccessQrToken.revoked_at.is_(None),
+        )
+        .order_by(GuestAccessQrToken.created_at.desc())
+        .first()
+    )
+    if row:
+        return {"row": row}
+    return create_guest_qr_token(
+        db,
+        acting_owner,
+        zone_id=zid,
+        expires_at=None,
+        expires_in_hours=None,
+        event_id=None,
+        label="Network access token",
+        max_uses=None,
+        is_network_access=True,
+    )
+
+
+def rotate_network_access_qr_token(
+    db: Session,
+    acting_owner: Owner,
+    *,
+    zone_id: str,
+    reason: str | None = None,
+) -> dict:
+    err = _ensure_admin_zone(acting_owner, zone_id)
+    if err:
+        return err
+    zid = zone_id.strip()
+    now = datetime.utcnow()
+    old_rows = (
+        db.query(GuestAccessQrToken)
+        .filter(
+            GuestAccessQrToken.zone_id == zid,
+            GuestAccessQrToken.is_network_access.is_(True),
+            GuestAccessQrToken.revoked_at.is_(None),
+        )
+        .all()
+    )
+    for old in old_rows:
+        old.revoked_at = now
+        existing_meta = old.label or ""
+        if reason:
+            old.label = f"{existing_meta} [rotated: {reason.strip()}]".strip()
+        _audit_qr_token_action(
+            db,
+            token_row=old,
+            action="rotated_out",
+            actor_owner_id=acting_owner.id,
+            reason=reason,
+        )
+    db.flush()
+    return create_guest_qr_token(
+        db,
+        acting_owner,
+        zone_id=zid,
+        expires_at=None,
+        expires_in_hours=None,
+        event_id=None,
+        label="Network access token",
+        max_uses=None,
+        is_network_access=True,
+    )

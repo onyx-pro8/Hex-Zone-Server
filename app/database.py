@@ -307,6 +307,25 @@ def init_db():
             )
             conn.execute(
                 text(
+                    "ALTER TABLE guest_access_qr_tokens "
+                    "ADD COLUMN IF NOT EXISTS is_network_access BOOLEAN NOT NULL DEFAULT FALSE;"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_tokens_is_network_access "
+                    "ON guest_access_qr_tokens (is_network_access);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_guest_access_qr_tokens_active_network_access "
+                    "ON guest_access_qr_tokens (zone_id) "
+                    "WHERE revoked_at IS NULL AND is_network_access IS TRUE;"
+                )
+            )
+            conn.execute(
+                text(
                     "CREATE INDEX IF NOT EXISTS ix_guest_access_qr_tokens_is_primary "
                     "ON guest_access_qr_tokens (is_primary);"
                 )

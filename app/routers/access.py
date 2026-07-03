@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.guest_permission_rate_limit import allow_request
-from app.core.security import create_guest_access_token, get_current_user
+from app.core.security import NETWORK_GUEST_GEO_MESSAGE_TYPES, create_guest_access_token, get_current_user
 from app.crud import owner as owner_crud
 from app.database import get_db
 from app.models import GuestAccessSession
@@ -39,6 +39,9 @@ from app.schemas.access_guest import (
     PrimaryGuestQrRotateRequest,
     PrimaryGuestQrTokenData,
     PrimaryGuestQrTokenEnvelope,
+    NetworkGuestQrRotateRequest,
+    NetworkGuestQrTokenData,
+    NetworkGuestQrTokenEnvelope,
     GuestQrTokenCreatedResponse,
     GuestQrTokenLinkBundle,
     GuestQrTokenListItem,
@@ -218,6 +221,21 @@ def _primary_token_contract_payload(row) -> PrimaryGuestQrTokenData:
     path = guest_access_qr.guest_access_path_with_guest_token(row.token, zone_id=row.zone_id, event_id=None)
     url = guest_access_qr.guest_access_absolute_url_with_guest_token(row.token, zone_id=row.zone_id, event_id=None)
     return PrimaryGuestQrTokenData(
+        id=row.id,
+        zone_id=row.zone_id,
+        token_suffix=row.token[-6:] if len(row.token) >= 6 else row.token,
+        url=url,
+        path_with_query=path,
+        revoked_at=row.revoked_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _network_token_contract_payload(row) -> NetworkGuestQrTokenData:
+    path = guest_access_qr.guest_access_path_with_network_token(row.token, network_id=row.zone_id)
+    url = guest_access_qr.guest_access_absolute_url_with_network_token(row.token, network_id=row.zone_id)
+    return NetworkGuestQrTokenData(
         id=row.id,
         zone_id=row.zone_id,
         token_suffix=row.token[-6:] if len(row.token) >= 6 else row.token,
@@ -641,6 +659,47 @@ async def rotate_primary_guest_qr_token(
     return PrimaryGuestQrTokenEnvelope(data=_primary_token_contract_payload(row))
 
 
+@router.get("/qr-tokens/network", response_model=NetworkGuestQrTokenEnvelope, status_code=status.HTTP_200_OK)
+async def get_or_create_network_access_qr_token(
+    zone_id: str = Query(..., min_length=1, max_length=100, description="Network id (`owners.zone_id`)."),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+    result = guest_access_qr_token_service.get_or_create_network_access_qr_token(db, owner, zone_id=zone_id)
+    if result.get("error"):
+        raise HTTPException(status_code=result["http_status"], detail={"error_code": result["error"], "message": result["message"]})
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+    return NetworkGuestQrTokenEnvelope(data=_network_token_contract_payload(row))
+
+
+@router.post("/qr-tokens/network/rotate", response_model=NetworkGuestQrTokenEnvelope, status_code=status.HTTP_200_OK)
+async def rotate_network_access_qr_token(
+    payload: NetworkGuestQrRotateRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+    result = guest_access_qr_token_service.rotate_network_access_qr_token(
+        db,
+        owner,
+        zone_id=payload.zone_id,
+        reason=payload.reason,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=result["http_status"], detail={"error_code": result["error"], "message": result["message"]})
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+    return NetworkGuestQrTokenEnvelope(data=_network_token_contract_payload(row))
+
+
 @router.post(
     "/permission",
     response_model=AccessPermissionResponseEnvelope,
@@ -694,8 +753,10 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
     qr_row = None
     raw_gt = (payload.guest_qr_token or "").strip()
     payload_zone = (payload.zone_id or "").strip() or None
-    effective_zone_id = payload_zone
+    payload_network = (payload.network_id or "").strip() or None
+    effective_zone_id = payload_zone or payload_network
     effective_event_id = payload.event_id
+    is_network_arrival = False
 
     if raw_gt:
         qr_row = guest_access_qr_token_service.lock_guest_qr_token_row(db, raw_gt)
@@ -711,33 +772,57 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
             )
 
         tz_zone = qr_row.zone_id
-        if payload_zone and payload_zone != tz_zone:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "error_code": "TOKEN_ZONE_MISMATCH",
-                    "message": "zone_id does not match the guest QR token.",
-                },
-            )
-        effective_zone_id = tz_zone
+        if bool(getattr(qr_row, "is_network_access", False)):
+            is_network_arrival = True
+            if payload_network and payload_network != tz_zone:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "error_code": "TOKEN_NETWORK_MISMATCH",
+                        "message": "network_id does not match the network access QR token.",
+                    },
+                )
+            if payload_zone and payload_zone != tz_zone:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "error_code": "TOKEN_ZONE_MISMATCH",
+                        "message": "zone_id does not match the network access QR token.",
+                    },
+                )
+            effective_zone_id = tz_zone
+            effective_event_id = None
+        else:
+            if payload_zone and payload_zone != tz_zone:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "error_code": "TOKEN_ZONE_MISMATCH",
+                        "message": "zone_id does not match the guest QR token.",
+                    },
+                )
+            effective_zone_id = tz_zone
 
-        merged_ev, eerr = guest_access_qr_token_service.merge_event_id_for_arrival(
-            token_event_id=qr_row.event_id,
-            payload_event_id=payload.event_id,
-        )
-        if eerr:
-            raise HTTPException(
-                status_code=eerr["http_status"],
-                detail={"error_code": eerr["error"], "message": eerr["message"]},
+            merged_ev, eerr = guest_access_qr_token_service.merge_event_id_for_arrival(
+                token_event_id=qr_row.event_id,
+                payload_event_id=payload.event_id,
             )
-        effective_event_id = merged_ev
+            if eerr:
+                raise HTTPException(
+                    status_code=eerr["http_status"],
+                    detail={"error_code": eerr["error"], "message": eerr["message"]},
+                )
+            effective_event_id = merged_ev
 
+    elif payload_network:
+        effective_zone_id = payload_network
+        is_network_arrival = True
     elif not effective_zone_id:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "error_code": "MISSING_ZONE",
-                "message": "zone_id is required when guest_qr_token is omitted.",
+                "message": "zone_id or network_id is required when guest_qr_token is omitted.",
             },
         )
 
@@ -746,16 +831,27 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
 
     guest_name = _sanitize_guest_name_or_422(payload.guest_name)
 
-    result = guest_access_service.process_guest_arrival(
-        db,
-        zone_id=effective_zone_id,
-        guest_name=guest_name,
-        event_id=effective_event_id,
-        device_id=payload.device_id,
-        latitude=lat,
-        longitude=lng,
-        qr_token_db_id=qr_row.id if qr_row else None,
-    )
+    if is_network_arrival:
+        result = guest_access_service.process_network_guest_arrival(
+            db,
+            network_id=effective_zone_id,
+            guest_name=guest_name,
+            device_id=payload.device_id,
+            latitude=lat,
+            longitude=lng,
+            qr_token_db_id=qr_row.id if qr_row else None,
+        )
+    else:
+        result = guest_access_service.process_guest_arrival(
+            db,
+            zone_id=effective_zone_id,
+            guest_name=guest_name,
+            event_id=effective_event_id,
+            device_id=payload.device_id,
+            latitude=lat,
+            longitude=lng,
+            qr_token_db_id=qr_row.id if qr_row else None,
+        )
     if result.get("error"):
         logger.info(
             "guest_access_permission zone_id=%s outcome=error error_code=%s",
@@ -1403,9 +1499,12 @@ async def guest_session_exchange(
             },
         )
     row = result["row"]
+    network_geo = guest_access_service.session_allows_network_geo_messaging(row)
+    allowed_types = list(NETWORK_GUEST_GEO_MESSAGE_TYPES if network_geo else ["CHAT"])
     token, expires_in, _ = create_guest_access_token(
         guest_id=row.guest_id,
         zone_ids=[row.zone_id],
+        network_geo_messaging=network_geo,
     )
     db.commit()
     return GuestSessionExchangeResponse(
@@ -1418,7 +1517,7 @@ async def guest_session_exchange(
                 guest_id=row.guest_id,
                 display_name=row.guest_name,
                 zone_ids=[row.zone_id],
-                allowed_message_types=["CHAT"],
+                allowed_message_types=allowed_types,
             ),
         ),
     )

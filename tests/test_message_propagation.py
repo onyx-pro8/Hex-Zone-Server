@@ -25,6 +25,7 @@ def _mock_zone_id_fanout(
         latitude,
         longitude,
         exclude_owner_id=None,
+        sender=None,
     ):
         pool = set(mfs._owner_ids_for_zone_id_labels(db, zone_labels))
         if exclude_owner_id is not None:
@@ -35,7 +36,7 @@ def _mock_zone_id_fanout(
             list(record_ids),
             sorted_pool,
             {
-                "strategy": "matching_zone_id_owners",
+                "strategy": "primary_zone_network_members",
                 "sender_zone_ids": list(zone_labels),
                 "sender_zone_record_ids": list(record_ids),
                 "recipient_owner_ids": sorted_pool,
@@ -94,7 +95,7 @@ def _owner(
     return owner
 
 
-def test_resolve_unknown_origin_prefers_owner_record():
+def test_resolve_unknown_origin_prefers_message_position():
     sender = Owner(
         id=1,
         email="a@x.com",
@@ -118,12 +119,42 @@ def test_resolve_unknown_origin_prefers_owner_record():
         position=CoordinatePayload(latitude=40.0, longitude=-74.0),
     )
     lat, lon, source = mfs._resolve_unknown_origin(sender, payload)
+    assert source == "message_position"
+    assert lat == 40.0
+    assert lon == -74.0
+
+
+def test_resolve_unknown_origin_falls_back_to_owner_record():
+    sender = Owner(
+        id=1,
+        email="a@x.com",
+        zone_id="z",
+        first_name="A",
+        last_name="B",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.ADMINISTRATOR,
+        hashed_password="x",
+        api_key="k",
+        address="addr",
+        latitude=48.8584,
+        longitude=2.2945,
+        active=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.UNKNOWN,
+        hid="hid",
+        position=CoordinatePayload(latitude=40.7128, longitude=-74.0060),
+    )
+    payload.position.latitude = "bad"  # type: ignore[assignment]
+    lat, lon, source = mfs._resolve_unknown_origin(sender, payload)
     assert source == "owner_record"
     assert lat == 48.8584
     assert lon == 2.2945
 
 
-def test_resolve_unknown_origin_falls_back_to_message_position():
+def test_resolve_unknown_origin_requires_coordinates_when_missing():
     sender = Owner(
         id=1,
         email="a@x.com",
@@ -146,10 +177,9 @@ def test_resolve_unknown_origin_falls_back_to_message_position():
         hid="hid",
         position=CoordinatePayload(latitude=40.7128, longitude=-74.0060),
     )
-    lat, lon, source = mfs._resolve_unknown_origin(sender, payload)
-    assert source == "message_position"
-    assert lat == 40.7128
-    assert lon == -74.0060
+    payload.position.latitude = "bad"  # type: ignore[assignment]
+    with pytest.raises(mfs.GeoMessageSkipped):
+        mfs._resolve_unknown_origin(sender, payload)
 
 
 def test_assert_unknown_rate_limit_accepts_owner_id_not_model(prop_db):
@@ -160,9 +190,10 @@ def test_assert_unknown_rate_limit_accepts_owner_id_not_model(prop_db):
 
 
 def test_unknown_uses_message_position_when_owner_coords_missing(prop_db):
-    sender = _owner(prop_db, oid=1, email="sender@x.com", lat=None, lon=None)
-    _owner(prop_db, oid=2, email="near@x.com", lat=40.7130, lon=-74.0060)
-    _owner(prop_db, oid=3, email="far@x.com", lat=50.0, lon=10.0)
+    network = "NET-UNK-1"
+    sender = _owner(prop_db, oid=1, email="sender@x.com", lat=None, lon=None, zone_id=network)
+    _owner(prop_db, oid=2, email="near@x.com", lat=40.7130, lon=-74.0060, zone_id=network)
+    _owner(prop_db, oid=3, email="far@x.com", lat=50.0, lon=10.0, zone_id="OTHER-NET")
     prop_db.commit()
 
     payload = PropagationMessageCreate(
@@ -174,7 +205,7 @@ def test_unknown_uses_message_position_when_owner_coords_missing(prop_db):
 
     result = mfs.create_geo_propagated_message(prop_db, sender, payload)
     assert result["skipped"] is False
-    assert result["fanout"]["strategy"] == "unknown_nearest_global"
+    assert result["fanout"]["strategy"] == "unknown_nearest_network"
     assert result["fanout"]["origin"]["source"] == "message_position"
     assert 2 in result["delivered_owner_ids"]
     assert 3 not in result["delivered_owner_ids"]
@@ -183,7 +214,8 @@ def test_unknown_uses_message_position_when_owner_coords_missing(prop_db):
     assert sender.longitude == -74.0060
 
 
-def test_unknown_nearest_global_respects_account_limit(prop_db):
+def test_unknown_nearest_network_respects_account_limit(prop_db):
+    network = "NET-UNK-2"
     sender = _owner(
         prop_db,
         oid=1,
@@ -191,13 +223,14 @@ def test_unknown_nearest_global_respects_account_limit(prop_db):
         lat=0.0,
         lon=0.0,
         account_type=AccountType.EXCLUSIVE,
+        zone_id=network,
     )
-    _owner(prop_db, oid=2, email="n1@x.com", lat=0.01, lon=0.0)
-    _owner(prop_db, oid=3, email="n2@x.com", lat=0.02, lon=0.0)
-    _owner(prop_db, oid=4, email="n3@x.com", lat=0.03, lon=0.0)
-    _owner(prop_db, oid=5, email="n4@x.com", lat=0.04, lon=0.0)
-    _owner(prop_db, oid=6, email="n5@x.com", lat=0.05, lon=0.0)
-    _owner(prop_db, oid=7, email="n6@x.com", lat=0.06, lon=0.0)
+    _owner(prop_db, oid=2, email="n1@x.com", lat=0.01, lon=0.0, zone_id=network)
+    _owner(prop_db, oid=3, email="n2@x.com", lat=0.02, lon=0.0, zone_id=network)
+    _owner(prop_db, oid=4, email="n3@x.com", lat=0.03, lon=0.0, zone_id=network)
+    _owner(prop_db, oid=5, email="n4@x.com", lat=0.04, lon=0.0, zone_id=network)
+    _owner(prop_db, oid=6, email="n5@x.com", lat=0.05, lon=0.0, zone_id=network)
+    _owner(prop_db, oid=7, email="n6@x.com", lat=0.06, lon=0.0, zone_id=network)
     prop_db.commit()
 
     payload = PropagationMessageCreate(
@@ -208,14 +241,15 @@ def test_unknown_nearest_global_respects_account_limit(prop_db):
     )
 
     result = mfs.create_geo_propagated_message(prop_db, sender, payload)
-    assert result["fanout"]["strategy"] == "unknown_nearest_global"
+    assert result["fanout"]["strategy"] == "unknown_nearest_network"
     assert result["fanout"]["target_x"] == 5
     assert result["delivered_owner_ids"] == [2, 3, 4, 5, 6]
 
 
-def test_unknown_delivers_nearest_even_when_zones_ignored(prop_db):
-    sender = _owner(prop_db, oid=1, email="sender@x.com", lat=0.0, lon=0.0)
-    _owner(prop_db, oid=2, email="near@x.com", lat=0.01, lon=0.0)
+def test_unknown_delivers_nearest_on_same_network(prop_db):
+    network = "NET-UNK-3"
+    sender = _owner(prop_db, oid=1, email="sender@x.com", lat=0.0, lon=0.0, zone_id=network)
+    _owner(prop_db, oid=2, email="near@x.com", lat=0.01, lon=0.0, zone_id=network)
     prop_db.commit()
 
     payload = PropagationMessageCreate(
@@ -226,7 +260,7 @@ def test_unknown_delivers_nearest_even_when_zones_ignored(prop_db):
     )
 
     result = mfs.create_geo_propagated_message(prop_db, sender, payload)
-    assert result["fanout"]["strategy"] == "unknown_nearest_global"
+    assert result["fanout"]["strategy"] == "unknown_nearest_network"
     assert result["delivered_owner_ids"] == [2]
 
 
@@ -285,7 +319,7 @@ def test_zone_propagation_delivers_to_owners_with_matching_zone_id(prop_db, monk
     )
     result = mfs.create_geo_propagated_message(prop_db, sender, payload)
     assert result["skipped"] is False
-    assert result["fanout"]["strategy"] == "matching_zone_id_owners"
+    assert result["fanout"]["strategy"] == "primary_zone_network_members"
     delivered = set(result["delivered_owner_ids"])
     assert 11 in delivered
     assert 99 not in delivered
@@ -350,7 +384,7 @@ def test_private_rejects_when_sender_not_in_zone(prop_db, monkeypatch):
     monkeypatch.setattr(
         mfs,
         "resolve_geo_propagation_recipient_owner_ids",
-        lambda db, *, latitude, longitude, exclude_owner_id=None: ([], [], [], {"sender_zone_record_ids": []}),
+        lambda db, *, latitude, longitude, exclude_owner_id=None, sender=None: ([], [], [], {"sender_zone_record_ids": []}),
     )
 
     payload = PropagationMessageCreate(
@@ -364,9 +398,21 @@ def test_private_rejects_when_sender_not_in_zone(prop_db, monkeypatch):
         mfs.create_geo_propagated_message(prop_db, sender, payload)
 
 
-def test_resolve_geo_propagation_matches_owners_by_zone_id_label(prop_db, monkeypatch):
+def test_resolve_geo_propagation_matches_account_members_in_primary_zone(prop_db, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import network_zone_propagation as nzp
+
     zone_label = "ZN-6DV321"
-    sender = _owner(prop_db, oid=1, email="tester2@test.com", zone_id=zone_label)
+    admin = _owner(
+        prop_db,
+        oid=1,
+        email="tester2@test.com",
+        zone_id=zone_label,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+    )
+    admin.account_owner_id = admin.id
     _owner(
         prop_db,
         oid=3,
@@ -374,6 +420,8 @@ def test_resolve_geo_propagation_matches_owners_by_zone_id_label(prop_db, monkey
         zone_id=zone_label,
         first_name="tester",
         last_name="3",
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
     )
     _owner(
         prop_db,
@@ -382,31 +430,47 @@ def test_resolve_geo_propagation_matches_owners_by_zone_id_label(prop_db, monkey
         zone_id=zone_label,
         first_name="tester",
         last_name="4",
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
     )
     _owner(prop_db, oid=99, email="outsider@x.com", zone_id="OTHER-ZONE")
     prop_db.commit()
 
     monkeypatch.setattr(
-        mfs,
+        nzp,
         "evaluate_zone_records_containing_point",
         lambda db, lat, lon: [101],
     )
     monkeypatch.setattr(
-        mfs,
+        nzp,
+        "_zone_rows_for_records",
+        lambda db, ids: [
+            SimpleNamespace(
+                id=101,
+                zone_id=zone_label,
+                creator_id=admin.id,
+                owner_id=admin.id,
+                active=True,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        nzp,
         "zone_ids_for_zone_records",
-        lambda db, record_ids: [zone_label],
+        lambda db, ids: [zone_label],
     )
 
     zone_ids, record_ids, recipients, meta = mfs.resolve_geo_propagation_recipient_owner_ids(
         prop_db,
         latitude=49.651,
         longitude=23.851,
-        exclude_owner_id=sender.id,
+        exclude_owner_id=admin.id,
+        sender=admin,
     )
     assert zone_ids == [zone_label]
     assert record_ids == [101]
     assert set(recipients) == {3, 14}
-    assert meta["strategy"] == "matching_zone_id_owners"
+    assert meta["strategy"] == "primary_zone_network_members"
 
 
 def test_private_search_by_name(prop_db, monkeypatch):

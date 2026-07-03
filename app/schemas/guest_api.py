@@ -52,9 +52,9 @@ class GuestSessionGuestProfile(BaseModel):
     guest_id: str
     display_name: str
     zone_ids: list[str] = Field(description="Zones this token may access (subset of approval).")
-    allowed_message_types: list[Literal["CHAT"]] = Field(
+    allowed_message_types: list[str] = Field(
         default=["CHAT"],
-        description="Types this token may send via **POST /api/guest/messages**.",
+        description="Types this token may send via guest messaging APIs.",
     )
 
 
@@ -106,9 +106,9 @@ class GuestMeData(BaseModel):
     guest_id: str = Field(description="Opaque id from **`POST /api/access/permission`**; matches **`guest_access_sessions.guest_id`**.")
     display_name: str = Field(description="Name captured at check-in.")
     zone_ids: list[str] = Field(description="Shared zone ids this JWT may access (query **`zone_id`** on nested routes must be listed here).")
-    allowed_message_types: list[Literal["CHAT"]] = Field(
+    allowed_message_types: list[str] = Field(
         default_factory=lambda: ["CHAT"],
-        description="Subset of Access-channel types allowed for **`POST /api/guest/messages`** (CHAT only).",
+        description="Message types permitted for this guest session.",
     )
     expires_at: str = Field(description="ISO-8601 UTC from JWT **`exp`** (guest token lifetime sets **`GET /api/guest/me`** refresh cadence).")
 

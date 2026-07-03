@@ -80,6 +80,57 @@ def guest_access_absolute_url(zone_id: str, event_id: str | None = None) -> str 
     return f"{base}{guest_access_path_with_query(zone_id, event_id)}"
 
 
+def build_network_access_query_params(network_id: str) -> dict[str, str]:
+    """Static network-id QR: **`/access?nid=`** (network id = ``owners.zone_id``)."""
+    nid = network_id.strip()
+    return {"nid": nid}
+
+
+def guest_access_path_with_network_id(network_id: str) -> str:
+    qs = urlencode(build_network_access_query_params(network_id), quote_via=quote)
+    return f"/access?{qs}"
+
+
+def guest_access_absolute_url_with_network_id(network_id: str) -> str | None:
+    base = guest_access_web_base()
+    if not base:
+        return None
+    return f"{base}{guest_access_path_with_network_id(network_id)}"
+
+
+def build_network_access_query_params_for_token(
+    secret_token: str,
+    network_id: str,
+) -> dict[str, str]:
+    """Issued network-access token: **`gt`** + **`nid`**."""
+    params = build_guest_access_query_params_for_guest_token(secret_token, network_id, None)
+    params["nid"] = network_id.strip()
+    return params
+
+
+def guest_access_path_with_network_token(
+    secret_token: str,
+    *,
+    network_id: str,
+) -> str:
+    qs = urlencode(
+        build_network_access_query_params_for_token(secret_token, network_id),
+        quote_via=quote,
+    )
+    return f"/access?{qs}"
+
+
+def guest_access_absolute_url_with_network_token(
+    secret_token: str,
+    *,
+    network_id: str,
+) -> str | None:
+    base = guest_access_web_base()
+    if not base:
+        return None
+    return f"{base}{guest_access_path_with_network_token(secret_token, network_id=network_id)}"
+
+
 def qr_png_bytes_for_url(url: str, *, box_size: int = 8, border: int = 2) -> bytes:
     """PNG bytes encoding **url** (install **qrcode** + **Pillow**)."""
     import qrcode

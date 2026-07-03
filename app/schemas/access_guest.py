@@ -25,6 +25,15 @@ class GuestArrivalRequest(BaseModel):
         max_length=100,
         description="Zone id from static QR (`?zid=`). Omit when **guest_qr_token** is sent.",
     )
+    network_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description=(
+            "Network id from static network QR (`?nid=`). Used for Safe Zone Patrol network access "
+            "(non-invited geo messaging). Resolves to the administrator's network id (`owners.zone_id`)."
+        ),
+    )
     guest_qr_token: str | None = Field(
         default=None,
         min_length=8,
@@ -52,9 +61,12 @@ class GuestArrivalRequest(BaseModel):
     @model_validator(mode="after")
     def require_zone_or_guest_token(self):
         zid = (self.zone_id or "").strip()
+        nid = (self.network_id or "").strip()
         gt = (self.guest_qr_token or "").strip()
-        if not zid and not gt:
-            raise ValueError("Provide zone_id (static QR) and/or guest_qr_token (issued QR).")
+        if not zid and not gt and not nid:
+            raise ValueError("Provide zone_id (static QR), network_id (network QR), and/or guest_qr_token (issued QR).")
+        if nid and zid and nid != zid:
+            raise ValueError("network_id and zone_id must match when both are provided.")
         return self
 
     model_config = ConfigDict(
@@ -472,6 +484,27 @@ class PrimaryGuestQrTokenEnvelope(BaseModel):
 
 
 class PrimaryGuestQrRotateRequest(BaseModel):
+    zone_id: str = Field(..., min_length=1, max_length=100)
+    reason: str | None = Field(default=None, max_length=255)
+
+
+class NetworkGuestQrTokenData(BaseModel):
+    id: int
+    zone_id: str = Field(description="Network id (`owners.zone_id`).")
+    token_suffix: str
+    url: str | None
+    path_with_query: str
+    revoked_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class NetworkGuestQrTokenEnvelope(BaseModel):
+    status: Literal["success"] = "success"
+    data: NetworkGuestQrTokenData
+
+
+class NetworkGuestQrRotateRequest(BaseModel):
     zone_id: str = Field(..., min_length=1, max_length=100)
     reason: str | None = Field(default=None, max_length=255)
 

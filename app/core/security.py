@@ -16,6 +16,17 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # Missing `Authorization` should yield **401** (not FastAPI's default **403** from auto_error).
 security = HTTPBearer(auto_error=False)
 
+NETWORK_GUEST_GEO_MESSAGE_TYPES: list[str] = [
+    "PANIC",
+    "NS_PANIC",
+    "NS-PANIC",
+    "UNKNOWN",
+    "PRIVATE",
+    "PA",
+    "SERVICE",
+    "CHAT",
+]
+
 
 def get_password_hash(password: str) -> str:
     """Hash a password."""
@@ -32,17 +43,20 @@ def create_guest_access_token(
     guest_id: str,
     zone_ids: list[str],
     expires_delta: Optional[timedelta] = None,
+    network_geo_messaging: bool = False,
 ) -> tuple[str, int, datetime]:
     """Mint a short-lived JWT for approved anonymous guests (`/api/guest/*` only)."""
     minutes = max(1, int(settings.GUEST_ACCESS_TOKEN_EXPIRE_MINUTES))
     delta = expires_delta or timedelta(minutes=minutes)
     expire = datetime.utcnow() + delta
+    allowed = list(NETWORK_GUEST_GEO_MESSAGE_TYPES if network_geo_messaging else ["CHAT"])
     to_encode: dict[str, Any] = {
         "sub": f"guest:{guest_id}",
         "token_use": "guest_access",
         "typ": "guest_access",
         "zone_ids": zone_ids,
-        "allowed_message_types": ["CHAT"],
+        "allowed_message_types": allowed,
+        "network_geo_messaging": bool(network_geo_messaging),
         "iat": datetime.utcnow(),
         "exp": expire,
         "jti": str(uuid.uuid4()),
@@ -142,6 +156,7 @@ def decode_guest_access_bearer(credentials: HTTPAuthorizationCredentials | None)
         "guest_id": guest_id,
         "zone_ids": zone_ids,
         "allowed_message_types": list(payload.get("allowed_message_types") or ["CHAT"]),
+        "network_geo_messaging": bool(payload.get("network_geo_messaging")),
         "jti": payload.get("jti"),
         "expires_at": expires_at,
     }

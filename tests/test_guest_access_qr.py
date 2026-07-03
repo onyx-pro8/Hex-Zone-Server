@@ -67,6 +67,23 @@ def test_guest_access_absolute_url_gt_with_zone(monkeypatch):
     assert u == "https://app.example.com/access?gt=tok&zid=Z-zone"
 
 
+def test_guest_access_path_with_network_id():
+    assert guest_access_qr.guest_access_path_with_network_id("NET-ABC") == "/access?nid=NET-ABC"
+
+
+def test_guest_access_path_with_network_token():
+    p = guest_access_qr.guest_access_path_with_network_token("secret", network_id="NET-1")
+    assert p == "/access?gt=secret&zid=NET-1&nid=NET-1"
+
+
+def test_guest_access_absolute_url_with_network_id(monkeypatch):
+    monkeypatch.setattr(settings, "GUEST_ACCESS_APP_BASE_URL", "https://app.example.com")
+    assert (
+        guest_access_qr.guest_access_absolute_url_with_network_id("NET-1")
+        == "https://app.example.com/access?nid=NET-1"
+    )
+
+
 def test_qr_png_non_empty():
     png = guest_access_qr.qr_png_bytes_for_url("https://example.com/access?zid=Z")
     assert png.startswith(b"\x89PNG\r\n\x1a\n")

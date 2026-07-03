@@ -28,6 +28,7 @@ class GuestAccessQrToken(Base):
     expires_at = Column(DateTime, nullable=True, index=True)
     revoked_at = Column(DateTime, nullable=True, index=True)
     is_primary = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"), index=True)
+    is_network_access = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"), index=True)
 
     max_uses = Column(Integer, nullable=True)
     use_count = Column(Integer, nullable=False, default=0)

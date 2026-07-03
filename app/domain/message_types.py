@@ -71,7 +71,7 @@ TYPE_CATEGORY_MAP: dict[CanonicalMessageType, MessageCategory] = {
     CanonicalMessageType.PRIVATE: MessageCategory.ALERT,
     CanonicalMessageType.PA: MessageCategory.ALERT,
     CanonicalMessageType.SERVICE: MessageCategory.ALERT,
-    CanonicalMessageType.WELLNESS_CHECK: MessageCategory.ALERT,
+    CanonicalMessageType.WELLNESS_CHECK: MessageCategory.ALARM,
     CanonicalMessageType.PERMISSION: MessageCategory.ACCESS,
     CanonicalMessageType.CHAT: MessageCategory.ACCESS,
 }

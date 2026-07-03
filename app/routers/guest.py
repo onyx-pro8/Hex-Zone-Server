@@ -29,6 +29,17 @@ from app.schemas.guest_api import (
     GuestPeersResponse,
     GuestZoneMessageItem,
 )
+from pydantic import ValidationError
+
+from app.schemas.message_feature import PropagationMessageCreate, PropagationMessageResponse
+from app.routers.message_feature import _finalize_geo_propagation, _handle_geo_propagation_errors
+from app.services.message_feature_service import (
+    GeoMessageSkipped,
+    UnknownRateLimitError,
+    SensorRateLimitError,
+    create_network_guest_geo_propagated_message,
+)
+from app.domain.service_pa_topics import ServicePaValidationError
 from app.services import guest_api_service, guest_access_service
 
 # OpenAPI: shared **401** documentation for all **`/api/guest/*`** routes (dependency runs before handler body).
@@ -117,7 +128,7 @@ async def guest_me(
     allowed: list[str] = []
     for t in amt_raw:
         u = str(t).strip().upper()
-        if u in ("CHAT",) and u not in allowed:
+        if u and u not in allowed:
             allowed.append(u)
     if not allowed:
         allowed = ["CHAT"]
@@ -127,7 +138,7 @@ async def guest_me(
             guest_id=row.guest_id,
             display_name=row.guest_name,
             zone_ids=guest_ctx["zone_ids"],
-            allowed_message_types=cast(list[Literal["CHAT"]], allowed),
+            allowed_message_types=allowed,
             expires_at=expires_at,
         ),
     )
@@ -477,3 +488,86 @@ async def guest_post_message(
         payload={"event": created, "zone_id": zone_id},
     )
     return GuestMessageCreatedResponse(status="success", data=_zone_message_item(created))
+
+
+@router.post(
+    "/messages/propagate",
+    response_model=PropagationMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Send geo-propagated alarm/alert (network access guest)",
+    description=(
+        "Requires **network access** guest session (**`kind`** = **`network_access`**) after scanning a "
+        "network QR (**`/access?nid=`** or **`gt`+`nid`**). Sends PANIC, NS-PANIC, UNKNOWN, PRIVATE, PA, or SERVICE "
+        "using primary vs secondary acceptable-zone routing for the network."
+    ),
+    responses={status.HTTP_401_UNAUTHORIZED: _GUEST_API_UNAUTHORIZED},
+)
+async def guest_propagate_message(
+    payload: dict,
+    guest_ctx: dict = Depends(get_current_guest),
+    db: Session = Depends(get_db),
+):
+    if not guest_ctx.get("network_geo_messaging"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": "Geo propagation requires a network access guest session.",
+                "error_code": "GUEST_GEO_NOT_ALLOWED",
+                "error": {"message": "Geo propagation requires a network access guest session."},
+            },
+        )
+
+    msg_type = str(payload.get("type") or "").strip().upper()
+    if msg_type in ("PERMISSION", "SENSOR", "WELLNESS CHECK", "WELLNESS_CHECK"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "GUEST_MESSAGE_TYPE_NOT_ALLOWED",
+                "message": f"Guests may not send {msg_type} via geo propagation.",
+            },
+        )
+
+    allowed = {str(t).strip().upper() for t in (guest_ctx.get("allowed_message_types") or [])}
+    if msg_type.replace("-", "_") not in {a.replace("-", "_") for a in allowed} and msg_type not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "GUEST_MESSAGE_TYPE_NOT_ALLOWED",
+                "message": "Guest message type is not allowed.",
+            },
+        )
+
+    try:
+        parsed_payload = PropagationMessageCreate.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "VALIDATION_ERROR",
+                "message": "Invalid propagation payload.",
+                "details": exc.errors(),
+            },
+        ) from exc
+
+    row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == guest_ctx["guest_id"])
+        .first()
+    )
+    if not row or not guest_access_service.session_allows_network_geo_messaging(row):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": "Geo propagation requires a network access guest session.",
+                "error_code": "GUEST_GEO_NOT_ALLOWED",
+            },
+        )
+
+    try:
+        result = create_network_guest_geo_propagated_message(db, guest_session=row, payload=parsed_payload)
+    except GeoMessageSkipped as skipped:
+        return skipped.detail
+    except (UnknownRateLimitError, SensorRateLimitError, ServicePaValidationError, ValueError) as exc:
+        _handle_geo_propagation_errors(exc)
+    db.commit()
+    return await _finalize_geo_propagation(db, result)
