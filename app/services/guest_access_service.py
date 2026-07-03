@@ -364,12 +364,11 @@ def find_matching_schedule_for_arrival(
 
 
 def zone_staff_owner_ids(db: Session, zone_id: str) -> set[int]:
-    """Active **owners.id** values considered zone hosts/staff for a shared **zone_id** string.
+    """Active **owners.id** for a network (`owners.zone_id` / shared network id string).
 
-    Combines: (1) owners whose **`owners.zone_id`** matches (signup / primary zone), (2) owners who **own**
-    an active **`zones`** row for this **`zone_id`**, and (3) **`resolve_primary_zone_admin_owner`** so at least
-    one administrator appears when data is split across **`owners`** vs **`zones`** tables.
-    Used for guest **peers**, unexpected-guest WebSocket targets (`zone_member_owner_ids`), and must stay aligned.
+    Includes every active network member and administrator, owners of active acceptable-zone
+    geometry rows, and the primary zone admin fallback. Used for guest CHAT peers and arrival
+    WebSocket targets — network-level, not GPS-bound.
     """
 
     zid = (zone_id or "").strip()

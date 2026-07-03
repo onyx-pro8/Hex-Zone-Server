@@ -580,7 +580,7 @@ async def test_admin_can_see_access_permission_and_chat_messages(test_db, overri
 
 
 @pytest.mark.asyncio
-async def test_guest_messaging_restricted_to_host_admin_peers(test_db, override_get_db):
+async def test_guest_messaging_includes_all_network_members(test_db, override_get_db):
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = f"zone-peer-{uuid.uuid4().hex[:8]}"
         admin_id, admin_token = await _register_admin(client, zone_id=zone_id)
@@ -629,15 +629,14 @@ async def test_guest_messaging_restricted_to_host_admin_peers(test_db, override_
         assert peers.status_code == 200
         peer_ids = {p["owner_id"] for p in peers.json()["data"]["peers"]}
         assert admin_id in peer_ids
-        assert non_admin.id not in peer_ids
+        assert non_admin.id in peer_ids
 
-        blocked = await client.post(
+        ok = await client.post(
             "/api/guest/messages",
             headers={"Authorization": f"Bearer {guest_jwt}"},
-            json={"zone_id": zone_id, "type": "CHAT", "text": "Should fail", "to_owner_id": non_admin.id},
+            json={"zone_id": zone_id, "type": "CHAT", "text": "Hello member", "to_owner_id": non_admin.id},
         )
-        assert blocked.status_code == 403
-        assert blocked.json().get("error_code") == "GUEST_NOT_AUTHORIZED_FOR_ZONE"
+        assert ok.status_code == 201, ok.text
 
 
 @pytest.mark.asyncio

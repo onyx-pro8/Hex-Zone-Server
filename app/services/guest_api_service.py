@@ -41,41 +41,12 @@ _MEMBER_GUEST_THREAD_MAX_SCAN = 5000
 
 
 def _guest_messaging_peer_owner_ids(db: Session, *, zone_id: str) -> set[int]:
-    """Staff a guest may address with **CHAT**: zone **ADMINISTRATOR** owners + **`zones.owner_id`** rows.
+    """Network-level CHAT peers: every active member/admin on this network id.
 
-    Also includes **`resolve_primary_zone_admin_owner`** so a primary admin appears when data is split
-    across **`owners`** vs **`zones`** (without granting every **`USER`** in the same **`zone_id`** string).
+    Uses the same cohort as guest arrival notifications (**`zone_staff_owner_ids`**):
+    all **`owners.zone_id`** matches plus active **`zones.owner_id`** rows. Not GPS-bound.
     """
-
-    zid = zone_id.strip()
-    if not zid:
-        return set()
-    admin_ids = {
-        row[0]
-        for row in (
-            db.query(Owner.id)
-            .filter(
-                Owner.zone_id == zid,
-                Owner.role == OwnerRole.ADMINISTRATOR,
-                Owner.active.is_(True),
-            )
-            .all()
-        )
-    }
-    host_ids = {
-        row[0]
-        for row in (
-            db.query(Zone.owner_id)
-            .filter(Zone.zone_id == zid, Zone.active.is_(True))
-            .distinct()
-            .all()
-        )
-    }
-    out = admin_ids | host_ids
-    primary = guest_access_service.resolve_primary_zone_admin_owner(db, zid)
-    if primary and primary.active:
-        out.add(primary.id)
-    return out
+    return guest_access_service.zone_staff_owner_ids(db, zone_id)
 
 
 def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) -> bool:
@@ -89,12 +60,12 @@ def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) 
 
 
 def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
-    staff_ids = _guest_messaging_peer_owner_ids(db, zone_id=zone_id)
-    if not staff_ids:
+    member_ids = _guest_messaging_peer_owner_ids(db, zone_id=zone_id)
+    if not member_ids:
         return []
     owners = (
         db.query(Owner)
-        .filter(Owner.id.in_(staff_ids), Owner.active.is_(True))
+        .filter(Owner.id.in_(member_ids), Owner.active.is_(True))
         .order_by(Owner.id.asc())
         .all()
     )
@@ -602,7 +573,7 @@ def create_guest_zone_message(
     if not receiver:
         return None
     if to_owner_id not in _guest_messaging_peer_owner_ids(db, zone_id=zid):
-        return {"__reject__": "forbidden", "message": "Recipient is not an authorized host/admin peer for this zone."}
+        return {"__reject__": "forbidden", "message": "Recipient is not a network member peer for this network."}
 
     if msg_type not in GUEST_WRITABLE_TYPES:
         return {"__reject__": "forbidden_message_type"}

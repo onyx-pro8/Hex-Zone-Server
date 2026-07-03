@@ -151,10 +151,11 @@ async def guest_me(
     response_model_by_alias=True,
     summary="List zone members (peers)",
     description=(
-        "**Staff peers only** (not every user in the zone): active **ADMINISTRATOR** owners with matching **`owners.zone_id`**, "
-        "**`zones.owner_id`** for active zone rows, plus the **primary zone admin** fallback. "
-        "**`zone_id`** must appear in the JWT **`zone_ids`** claim. Each **`owner_id`** is **`owners.id`** — use as "
-        "**`with_owner_id`** (GET thread) or **`to_owner_id`** (POST CHAT). **`can_receive_chat`** is false when the member blocked **CHAT**.\n\n"
+        "**Network members** (not GPS / geometry-bound): every active **`owners`** row whose **`zone_id`** "
+        "matches this network id, plus **`zones.owner_id`** for active acceptable-zone rows, and the primary "
+        "zone admin fallback. **`zone_id`** on the path is the **network id** (`owners.zone_id`). "
+        "Each **`owner_id`** is **`owners.id`** — use as **`with_owner_id`** (GET thread) or **`to_owner_id`** "
+        "(POST CHAT). **`can_receive_chat`** is false when the member blocked **CHAT**.\n\n"
         "Same **`401`** semantics as **`GET /api/guest/me`** (see **`GuestApiHttpError`** example **`GUEST_ACCESS_INVALIDATED`**)."
     ),
     responses={
