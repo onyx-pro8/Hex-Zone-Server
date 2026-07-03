@@ -23,7 +23,7 @@ class GuestArrivalRequest(BaseModel):
         default=None,
         min_length=1,
         max_length=100,
-        description="Network ID from static QR (`?zid=`). Omit when **guest_qr_token** is sent.",
+        description="Zone id from static QR (`?zid=`). Omit when **guest_qr_token** is sent.",
     )
     guest_qr_token: str | None = Field(
         default=None,

@@ -572,7 +572,7 @@ class ZoneMessageResponse(BaseModel):
             "(Access **PERMISSION**/**CHAT**, member→guest **CHAT**, guest→staff **CHAT** in inbox merge)."
         ),
     )
-    zone_id: str = Field(..., description="Shared network ID string (**not** the internal **`zones.id`** PK).")
+    zone_id: str = Field(..., description="Shared zone id string (**not** the internal **`zones.id`** PK).")
     sender_id: Optional[int] = Field(
         default=None,
         description=(
