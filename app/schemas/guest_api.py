@@ -214,6 +214,13 @@ class GuestDashboardData(BaseModel):
             "render the exact same map as the owner without any zone-editing capability."
         ),
     )
+    zones: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "All active acceptable zones in this network (**`zones.zone_id`** = network id), "
+            "each in the same read-only shape as **`zone`**."
+        ),
+    )
 
 
 class GuestDashboardResponse(BaseModel):

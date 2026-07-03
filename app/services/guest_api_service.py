@@ -904,54 +904,127 @@ def _serialize_zone_like_member(
     }
 
 
-def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
-    # Load the zone with its polygon serialized to GeoJSON (ST_AsGeoJSON) so a
-    # geofence circle/polygon zone (which stores geometry, not h3_cells) still
-    # gets a drawable map on the guest dashboard. ST_AsGeoJSON requires a spatial
-    # backend (PostGIS); fall back to a plain load if it is unavailable.
-    z: Zone | None = None
-    geo_fence_geojson: dict[str, Any] | None = None
-    zid = zone_id.strip()
+def _load_active_network_zone_rows(
+    db: Session,
+    network_id: str,
+) -> list[tuple[Zone, dict[str, Any] | None]]:
+    """All active acceptable zones for a network id (`zones.zone_id`)."""
+    zid = network_id.strip()
     try:
-        row = (
+        rows = (
             db.query(Zone, func.ST_AsGeoJSON(Zone.geo_fence_polygon))
             .filter(Zone.zone_id == zid, Zone.active.is_(True))
             .order_by(Zone.id.asc())
-            .first()
+            .all()
         )
-        z = row[0] if row else None
-        if row and row[1]:
-            parsed = json.loads(row[1])
-            if isinstance(parsed, dict) and parsed.get("type") in (
-                "Polygon",
-                "MultiPolygon",
-            ):
-                geo_fence_geojson = parsed
+        out: list[tuple[Zone, dict[str, Any] | None]] = []
+        for z, gj_raw in rows:
+            geo_fence_geojson: dict[str, Any] | None = None
+            if gj_raw:
+                try:
+                    parsed = json.loads(gj_raw)
+                    if isinstance(parsed, dict) and parsed.get("type") in (
+                        "Polygon",
+                        "MultiPolygon",
+                    ):
+                        geo_fence_geojson = parsed
+                except (TypeError, ValueError):
+                    geo_fence_geojson = None
+            out.append((z, geo_fence_geojson))
+        return out
     except (TypeError, ValueError):
-        geo_fence_geojson = None
+        pass
     except Exception:  # pragma: no cover - spatial fn unavailable / driver error
         db.rollback()
-        z = (
-            db.query(Zone)
-            .filter(Zone.zone_id == zid, Zone.active.is_(True))
-            .order_by(Zone.id.asc())
-            .first()
-        )
-        geo_fence_geojson = None
-    label = z.name if z else zone_id
-    welcome = "Welcome to the zone guest dashboard."
+    plain = (
+        db.query(Zone)
+        .filter(Zone.zone_id == zid, Zone.active.is_(True))
+        .order_by(Zone.id.asc())
+        .all()
+    )
+    return [(z, None) for z in plain]
 
-    cells: list[str] = []
+
+def _geojson_as_feature(
+    geojson: dict[str, Any],
+    *,
+    name: str,
+    zone_record_id: int,
+) -> dict[str, Any] | None:
+    gtype = geojson.get("type")
+    if gtype == "Feature":
+        props = geojson.get("properties") if isinstance(geojson.get("properties"), dict) else {}
+        merged = {**props, "name": name, "id": zone_record_id}
+        return {**geojson, "properties": merged}
+    if gtype == "FeatureCollection" and isinstance(geojson.get("features"), list):
+        return geojson
+    if gtype not in ("Polygon", "MultiPolygon"):
+        return None
+    return {
+        "type": "Feature",
+        "properties": {"name": name, "id": zone_record_id},
+        "geometry": geojson,
+    }
+
+
+def _collect_geojson_features(
+    geojson: dict[str, Any] | None,
+    *,
+    name: str,
+    zone_record_id: int,
+) -> list[dict[str, Any]]:
+    if not geojson:
+        return []
+    gtype = geojson.get("type")
+    if gtype == "FeatureCollection" and isinstance(geojson.get("features"), list):
+        return [f for f in geojson["features"] if isinstance(f, dict)]
+    feat = _geojson_as_feature(geojson, name=name, zone_record_id=zone_record_id)
+    return [feat] if feat else []
+
+
+def _drawable_geojson_for_zone(
+    z: Zone,
+    geo_fence_geojson: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    params = z.parameters if isinstance(z.parameters, dict) else {}
+    guest_map = params.get("guest_map") if isinstance(params.get("guest_map"), dict) else {}
+    gj = guest_map.get("geojson")
+    if isinstance(gj, dict) and gj.get("type") in ("FeatureCollection", "Polygon", "MultiPolygon", "Feature"):
+        return gj
+    geometry_geojson = _geometry_geojson_from_parameters(params)
+    return geo_fence_geojson or geometry_geojson
+
+
+def _h3_cells_for_zone(z: Zone) -> list[str]:
+    hc = getattr(z, "h3_cells", None) or []
+    if isinstance(hc, list):
+        return [str(c) for c in hc if str(c)]
+    if isinstance(hc, str) and hc.strip():
+        return [hc.strip()]
+    return []
+
+
+def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
+    """Read-only guest dashboard for a network id — includes every active acceptable zone."""
+    zid = zone_id.strip()
+    rows = _load_active_network_zone_rows(db, zid)
+    serialized_zones: list[dict[str, Any]] = []
+    all_cells: list[str] = []
+    features: list[dict[str, Any]] = []
+    centers: list[dict[str, float]] = []
     zoom_level = 14
-    center: dict[str, float] | None = None
-    geojson_fc: dict[str, Any] | None = None
     bounds: dict[str, float] | None = None
-    if z:
-        hc = getattr(z, "h3_cells", None) or []
-        if isinstance(hc, list):
-            cells = [str(c) for c in hc if str(c)]
-        elif isinstance(hc, str):
-            cells = [hc]
+
+    for z, geo_fence_geojson in rows:
+        serialized_zones.append(_serialize_zone_like_member(z, geo_fence_geojson))
+        all_cells.extend(_h3_cells_for_zone(z))
+
+        zone_name = (z.name or "").strip() or f"Zone {z.id}"
+        drawable = _drawable_geojson_for_zone(z, geo_fence_geojson)
+        features.extend(
+            _collect_geojson_features(drawable, name=zone_name, zone_record_id=z.id),
+        )
+
         params = z.parameters if isinstance(z.parameters, dict) else {}
         guest_map = params.get("guest_map") if isinstance(params.get("guest_map"), dict) else {}
         mz = guest_map.get("zoom")
@@ -960,65 +1033,59 @@ def get_guest_dashboard_safe(db: Session, *, zone_id: str) -> dict[str, Any]:
         cen = guest_map.get("center") if isinstance(guest_map.get("center"), dict) else {}
         lat, lng = cen.get("lat"), cen.get("lng")
         if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
-            center = {"lat": float(lat), "lng": float(lng)}
-        gj = guest_map.get("geojson")
-        if isinstance(gj, dict) and gj.get("type") == "FeatureCollection":
-            geojson_fc = gj
-        b = guest_map.get("bounds") if isinstance(guest_map.get("bounds"), dict) else {}
-        s, n, ew, ww = (
-            b.get("south"),
-            b.get("north"),
-            b.get("east"),
-            b.get("west"),
-        )
-        if all(isinstance(v, (int, float)) for v in (s, n, ew, ww)):
-            bounds = {
-                "south": float(s),
-                "north": float(n),
-                "east": float(ew),
-                "west": float(ww),
-            }
+            centers.append({"lat": float(lat), "lng": float(lng)})
+        if bounds is None:
+            b = guest_map.get("bounds") if isinstance(guest_map.get("bounds"), dict) else {}
+            s, n, ew, ww = b.get("south"), b.get("north"), b.get("east"), b.get("west")
+            if all(isinstance(v, (int, float)) for v in (s, n, ew, ww)):
+                bounds = {
+                    "south": float(s),
+                    "north": float(n),
+                    "east": float(ew),
+                    "west": float(ww),
+                }
+        if geo_fence_geojson is not None:
+            c = _geojson_polygon_centroid(geo_fence_geojson)
+            if c:
+                centers.append(c)
+        geometry_center = _geometry_center_from_parameters(params)
+        if geometry_center:
+            centers.append(geometry_center)
 
-    # Circle/proximity zones store geometry as center + radius in `parameters`
-    # (NOT as geo_fence_polygon), so ST_AsGeoJSON above returns nothing for them.
-    # Build a drawable polygon from the stored parameters as a final fallback.
-    geometry_geojson: dict[str, Any] | None = None
-    geometry_center: dict[str, float] | None = None
-    if z:
-        zone_params = z.parameters if isinstance(z.parameters, dict) else {}
-        geometry_geojson = _geometry_geojson_from_parameters(zone_params)
-        geometry_center = _geometry_center_from_parameters(zone_params)
+    cells = list(dict.fromkeys(all_cells))
+    combined_geojson: dict[str, Any] | None = None
+    if features:
+        combined_geojson = {"type": "FeatureCollection", "features": features}
 
-    # Read-only copy of the zone in the SAME shape members get from GET /zones,
-    # so a guest can render the identical map (geometry / config.h3_cells /
-    # geo_fence_polygon) without any editing capability.
-    zone_serialized = _serialize_zone_like_member(z, geo_fence_geojson) if z else None
+    center = centers[0] if centers else None
+    if center is None and combined_geojson and features:
+        geom = features[0].get("geometry") if isinstance(features[0], dict) else None
+        if isinstance(geom, dict):
+            center = _geojson_polygon_centroid(geom)
 
-    # Prefer an explicit guest_map override; otherwise fall back to the zone's
-    # actual geofence polygon (covers polygon zones), then to the geometry stored
-    # in parameters (covers circle/proximity zones that have no cells/polygon).
-    effective_geojson = geojson_fc or geo_fence_geojson or geometry_geojson
-    if center is None and geo_fence_geojson is not None:
-        center = _geojson_polygon_centroid(geo_fence_geojson)
-    if center is None and geometry_center is not None:
-        center = geometry_center
-    if center is None and geometry_geojson is not None:
-        center = _geojson_polygon_centroid(geometry_geojson)
+    primary = rows[0][0] if rows else None
+    if len(serialized_zones) > 1:
+        label = f"{zid} · {len(serialized_zones)} zones"
+    elif primary and (primary.name or "").strip():
+        label = primary.name.strip()
+    else:
+        label = zid
 
     map_payload = {
         "center": center,
         "zoom": zoom_level,
         "cells": cells,
         **({"bounds": bounds} if bounds else {}),
-        **({"geojson": effective_geojson} if effective_geojson else {}),
+        **({"geojson": combined_geojson} if combined_geojson else {}),
     }
 
     return {
-        "zone_id": zone_id.strip(),
+        "zone_id": zid,
         "label": label,
-        "welcome_text": welcome,
+        "welcome_text": "Welcome to the network guest dashboard.",
         "links": [],
         "cells": cells,
         "map": map_payload,
-        **({"zone": zone_serialized} if zone_serialized else {}),
+        "zones": serialized_zones,
+        **({"zone": serialized_zones[0]} if serialized_zones else {}),
     }
