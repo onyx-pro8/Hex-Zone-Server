@@ -82,6 +82,8 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
                 "last_name": member.last_name,
                 "email": member.email,
                 "account_owner_id": member.account_owner_id or member.id,
+                "role": member.role.value,
+                "account_type": member.account_type.value,
                 "address": member.address,
                 "zone_id": member.zone_id,
                 "active": member.active,

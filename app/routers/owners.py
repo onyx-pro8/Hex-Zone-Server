@@ -21,6 +21,7 @@ from app.services.registration_code_service import (
 )
 from app.services.account_type_policy import (
     assert_account_type_allowed_for_public_registration,
+    assert_account_type_change_allowed,
     assert_owner_may_edit_network_id,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
@@ -308,6 +309,20 @@ async def update_owner(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only administrators can change active status",
+        )
+
+    if owner_update.account_type is not None:
+        target = owner_crud.get_owner(db, owner_id)
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Owner not found",
+            )
+        assert_account_type_change_allowed(
+            db,
+            caller,
+            target,
+            owner_update.account_type.value,
         )
 
     if owner_update.zone_id is not None:

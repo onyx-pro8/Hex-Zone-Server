@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.future import select
 from sqlalchemy import func
 from app.models import Owner, Zone
+from app.models.owner import AccountType
 from app.schemas.schemas import OwnerCreate, OwnerUpdate
 from app.core.security import get_password_hash, generate_api_key
 from app.crud.zone import apply_zone_geo_fence_geojson
@@ -88,6 +89,24 @@ def list_owners(db: Session, skip: int = 0, limit: int = 100):
     return result.scalars().all()
 
 
+def cascade_account_type_from_administrator(
+    db: Session,
+    administrator: Owner,
+    account_type: AccountType,
+) -> None:
+    """Keep invited users' account_type aligned with their administrator."""
+    if administrator.role.value != "administrator":
+        return
+    root_id = administrator.account_owner_id or administrator.id
+    db.query(Owner).filter(
+        Owner.account_owner_id == root_id,
+        Owner.id != administrator.id,
+    ).update(
+        {Owner.account_type: account_type},
+        synchronize_session=False,
+    )
+
+
 def update_owner(db: Session, owner_id: int, owner_update: OwnerUpdate) -> Optional[Owner]:
     """Update an owner."""
     db_owner = get_owner(db, owner_id)
@@ -95,8 +114,18 @@ def update_owner(db: Session, owner_id: int, owner_update: OwnerUpdate) -> Optio
         return None
     
     update_data = owner_update.model_dump(exclude_unset=True)
+    new_account_type = update_data.pop("account_type", None)
     for field, value in update_data.items():
         setattr(db_owner, field, value)
+
+    if new_account_type is not None:
+        account_type_value = (
+            new_account_type.value
+            if hasattr(new_account_type, "value")
+            else str(new_account_type)
+        )
+        db_owner.account_type = AccountType(account_type_value)
+        cascade_account_type_from_administrator(db, db_owner, db_owner.account_type)
     
     db.flush()
     db.refresh(db_owner)

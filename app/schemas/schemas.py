@@ -127,6 +127,10 @@ class OwnerUpdate(BaseModel):
     first_name: Optional[str] = Field(None, min_length=1, max_length=100)
     last_name: Optional[str] = Field(None, min_length=1, max_length=100)
     active: Optional[bool] = None
+    account_type: Optional[AccountTypeEnum] = Field(
+        None,
+        description="Pricing tier. Only system administrators may change this field.",
+    )
 
 
 class OwnerResponse(OwnerBase):
@@ -150,6 +154,9 @@ class OwnerListResponse(BaseModel):
     email: EmailStr
     zone_id: str
     active: bool
+    account_type: AccountTypeEnum
+    role: OwnerRoleEnum
+    address: str
 
     class Config:
         from_attributes = True

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
 
 from app.models import Owner
+from app.models.owner import AccountType, OwnerRole
 from app.services.registration_code_service import (
     PRICING_TIER_PRIVATE,
     normalize_pricing_tier_key,
@@ -41,4 +43,57 @@ def assert_owner_may_edit_network_id(owner: Owner) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only system administrator (Private) accounts may change the network ID.",
+        )
+
+
+def assert_system_administrator_may_set_account_type(caller: Owner) -> None:
+    """Only Private-tier administrators may assign account types."""
+    if not is_system_administrator(caller):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only system administrators may change account types.",
+        )
+
+
+def count_system_administrators(db: Session) -> int:
+    """Count active administrator accounts on the Private (system) tier."""
+    return (
+        db.query(Owner)
+        .filter(
+            Owner.role == OwnerRole.ADMINISTRATOR,
+            Owner.account_type == AccountType.PRIVATE,
+            Owner.active.is_(True),
+        )
+        .count()
+    )
+
+
+def assert_account_type_change_allowed(
+    db: Session,
+    caller: Owner,
+    target: Owner,
+    new_account_type: str,
+) -> None:
+    """Validate a system-administrator account-type assignment."""
+    assert_system_administrator_may_set_account_type(caller)
+
+    new_key = normalize_pricing_tier_key(new_account_type)
+    current_key = normalize_pricing_tier_key(target.account_type.value)
+    if new_key == current_key:
+        return
+
+    if (
+        is_system_administrator(target)
+        and new_key != PRICING_TIER_PRIVATE
+        and count_system_administrators(db) <= 1
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot change account type: at least one system administrator is required.",
+        )
+
+    if new_key == PRICING_TIER_PRIVATE and target.role.value != "administrator":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only administrator accounts may be assigned the Private (system) account type.",
         )
