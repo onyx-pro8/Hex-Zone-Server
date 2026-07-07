@@ -1,7 +1,6 @@
 """Contract-compatible routes."""
 import asyncio
 import logging
-import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -1009,16 +1008,6 @@ async def post_push_token_test(
 # ---------------------------------------------------------------------------
 
 
-class AddressSettingsModel(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    number_street: str = Field(default="", validation_alias=AliasChoices("numberStreet", "number_street"), serialization_alias="numberStreet")
-    street_name: str = Field(default="", validation_alias=AliasChoices("streetName", "street_name"), serialization_alias="streetName")
-    city: str = Field(default="")
-    state_province: str = Field(default="", validation_alias=AliasChoices("stateProvince", "state_province"), serialization_alias="stateProvince")
-    city_code: str = Field(default="", validation_alias=AliasChoices("cityCode", "city_code"), serialization_alias="cityCode")
-
-
 class SharedNotificationSettingsModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -1033,7 +1022,7 @@ class AppSettingsModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     broadcast_name: str = Field(default="", validation_alias=AliasChoices("broadcastName", "broadcast_name"), serialization_alias="broadcastName")
-    address: AddressSettingsModel = Field(default_factory=AddressSettingsModel)
+    address: str = Field(default="", description="Single free-form home address line")
     shared_notification: SharedNotificationSettingsModel = Field(
         default_factory=SharedNotificationSettingsModel,
         validation_alias=AliasChoices("sharedNotification", "shared_notification"),
@@ -1045,46 +1034,50 @@ class AppSettingsModel(BaseModel):
         serialization_alias="quickMessages",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_address(cls, data):
+        """Accept the legacy structured address object from older clients.
 
-def _seed_address_from_owner(raw_address: str | None) -> AddressSettingsModel:
-    """Best-effort split of the single signup address string into structured parts.
+        New clients send `address` as a single free-form string; older clients
+        may still POST `{ numberStreet, streetName, city, stateProvince,
+        cityCode }`, which we flatten into one comma-separated line.
+        """
+        if isinstance(data, dict):
+            addr = data.get("address")
+            if isinstance(addr, dict):
+                data = {**data, "address": _address_dict_to_single_line(addr)}
+        return data
 
-    The signup form only captures one free-form string (e.g.
-    "169 Fred Young Drive, Toronto, Ontario, M3L 0A6"), so this seeds the
-    structured fields on first load. The user can correct and save afterwards.
+
+def _address_dict_to_single_line(addr: dict) -> str:
+    """Flatten a legacy structured address object into one signup-style string.
+
+    Older clients POST `{ numberStreet, streetName, city, stateProvince,
+    cityCode }`; new clients send a single free-form string. This keeps the
+    endpoint backward compatible by composing the parts into one line.
     """
-    parts = [p.strip() for p in (raw_address or "").split(",")]
-    first = parts[0] if len(parts) > 0 else ""
-    city = parts[1] if len(parts) > 1 else ""
-    state_province = parts[2] if len(parts) > 2 else ""
-    city_code = parts[3] if len(parts) > 3 else ""
+    def _val(*keys: str) -> str:
+        for key in keys:
+            value = addr.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
-    number = ""
-    street = first
-    match = re.match(r"^\s*(\d+[A-Za-z]?)\s+(.*)$", first)
-    if match:
-        number = match.group(1)
-        street = match.group(2).strip()
-
-    return AddressSettingsModel(
-        number_street=number,
-        street_name=street,
-        city=city,
-        state_province=state_province,
-        city_code=city_code,
-    )
-
-
-def _address_model_to_single_line(addr: AddressSettingsModel) -> str:
-    """Compose the structured address fields into one signup-style string."""
     line1 = " ".join(
         part
-        for part in [(addr.number_street or "").strip(), (addr.street_name or "").strip()]
+        for part in [
+            _val("numberStreet", "number_street"),
+            _val("streetName", "street_name"),
+        ]
         if part
     )
     parts = [line1] if line1 else []
-    for part in [addr.city, addr.state_province, addr.city_code]:
-        value = (part or "").strip()
+    for value in [
+        _val("city"),
+        _val("stateProvince", "state_province"),
+        _val("cityCode", "city_code"),
+    ]:
         if value:
             parts.append(value)
     return ", ".join(parts)
@@ -1186,7 +1179,7 @@ def _owner_to_settings_model(owner: Owner, db: Session) -> AppSettingsModel:
     """
     model = AppSettingsModel(
         broadcast_name=(owner.broadcast_name or "").strip(),
-        address=_seed_address_from_owner(owner.address),
+        address=(owner.address or "").strip(),
         shared_notification=SharedNotificationSettingsModel(
             webhook=(owner.sn_webhook or "").strip(),
             periodical_check_sec=owner.sn_periodical_check_sec or "86400",
@@ -1235,7 +1228,7 @@ async def put_my_settings(
 ):
     owner.broadcast_name = (payload.broadcast_name or "").strip()
 
-    formatted_address = _address_model_to_single_line(payload.address)
+    formatted_address = (payload.address or "").strip()
     if formatted_address:
         owner.address = formatted_address
         try:
