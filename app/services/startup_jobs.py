@@ -1,9 +1,8 @@
 """Long-running startup jobs that must not block FastAPI request handlers.
 
-Currently this hosts the owner-address geocoding backfill: existing owners
-created before the registration-time geocoder ran (or owners whose first
-geocoding attempt failed) still have NULL `latitude / longitude`. We resolve
-them in a dedicated background thread so:
+Currently this hosts the owner-address geocoding backfill: every owner with a
+stored address is re-geocoded into ``owners.latitude / longitude`` so stale GPS
+values are replaced by the registered home address.
 
 * The application is up immediately — health checks and request handlers do
   not wait for Nominatim.
@@ -21,7 +20,6 @@ import time
 from datetime import datetime, timedelta
 from typing import Iterable
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -32,7 +30,7 @@ from app.models import Owner
 from app.models.wellness_check_acknowledgement import WellnessCheckAcknowledgement
 from app.models.zone_message_event import ZoneMessageEvent
 from app.services import push_notification_service
-from app.services.geocoding_service import geocode_address_best_effort
+from app.services.owner_home_service import sync_owner_home_from_address
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +44,8 @@ _MAX_OWNERS_PER_RUN = 200
 def _select_owners_needing_geocode(db: Session) -> Iterable[Owner]:
     return (
         db.query(Owner)
-        .filter(or_(Owner.latitude.is_(None), Owner.longitude.is_(None)))
         .filter(Owner.address.isnot(None))
+        .filter(Owner.address != "")
         .order_by(Owner.id.asc())
         .limit(_MAX_OWNERS_PER_RUN)
         .all()
@@ -55,7 +53,7 @@ def _select_owners_needing_geocode(db: Session) -> Iterable[Owner]:
 
 
 def backfill_owner_coordinates() -> None:
-    """Resolve `owners.latitude/longitude` for rows that still lack a fix.
+    """Re-geocode ``owners.latitude/longitude`` from ``owners.address`` for all owners.
 
     Designed to be invoked from a daemon thread at app startup. The function
     catches its own exceptions so a single bad address (or a Nominatim outage)
@@ -71,21 +69,15 @@ def backfill_owner_coordinates() -> None:
         resolved = 0
         for owner in owners:
             try:
-                coords = geocode_address_best_effort(owner.address)
+                if sync_owner_home_from_address(owner):
+                    resolved += 1
+                    try:
+                        db.commit()
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("Commit failed for owner %s: %s", owner.id, exc)
+                        db.rollback()
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Geocode raised for owner %s: %s", owner.id, exc)
-                coords = None
-            if coords is not None:
-                lat, lng = coords
-                owner.latitude = lat
-                owner.longitude = lng
-                owner.location_updated_at = datetime.utcnow()
-                resolved += 1
-                try:
-                    db.commit()
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("Commit failed for owner %s: %s", owner.id, exc)
-                    db.rollback()
             time.sleep(_PER_OWNER_DELAY_SECONDS)
         logger.info(
             "Owner geocode backfill complete: %d resolved / %d queued",

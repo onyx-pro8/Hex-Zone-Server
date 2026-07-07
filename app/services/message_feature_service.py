@@ -44,7 +44,11 @@ from app.services.network_zone_propagation import (
     resolve_network_administrator,
     resolve_network_geo_propagation_recipients,
 )
-from app.services.owner_home_service import apply_owner_home_geocode, get_owner_home_coordinates
+from app.services.owner_home_service import (
+    apply_owner_home_geocode,
+    get_owner_home_coordinates,
+    sync_owner_home_from_address,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,12 +110,10 @@ def _resolve_registered_home_coordinates(
     db: Session,
     sender: Owner,
 ) -> tuple[float, float, str]:
-    """Home coordinates for SENSOR / WELLNESS_CHECK (geocoded registered address)."""
+    """Home coordinates for SENSOR / WELLNESS_CHECK — always from ``owner.address``."""
+    sync_owner_home_from_address(sender)
+    db.flush()
     coords = get_owner_home_coordinates(sender)
-    if coords is None:
-        apply_owner_home_geocode(sender, force=True)
-        db.flush()
-        coords = get_owner_home_coordinates(sender)
     if coords is None:
         raise GeoMessageSkipped(
             {

@@ -25,7 +25,7 @@ from app.services import guest_api_service
 from app.services.access_policy import can_message_owner
 from app.services import message_block_service
 from app.services.account_type_policy import assert_owner_may_edit_network_id
-from app.services.owner_home_service import apply_owner_home_geocode
+from app.services.owner_home_service import apply_owner_home_geocode, sync_owner_home_from_address
 
 router = APIRouter(tags=["contract"])
 
@@ -437,8 +437,16 @@ async def get_zones(owner: Owner = Depends(require_auth), db: Session = Depends(
     response_description="Success envelope containing authenticated contract profile.",
 )
 async def get_me(owner: Owner = Depends(require_auth), db: Session = Depends(get_db)):
-    # Home map center comes from geocoded `owners.address` → `owners.latitude/longitude`.
-    # Live GPS is tracked separately in `member_locations`.
+    try:
+        sync_owner_home_from_address(owner)
+        db.commit()
+        db.refresh(owner)
+    except Exception as exc:  # pragma: no cover - never block profile
+        logging.getLogger(__name__).warning(
+            "Home geocode refresh failed on /me for owner %s: %s", owner.id, exc
+        )
+        db.rollback()
+
     map_center: MemberLocationResponse | None = None
     if owner.latitude is not None and owner.longitude is not None:
         map_center = MemberLocationResponse(
@@ -1227,14 +1235,11 @@ async def put_my_settings(
 ):
     owner.broadcast_name = (payload.broadcast_name or "").strip()
 
-    previous_address = (owner.address or "").strip()
     formatted_address = _address_model_to_single_line(payload.address)
     if formatted_address:
         owner.address = formatted_address
-
-    if formatted_address and formatted_address != previous_address:
         try:
-            apply_owner_home_geocode(owner, force=True)
+            sync_owner_home_from_address(owner)
         except Exception as exc:  # pragma: no cover - never block settings save
             logging.getLogger(__name__).warning(
                 "Home geocode failed after settings save for owner %s: %s",

@@ -9,7 +9,11 @@ from app.core.security import create_access_token, generate_api_key, get_passwor
 from app.models import Owner
 from app.models.owner import OwnerRole
 from app.services.access_policy import resolve_account_owner_id
-from app.services.owner_home_service import apply_owner_home_geocode, get_owner_home_coordinates
+from app.services.owner_home_service import (
+    apply_owner_home_geocode,
+    get_owner_home_coordinates,
+    sync_owner_home_from_address,
+)
 from app.services.registration_code_service import require_and_consume_admin_registration_code
 from app.services.account_type_policy import assert_account_type_allowed_for_public_registration
 
@@ -17,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 def _try_geocode_owner_address(owner: Owner) -> None:
-    """Best-effort populate home coordinates from `owner.address` when missing."""
-    apply_owner_home_geocode(owner, force=False)
+    """Populate home coordinates from `owner.address`."""
+    sync_owner_home_from_address(owner)
 
 
 def _to_contract_account_type(account_type: str) -> str:
@@ -149,12 +153,11 @@ def login_user(db: Session, email: str, password: str) -> dict:
             detail="Account is inactive or expired",
         )
 
-    if owner.latitude is None or owner.longitude is None:
-        try:
-            _try_geocode_owner_address(owner)
-            db.flush()
-        except Exception as exc:  # pragma: no cover - never block login
-            logger.warning("Address geocoding failed for owner %s: %s", owner.id, exc)
+    try:
+        sync_owner_home_from_address(owner)
+        db.flush()
+    except Exception as exc:  # pragma: no cover - never block login
+        logger.warning("Address geocoding failed for owner %s: %s", owner.id, exc)
 
     token = create_access_token({"sub": str(owner.id)})
     return {

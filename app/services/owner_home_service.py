@@ -14,9 +14,9 @@ def apply_owner_home_geocode(owner: Owner, *, force: bool = False) -> bool:
     """Populate or refresh home coordinates from `owner.address`.
 
     Uses best-effort geocoding (full address, then shorter fragments). When
-    ``force`` is True (e.g. after a settings save), re-geocodes even when coords
-    already exist; clears coords when geocoding fails.
-    """
+    ``force`` is True, always re-geocodes from the current address text so stale
+    GPS values in ``owners.latitude/longitude`` cannot be reused.
+  """
     if not force and owner.latitude is not None and owner.longitude is not None:
         return False
 
@@ -43,8 +43,13 @@ def apply_owner_home_geocode(owner: Owner, *, force: bool = False) -> bool:
     return True
 
 
+def sync_owner_home_from_address(owner: Owner) -> bool:
+    """Always re-geocode ``owner.address`` into home coordinates."""
+    return apply_owner_home_geocode(owner, force=True)
+
+
 def get_owner_home_coordinates(owner: Owner) -> tuple[float, float] | None:
-    """Return geocoded home coordinates from the owner row."""
+    """Return cached home coordinates from the owner row."""
     if owner.latitude is None or owner.longitude is None:
         return None
     return float(owner.latitude), float(owner.longitude)
