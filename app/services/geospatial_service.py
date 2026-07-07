@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.h3_utils import lat_lng_to_h3_cell
-from app.models import Owner, Zone
+from app.models import MemberLocation, Owner, Zone
 
 
 def point_h3_cells(latitude: float, longitude: float) -> list[str]:
@@ -415,17 +415,16 @@ def owner_ids_located_within_zone_records(
             """
             SELECT DISTINCT o.id
             FROM owners o
+            JOIN member_locations ml ON ml.owner_id = o.id
             JOIN zones z
               ON z.id = ANY(:zone_record_ids)
              AND z.active = TRUE
              AND z.geo_fence_polygon IS NOT NULL
             WHERE o.active = TRUE
-              AND o.latitude IS NOT NULL
-              AND o.longitude IS NOT NULL
               AND (
-                  ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude, o.latitude), 4326))
-                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude + 360, o.latitude), 4326))
-                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude - 360, o.latitude), 4326))
+                  ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(ml.longitude, ml.latitude), 4326))
+                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(ml.longitude + 360, ml.latitude), 4326))
+                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(ml.longitude - 360, ml.latitude), 4326))
               )
             """
         )
@@ -443,12 +442,9 @@ def owner_ids_located_within_zone_records(
         return sorted(matched)
 
     owner_rows = (
-        db.query(Owner.id, Owner.latitude, Owner.longitude)
-        .filter(
-            Owner.active.is_(True),
-            Owner.latitude.isnot(None),
-            Owner.longitude.isnot(None),
-        )
+        db.query(MemberLocation.owner_id, MemberLocation.latitude, MemberLocation.longitude)
+        .join(Owner, Owner.id == MemberLocation.owner_id)
+        .filter(Owner.active.is_(True))
         .all()
     )
     for owner_id, lat, lng in owner_rows:
@@ -525,14 +521,7 @@ def owner_ids_located_within_zone_ids(
     *,
     exclude_owner_id: int | None = None,
 ) -> list[int]:
-    """Active owners whose **current stored location** falls inside any of ``zone_ids``.
-
-    This implements realtime presence: a recipient is "inside the zone" when
-    their own ``owners.latitude / longitude`` is contained by the geometry of an
-    active zone whose ``zone_id`` is in ``zone_ids`` (regardless of which owner
-    defined that zone). Polygon zones are evaluated in a single batched PostGIS
-    query; H3 and circle-based zone types are evaluated in Python.
-    """
+    """Active owners whose **current live location** falls inside any of ``zone_ids``."""
     target = list(dict.fromkeys(str(z) for z in zone_ids if z))
     if not target:
         return []
@@ -544,17 +533,16 @@ def owner_ids_located_within_zone_ids(
             """
             SELECT DISTINCT o.id
             FROM owners o
+            JOIN member_locations ml ON ml.owner_id = o.id
             JOIN zones z
               ON z.zone_id = ANY(:zone_ids)
              AND z.active = TRUE
              AND z.geo_fence_polygon IS NOT NULL
             WHERE o.active = TRUE
-              AND o.latitude IS NOT NULL
-              AND o.longitude IS NOT NULL
               AND (
-                  ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude, o.latitude), 4326))
-                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude + 360, o.latitude), 4326))
-                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(o.longitude - 360, o.latitude), 4326))
+                  ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(ml.longitude, ml.latitude), 4326))
+                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(ml.longitude + 360, ml.latitude), 4326))
+                  OR ST_Covers(z.geo_fence_polygon, ST_SetSRID(ST_MakePoint(ml.longitude - 360, ml.latitude), 4326))
               )
             """
         )
@@ -574,12 +562,9 @@ def owner_ids_located_within_zone_ids(
 
     if zone_rows:
         owner_rows = (
-            db.query(Owner.id, Owner.latitude, Owner.longitude)
-            .filter(
-                Owner.active.is_(True),
-                Owner.latitude.isnot(None),
-                Owner.longitude.isnot(None),
-            )
+            db.query(MemberLocation.owner_id, MemberLocation.latitude, MemberLocation.longitude)
+            .join(Owner, Owner.id == MemberLocation.owner_id)
+            .filter(Owner.active.is_(True))
             .all()
         )
         for owner_id, lat, lng in owner_rows:
@@ -725,8 +710,8 @@ def resolve_dynamic_zone_cluster(
 ) -> DynamicZoneResolution:
     """Pick a disk that covers the tightest cluster of N nearest users in a zone.
 
-    No caller-supplied center: for every active owner of `zone_id` whose
-    `owners.latitude / longitude` is set, take that owner plus their N-1 nearest
+    No caller-supplied center: for every active owner of `zone_id` with a live
+    GPS fix in `member_locations`, take that owner plus their N-1 nearest
     neighbors, compute the smallest enclosing circle of the group, keep
     clusters whose tight radius is `<= max_radius_meters`, clamp the radius to
     `[min, max]`, and return the cluster with the smallest effective radius.
@@ -741,16 +726,12 @@ def resolve_dynamic_zone_cluster(
         raise ValueError("max_radius_meters must be >= min_radius_meters")
 
     excluded = {oid for oid in exclude_owner_ids if isinstance(oid, int)}
-    # Canonical location source is `owners.latitude / longitude`. Owners without
-    # a location yet are silently skipped (NULL filter) so they never anchor the
-    # cluster but also never break feasibility for the rest of the population.
     rows = (
-        db.query(Owner.id, Owner.latitude, Owner.longitude)
+        db.query(MemberLocation.owner_id, MemberLocation.latitude, MemberLocation.longitude)
+        .join(Owner, Owner.id == MemberLocation.owner_id)
         .filter(
             Owner.zone_id == zone_id,
             Owner.active.is_(True),
-            Owner.latitude.isnot(None),
-            Owner.longitude.isnot(None),
         )
         .all()
     )
@@ -772,7 +753,7 @@ def resolve_dynamic_zone_cluster(
     if not population:
         base.infeasible = True
         base.reason = (
-            "No active users in this zone have a stored location on their owner record yet."
+            "No active users in this zone have published a live location yet."
         )
         return base
     if len(population) < target_user_count:

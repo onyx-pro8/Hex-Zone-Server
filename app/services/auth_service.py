@@ -1,6 +1,5 @@
 """Authentication business logic for contract endpoints."""
 import logging
-from datetime import datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy import func
@@ -10,7 +9,7 @@ from app.core.security import create_access_token, generate_api_key, get_passwor
 from app.models import Owner
 from app.models.owner import OwnerRole
 from app.services.access_policy import resolve_account_owner_id
-from app.services.geocoding_service import geocode_address
+from app.services.owner_home_service import apply_owner_home_geocode, get_owner_home_coordinates
 from app.services.registration_code_service import require_and_consume_admin_registration_code
 from app.services.account_type_policy import assert_account_type_allowed_for_public_registration
 
@@ -18,28 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 def _try_geocode_owner_address(owner: Owner) -> None:
-    """Best-effort populate `owner.latitude/longitude` from `owner.address`.
-
-    Used at registration time and as a lazy backfill on `/me`. Network errors
-    are swallowed by `geocode_address`; this helper only mutates the owner row
-    when coordinates were resolved.
-    """
-    if owner.latitude is not None and owner.longitude is not None:
-        return
-    coords = geocode_address(owner.address)
-    if coords is None:
-        return
-    lat, lng = coords
-    owner.latitude = lat
-    owner.longitude = lng
-    owner.location_updated_at = datetime.utcnow()
-    logger.info(
-        "Geocoded owner %s address %r to (%.6f, %.6f)",
-        owner.id,
-        owner.address,
-        lat,
-        lng,
-    )
+    """Best-effort populate home coordinates from `owner.address` when missing."""
+    apply_owner_home_geocode(owner, force=False)
 
 
 def _to_contract_account_type(account_type: str) -> str:
@@ -82,19 +61,15 @@ def _to_owner_role(registration_type: str | None) -> OwnerRole:
 
 
 def _get_map_center(db: Session, owner_id: int) -> dict | None:
-    """Return the owner's canonical map center.
-
-    Reads directly from `owners.latitude / owners.longitude`, which is the
-    single source of truth for the user's last known location (kept in sync by
-    `upsert_member_location` and the startup backfill). Returns ``None`` when
-    the owner has never published a location.
-    """
+    """Return the owner's registered home map center (geocoded from `address`)."""
     owner = db.get(Owner, owner_id)
     if owner is None:
         return None
-    if owner.latitude is None or owner.longitude is None:
+    coords = get_owner_home_coordinates(owner)
+    if coords is None:
         return None
-    return {"latitude": owner.latitude, "longitude": owner.longitude}
+    lat, lng = coords
+    return {"latitude": lat, "longitude": lng}
 
 
 def register_user(db: Session, payload: dict) -> dict:
@@ -138,9 +113,6 @@ def register_user(db: Session, payload: dict) -> dict:
     if owner.role.value == "administrator" and owner.account_owner_id is None:
         owner.account_owner_id = owner.id
         db.flush()
-    # Best-effort geocode of the wizard address into owners.latitude/longitude so
-    # downstream consumers (`/me`, dynamic-zone resolver) have a sane starting
-    # map_center even before the device pushes a live position.
     try:
         _try_geocode_owner_address(owner)
         db.flush()
@@ -177,9 +149,6 @@ def login_user(db: Session, email: str, password: str) -> dict:
             detail="Account is inactive or expired",
         )
 
-    # Lazy backfill: existing owners created before the geocode-at-registration
-    # hook still have NULL coordinates. Resolve them once on login so the
-    # mobile/web clients receive a populated `mapCenter` immediately.
     if owner.latitude is None or owner.longitude is None:
         try:
             _try_geocode_owner_address(owner)

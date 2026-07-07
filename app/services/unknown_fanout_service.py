@@ -5,7 +5,7 @@ from math import atan2, cos, radians, sin, sqrt
 
 from sqlalchemy.orm import Session
 
-from app.models import Owner
+from app.models import MemberLocation, Owner
 
 # Sender account tier → max recipients (nearest owners with a stored location).
 FANOUT_LIMIT_BY_ACCOUNT_TYPE: dict[str, int] = {
@@ -48,12 +48,11 @@ def resolve_nearest_owner_ids_among(
 
     unique_ids = list(dict.fromkeys(int(oid) for oid in candidate_owner_ids))
     rows = (
-        db.query(Owner.id, Owner.latitude, Owner.longitude)
+        db.query(MemberLocation.owner_id, MemberLocation.latitude, MemberLocation.longitude)
+        .join(Owner, Owner.id == MemberLocation.owner_id)
         .filter(
-            Owner.id.in_(unique_ids),
+            MemberLocation.owner_id.in_(unique_ids),
             Owner.active.is_(True),
-            Owner.latitude.isnot(None),
-            Owner.longitude.isnot(None),
         )
         .all()
     )
@@ -78,12 +77,11 @@ def resolve_nearest_owner_ids(
         return []
 
     rows = (
-        db.query(Owner.id, Owner.latitude, Owner.longitude)
+        db.query(MemberLocation.owner_id, MemberLocation.latitude, MemberLocation.longitude)
+        .join(Owner, Owner.id == MemberLocation.owner_id)
         .filter(
             Owner.active.is_(True),
             Owner.id != sender_id,
-            Owner.latitude.isnot(None),
-            Owner.longitude.isnot(None),
         )
         .all()
     )

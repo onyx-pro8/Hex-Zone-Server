@@ -35,10 +35,16 @@ from app.services.unknown_fanout_service import (
     resolve_nearest_owner_ids,
     unknown_fanout_limit,
 )
+from app.services.member_service import (
+    get_owner_live_coordinates,
+    set_member_live_position,
+    upsert_member_location,
+)
 from app.services.network_zone_propagation import (
     resolve_network_administrator,
     resolve_network_geo_propagation_recipients,
 )
+from app.services.owner_home_service import apply_owner_home_geocode, get_owner_home_coordinates
 
 logger = logging.getLogger(__name__)
 
@@ -73,40 +79,62 @@ class GeoMessageSkipped(Exception):
 
 
 def _resolve_unknown_origin(
+    db: Session,
     sender: Owner,
     payload: PropagationMessageCreate,
 ) -> tuple[float, float, str]:
-    """Origin for UNKNOWN nearest-neighbour fan-out (live message GPS, else owner record)."""
+    """Origin for UNKNOWN nearest-neighbour fan-out (live message GPS, else member_locations)."""
     try:
         msg_lat = float(payload.position.latitude)
         msg_lon = float(payload.position.longitude)
         return msg_lat, msg_lon, "message_position"
     except (TypeError, ValueError):
         pass
-    if sender.latitude is not None and sender.longitude is not None:
-        return float(sender.latitude), float(sender.longitude), "owner_record"
+    live = get_owner_live_coordinates(db, sender.id)
+    if live is not None:
+        return live[0], live[1], "member_location"
     raise GeoMessageSkipped(
         {
             "skipped": True,
             "reason": "no_origin_coordinates",
-            "message": "UNKNOWN requires device location or a stored owner position.",
+            "message": "UNKNOWN requires device location or a stored live position.",
         }
     )
 
 
+def _resolve_registered_home_coordinates(
+    db: Session,
+    sender: Owner,
+) -> tuple[float, float, str]:
+    """Home coordinates for SENSOR / WELLNESS_CHECK (geocoded registered address)."""
+    coords = get_owner_home_coordinates(sender)
+    if coords is None:
+        apply_owner_home_geocode(sender, force=True)
+        db.flush()
+        coords = get_owner_home_coordinates(sender)
+    if coords is None:
+        raise GeoMessageSkipped(
+            {
+                "skipped": True,
+                "reason": "no_registered_address",
+                "message": (
+                    "SENSOR and WELLNESS CHECK require a valid registered home address. "
+                    "Update your address in account settings."
+                ),
+            }
+        )
+    return coords[0], coords[1], "registered_address"
+
+
 def _geo_evaluation_coordinates(
+    db: Session,
     sender: Owner,
     payload: PropagationMessageCreate,
     canonical_type: CanonicalMessageType,
 ) -> tuple[float, float, str]:
     """Coordinates used to test acceptable-zone geometry for propagation."""
     if canonical_type in REGISTERED_ADDRESS_GEO_TYPES:
-        if sender.latitude is not None and sender.longitude is not None:
-            return (
-                float(sender.latitude),
-                float(sender.longitude),
-                "registered_address",
-            )
+        return _resolve_registered_home_coordinates(db, sender)
     return (
         float(payload.position.latitude),
         float(payload.position.longitude),
@@ -325,8 +353,9 @@ def search_private_message_recipients(
     limit: int = PRIVATE_SEARCH_MAX_RESULTS,
 ) -> dict:
     """Search network members by name or email for PRIVATE compose (invited members only)."""
-    lat = latitude if latitude is not None else sender.latitude
-    lon = longitude if longitude is not None else sender.longitude
+    live = get_owner_live_coordinates(db, sender.id)
+    lat = latitude if latitude is not None else (live[0] if live else None)
+    lon = longitude if longitude is not None else (live[1] if live else None)
     location_status = _resolve_private_location_status(
         db,
         sender,
@@ -423,7 +452,7 @@ def _zone_based_recipients(
     Outside both → no recipients.
     """
     eval_lat, eval_lon, geo_source = _geo_evaluation_coordinates(
-        sender, payload, canonical_type
+        db, sender, payload, canonical_type
     )
     sender_zone_ids, sender_zone_record_ids, recipient_owner_ids, zone_meta = (
         resolve_geo_propagation_recipient_owner_ids(
@@ -522,13 +551,11 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
     if canonical_type == CanonicalMessageType.UNKNOWN:
         _assert_unknown_rate_limit_ok(db, sender.id)
         try:
-            origin_lat, origin_lon, origin_source = _resolve_unknown_origin(sender, payload)
+            origin_lat, origin_lon, origin_source = _resolve_unknown_origin(db, sender, payload)
         except GeoMessageSkipped as exc:
             raise exc
         if origin_source == "message_position":
-            sender.latitude = origin_lat
-            sender.longitude = origin_lon
-            sender.location_updated_at = datetime.utcnow()
+            set_member_live_position(db, sender.id, origin_lat, origin_lon)
 
         target_x = unknown_fanout_limit(sender)
         candidate_recipients = resolve_nearest_owner_ids(
@@ -558,7 +585,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
             db, sender, payload, canonical_type, scope
         )
         eval_lat, eval_lon, geo_source = _geo_evaluation_coordinates(
-            sender, payload, canonical_type
+            db, sender, payload, canonical_type
         )
         position_for_metadata = {
             "latitude": eval_lat,
@@ -679,7 +706,7 @@ def create_network_guest_geo_propagated_message(
     if canonical_type == CanonicalMessageType.UNKNOWN:
         _assert_unknown_rate_limit_ok(db, routing_owner.id)
         try:
-            origin_lat, origin_lon, origin_source = _resolve_unknown_origin(routing_owner, payload)
+            origin_lat, origin_lon, origin_source = _resolve_unknown_origin(db, routing_owner, payload)
         except GeoMessageSkipped as exc:
             raise exc
 
@@ -719,7 +746,7 @@ def create_network_guest_geo_propagated_message(
             network_zone_id=network_id,
         )
         eval_lat, eval_lon, geo_source = _geo_evaluation_coordinates(
-            routing_owner, payload, canonical_type
+            db, routing_owner, payload, canonical_type
         )
         position_for_metadata = {
             "latitude": eval_lat,

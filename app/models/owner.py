@@ -47,9 +47,9 @@ class Owner(Base):
     api_key = Column(String(255), unique=True, nullable=False, index=True)
     phone = Column(String(20), nullable=True)
     address = Column(String(255), nullable=False)
-    # Canonical owner location used for dynamic-zone resolution and any other
-    # geo workflow that needs the user's last-known position. Nullable so
-    # legacy rows backfill lazily on the first location upsert / login.
+    # Canonical owner home location (geocoded from `address`) for SENSOR /
+    # WELLNESS_CHECK routing and client `mapCenter`. Live GPS is in
+    # `member_locations`, not mirrored here.
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     location_updated_at = Column(DateTime, nullable=True)

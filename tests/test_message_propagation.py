@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.domain.message_types import CanonicalMessageType
-from app.models import Owner
+from app.models import MemberLocation, Owner
 from app.models.owner import AccountType, OwnerRole
 from app.schemas.message_feature import CoordinatePayload, MessageFeatureType, PropagationMessageCreate
 from app.services import message_feature_service as mfs
@@ -94,86 +94,48 @@ def _owner(
     )
     db.add(owner)
     db.flush()
+    if lat is not None and lon is not None:
+        db.add(
+            MemberLocation(
+                owner_id=oid,
+                latitude=lat,
+                longitude=lon,
+                updated_at=datetime.utcnow(),
+            )
+        )
+        db.flush()
     return owner
 
 
-def test_resolve_unknown_origin_prefers_message_position():
-    sender = Owner(
-        id=1,
-        email="a@x.com",
-        zone_id="z",
-        first_name="A",
-        last_name="B",
-        account_type=AccountType.EXCLUSIVE,
-        role=OwnerRole.ADMINISTRATOR,
-        hashed_password="x",
-        api_key="k",
-        address="addr",
-        latitude=48.8584,
-        longitude=2.2945,
-        active=True,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
+def test_resolve_unknown_origin_prefers_message_position(prop_db):
+    sender = _owner(prop_db, oid=1, email="a@x.com", lat=48.8584, lon=2.2945)
     payload = PropagationMessageCreate(
         type=MessageFeatureType.UNKNOWN,
         hid="hid",
         position=CoordinatePayload(latitude=40.0, longitude=-74.0),
     )
-    lat, lon, source = mfs._resolve_unknown_origin(sender, payload)
+    lat, lon, source = mfs._resolve_unknown_origin(prop_db, sender, payload)
     assert source == "message_position"
     assert lat == 40.0
     assert lon == -74.0
 
 
-def test_resolve_unknown_origin_falls_back_to_owner_record():
-    sender = Owner(
-        id=1,
-        email="a@x.com",
-        zone_id="z",
-        first_name="A",
-        last_name="B",
-        account_type=AccountType.EXCLUSIVE,
-        role=OwnerRole.ADMINISTRATOR,
-        hashed_password="x",
-        api_key="k",
-        address="addr",
-        latitude=48.8584,
-        longitude=2.2945,
-        active=True,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
+def test_resolve_unknown_origin_falls_back_to_member_location(prop_db):
+    sender = _owner(prop_db, oid=1, email="a@x.com", lat=48.8584, lon=2.2945)
     payload = PropagationMessageCreate(
         type=MessageFeatureType.UNKNOWN,
         hid="hid",
         position=CoordinatePayload(latitude=40.7128, longitude=-74.0060),
     )
     payload.position.latitude = "bad"  # type: ignore[assignment]
-    lat, lon, source = mfs._resolve_unknown_origin(sender, payload)
-    assert source == "owner_record"
+    lat, lon, source = mfs._resolve_unknown_origin(prop_db, sender, payload)
+    assert source == "member_location"
     assert lat == 48.8584
     assert lon == 2.2945
 
 
-def test_resolve_unknown_origin_requires_coordinates_when_missing():
-    sender = Owner(
-        id=1,
-        email="a@x.com",
-        zone_id="z",
-        first_name="A",
-        last_name="B",
-        account_type=AccountType.EXCLUSIVE,
-        role=OwnerRole.ADMINISTRATOR,
-        hashed_password="x",
-        api_key="k",
-        address="addr",
-        latitude=None,
-        longitude=None,
-        active=True,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
+def test_resolve_unknown_origin_requires_coordinates_when_missing(prop_db):
+    sender = _owner(prop_db, oid=1, email="a@x.com", lat=None, lon=None)
     payload = PropagationMessageCreate(
         type=MessageFeatureType.UNKNOWN,
         hid="hid",
@@ -181,7 +143,7 @@ def test_resolve_unknown_origin_requires_coordinates_when_missing():
     )
     payload.position.latitude = "bad"  # type: ignore[assignment]
     with pytest.raises(mfs.GeoMessageSkipped):
-        mfs._resolve_unknown_origin(sender, payload)
+        mfs._resolve_unknown_origin(prop_db, sender, payload)
 
 
 def test_assert_unknown_rate_limit_accepts_owner_id_not_model(prop_db):
@@ -211,9 +173,10 @@ def test_unknown_uses_message_position_when_owner_coords_missing(prop_db):
     assert result["fanout"]["origin"]["source"] == "message_position"
     assert result["delivered_owner_ids"][0] == 2
     assert 2 in result["delivered_owner_ids"]
-    prop_db.refresh(sender)
-    assert sender.latitude == 40.7128
-    assert sender.longitude == -74.0060
+    live = prop_db.get(MemberLocation, sender.id)
+    assert live is not None
+    assert live.latitude == 40.7128
+    assert live.longitude == -74.0060
 
 
 def test_unknown_nearest_network_respects_account_limit(prop_db):

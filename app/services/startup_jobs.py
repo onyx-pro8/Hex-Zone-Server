@@ -32,7 +32,7 @@ from app.models import Owner
 from app.models.wellness_check_acknowledgement import WellnessCheckAcknowledgement
 from app.models.zone_message_event import ZoneMessageEvent
 from app.services import push_notification_service
-from app.services.geocoding_service import geocode_address
+from app.services.geocoding_service import geocode_address_best_effort
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def backfill_owner_coordinates() -> None:
         resolved = 0
         for owner in owners:
             try:
-                coords = geocode_address(owner.address)
+                coords = geocode_address_best_effort(owner.address)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Geocode raised for owner %s: %s", owner.id, exc)
                 coords = None

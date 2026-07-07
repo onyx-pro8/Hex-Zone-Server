@@ -9,6 +9,22 @@ from app.services.geospatial_service import evaluate_member_zones
 from app.services.zone_membership_service import refresh_owner_memberships
 
 
+def set_member_live_position(
+    db: Session, owner_id: int, latitude: float, longitude: float
+) -> None:
+    """Persist live GPS on `member_locations` without zone membership refresh."""
+    now = datetime.utcnow()
+    row = db.get(MemberLocation, owner_id)
+    if row is None:
+        row = MemberLocation(owner_id=owner_id, latitude=latitude, longitude=longitude)
+        db.add(row)
+    else:
+        row.latitude = latitude
+        row.longitude = longitude
+        row.updated_at = now
+    db.flush()
+
+
 def upsert_member_location(db: Session, owner_id: int, latitude: float, longitude: float) -> dict:
     now = datetime.utcnow()
     row = db.get(MemberLocation, owner_id)
@@ -19,18 +35,22 @@ def upsert_member_location(db: Session, owner_id: int, latitude: float, longitud
         row.latitude = latitude
         row.longitude = longitude
         row.updated_at = now
-    # Mirror the position onto the owner row so the dynamic-zone resolver and
-    # any other consumer of `owners.latitude / longitude` stays current.
+    # Live GPS stays on `member_locations` only. `owners.latitude/longitude` hold
+    # the geocoded registered home address (SENSOR / WELLNESS_CHECK routing).
     owner = db.get(Owner, owner_id)
-    if owner is not None:
-        owner.latitude = latitude
-        owner.longitude = longitude
-        owner.location_updated_at = now
     db.flush()
     zone_ids = evaluate_member_zones(db, latitude, longitude, [owner_id])
     if owner:
         zone_ids = refresh_owner_memberships(db, owner, latitude, longitude)
     return {"latitude": row.latitude, "longitude": row.longitude, "zones": zone_ids}
+
+
+def get_owner_live_coordinates(db: Session, owner_id: int) -> tuple[float, float] | None:
+    """Return the owner's latest live GPS fix from `member_locations`, if any."""
+    row = db.get(MemberLocation, owner_id)
+    if row is None:
+        return None
+    return float(row.latitude), float(row.longitude)
 
 
 def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[dict]:

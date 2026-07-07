@@ -1,5 +1,6 @@
 """Contract-compatible routes."""
 import asyncio
+import logging
 import re
 from datetime import datetime
 from typing import Any, Literal
@@ -24,6 +25,7 @@ from app.services import guest_api_service
 from app.services.access_policy import can_message_owner
 from app.services import message_block_service
 from app.services.account_type_policy import assert_owner_may_edit_network_id
+from app.services.owner_home_service import apply_owner_home_geocode
 
 router = APIRouter(tags=["contract"])
 
@@ -435,12 +437,8 @@ async def get_zones(owner: Owner = Depends(require_auth), db: Session = Depends(
     response_description="Success envelope containing authenticated contract profile.",
 )
 async def get_me(owner: Owner = Depends(require_auth), db: Session = Depends(get_db)):
-    # Canonical map_center comes from `owners.latitude / owners.longitude`,
-    # populated by `upsert_member_location`, registration-time geocoding, and
-    # the startup background backfill in `app.services.startup_jobs`. This
-    # endpoint never blocks on a network call — if the columns are NULL the
-    # client just gets `map_center: null` and the backfill loop will fill it
-    # in shortly afterwards.
+    # Home map center comes from geocoded `owners.address` → `owners.latitude/longitude`.
+    # Live GPS is tracked separately in `member_locations`.
     map_center: MemberLocationResponse | None = None
     if owner.latitude is not None and owner.longitude is not None:
         map_center = MemberLocationResponse(
@@ -1229,9 +1227,20 @@ async def put_my_settings(
 ):
     owner.broadcast_name = (payload.broadcast_name or "").strip()
 
+    previous_address = (owner.address or "").strip()
     formatted_address = _address_model_to_single_line(payload.address)
     if formatted_address:
         owner.address = formatted_address
+
+    if formatted_address and formatted_address != previous_address:
+        try:
+            apply_owner_home_geocode(owner, force=True)
+        except Exception as exc:  # pragma: no cover - never block settings save
+            logging.getLogger(__name__).warning(
+                "Home geocode failed after settings save for owner %s: %s",
+                owner.id,
+                exc,
+            )
 
     owner.sn_webhook = (payload.shared_notification.webhook or "").strip()
     owner.sn_periodical_check_sec = (

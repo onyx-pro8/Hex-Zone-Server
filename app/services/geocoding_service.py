@@ -1,12 +1,12 @@
-"""Forward geocoding helpers used to populate `owners.latitude/longitude`.
+"""Forward geocoding helpers used to populate home coordinates on `owners`.
 
-The dynamic-zone resolver and the `/me` endpoint both expect every owner to
-expose a canonical map center on `owners.latitude / owners.longitude`. Users
-provide a postal address at registration but no coordinates, so we resolve the
-address to a `(lat, lon)` pair via OpenStreetMap Nominatim with a Photon
-fallback. Failures are swallowed and return `None`; callers must handle
-`None` (typically by leaving the columns NULL and trying again on the next
-login / location update).
+`owners.latitude / owners.longitude` store the **registered home address**
+(geocoded from `owners.address`). Live GPS is tracked separately in
+`member_locations`. Users provide a postal address at registration but no
+coordinates, so we resolve the address to a `(lat, lon)` pair via OpenStreetMap
+Nominatim with a Photon fallback. Failures are swallowed and return `None`;
+callers must handle `None` (typically by leaving the columns NULL and trying
+again on the next login / settings save).
 
 This module intentionally lives alongside `area_boundary_service` so we can
 reuse its rate-limited HTTP client and shared User-Agent header.
@@ -146,4 +146,39 @@ def geocode_address(address: Optional[str]) -> Optional[tuple[float, float]]:
         return coords
 
     logger.info("No geocoding match found for address %r", cleaned)
+    return None
+
+
+def geocode_address_best_effort(address: Optional[str]) -> Optional[tuple[float, float]]:
+    """Resolve an address to coordinates, trying progressively shorter queries.
+
+    When the full string fails (typos, missing house number, etc.), retries with
+    trailing comma-separated fragments so Nominatim/Photon can return the most
+    probable match (e.g. street + city when the house number is wrong).
+    """
+    cleaned = _normalise_address(address)
+    if not cleaned:
+        return None
+
+    coords = geocode_address(cleaned)
+    if coords is not None:
+        return coords
+
+    parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+    if len(parts) < 2:
+        return None
+
+    for start in range(1, len(parts)):
+        fragment = ", ".join(parts[start:])
+        if len(fragment) < 3:
+            continue
+        coords = geocode_address(fragment)
+        if coords is not None:
+            logger.info(
+                "Geocoded address %r via shorter fragment %r",
+                cleaned,
+                fragment,
+            )
+            return coords
+
     return None

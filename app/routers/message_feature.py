@@ -56,7 +56,7 @@ from app.domain.service_pa_topics import ServicePaValidationError
 from app.services import push_notification_service
 from app.services import wellness_ack_service
 from app.services import alarm_read_service
-from app.services.member_service import upsert_member_location
+from app.services.member_service import get_owner_live_coordinates, upsert_member_location
 from app.websocket.manager import ws_manager
 
 router = APIRouter(prefix="/message-feature", tags=["message-feature"])
@@ -155,7 +155,7 @@ async def update_member_location(
         "those zone(s) — across all accounts. Used to populate the PRIVATE "
         "message recipient picker so it matches server-side delivery rules. "
         "Pass **`latitude`/`longitude`** to use a live fix; otherwise the "
-        "caller's stored `owners.latitude/longitude` is used."
+        "caller's latest live GPS from `member_locations` is used."
     ),
 )
 async def list_in_zone_members(
@@ -168,8 +168,9 @@ async def list_in_zone_members(
     if not me:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
 
-    lat = latitude if latitude is not None else me.latitude
-    lon = longitude if longitude is not None else me.longitude
+    live = get_owner_live_coordinates(db, me.id)
+    lat = latitude if latitude is not None else (live[0] if live else None)
+    lon = longitude if longitude is not None else (live[1] if live else None)
     if lat is None or lon is None:
         return {"zone_ids": [], "members": []}
 
