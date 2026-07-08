@@ -252,6 +252,163 @@ def test_unknown_delivers_global_nearest_regardless_of_zone_id(net_db):
     assert 2 in result["delivered_owner_ids"]
 
 
+def test_overlapping_primary_and_secondary_networks_all_deliver(net_db, monkeypatch):
+    """A point inside network A's primary zone and network B's secondary zone reaches both."""
+    net_a = "NET-A"
+    net_b = "NET-B"
+    admin_a = _owner(
+        net_db,
+        oid=1,
+        email="admin_a@x.com",
+        network_id=net_a,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.61,
+        lon=-122.33,
+    )
+    admin_a.account_owner_id = admin_a.id
+    member_a = _owner(
+        net_db,
+        oid=2,
+        email="member_a@x.com",
+        network_id=net_a,
+        role=OwnerRole.USER,
+        account_owner_id=admin_a.id,
+        lat=47.62,
+        lon=-122.34,
+    )
+    admin_b = _owner(
+        net_db,
+        oid=3,
+        email="admin_b@x.com",
+        network_id=net_b,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.61,
+        lon=-122.33,
+    )
+    admin_b.account_owner_id = admin_b.id
+    creator_b = _owner(
+        net_db,
+        oid=4,
+        email="creator_b@x.com",
+        network_id=net_b,
+        role=OwnerRole.USER,
+        account_owner_id=admin_b.id,
+        lat=47.61,
+        lon=-122.33,
+    )
+    net_db.commit()
+
+    monkeypatch.setattr(
+        nzp,
+        "evaluate_zone_records_containing_point",
+        lambda db, lat, lon: [401, 402],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "zone_ids_for_zone_records",
+        lambda db, ids: [net_a, net_b],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "_zone_rows_for_records",
+        lambda db, ids: [
+            # Network A: primary zone (created by its admin).
+            _zone_row(record_id=401, network_id=net_a, creator_id=admin_a.id, owner_id=admin_a.id),
+            # Network B: secondary zone only (created by a member, not its admin).
+            _zone_row(record_id=402, network_id=net_b, creator_id=creator_b.id, owner_id=creator_b.id),
+        ],
+    )
+
+    _, _, recipients, meta = nzp.resolve_network_geo_propagation_recipients(
+        net_db,
+        admin_a,
+        latitude=47.61,
+        longitude=-122.33,
+    )
+    # Network A (primary) → admin + invited member; Network B (secondary) → creator only.
+    assert set(recipients) == {admin_a.id, member_a.id, creator_b.id}
+    assert set(meta["matched_network_zone_ids"]) == {net_a, net_b}
+
+
+def test_overlapping_two_primary_networks_all_deliver(net_db, monkeypatch):
+    """A point inside two networks' primary zones reaches both admins + their members."""
+    net_a = "NET-PA"
+    net_b = "NET-PB"
+    admin_a = _owner(
+        net_db,
+        oid=1,
+        email="admin_a@x.com",
+        network_id=net_a,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.61,
+        lon=-122.33,
+    )
+    admin_a.account_owner_id = admin_a.id
+    member_a = _owner(
+        net_db,
+        oid=2,
+        email="member_a@x.com",
+        network_id=net_a,
+        role=OwnerRole.USER,
+        account_owner_id=admin_a.id,
+        lat=47.62,
+        lon=-122.34,
+    )
+    admin_b = _owner(
+        net_db,
+        oid=3,
+        email="admin_b@x.com",
+        network_id=net_b,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.61,
+        lon=-122.33,
+    )
+    admin_b.account_owner_id = admin_b.id
+    member_b = _owner(
+        net_db,
+        oid=4,
+        email="member_b@x.com",
+        network_id=net_b,
+        role=OwnerRole.USER,
+        account_owner_id=admin_b.id,
+        lat=47.61,
+        lon=-122.33,
+    )
+    net_db.commit()
+
+    monkeypatch.setattr(
+        nzp,
+        "evaluate_zone_records_containing_point",
+        lambda db, lat, lon: [501, 502],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "zone_ids_for_zone_records",
+        lambda db, ids: [net_a, net_b],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "_zone_rows_for_records",
+        lambda db, ids: [
+            _zone_row(record_id=501, network_id=net_a, creator_id=admin_a.id, owner_id=admin_a.id),
+            _zone_row(record_id=502, network_id=net_b, creator_id=admin_b.id, owner_id=admin_b.id),
+        ],
+    )
+
+    _, _, recipients, meta = nzp.resolve_network_geo_propagation_recipients(
+        net_db,
+        admin_a,
+        latitude=47.61,
+        longitude=-122.33,
+    )
+    assert set(recipients) == {admin_a.id, member_a.id, admin_b.id, member_b.id}
+    assert set(meta["matched_network_zone_ids"]) == {net_a, net_b}
+
+
 def test_owner_participates_in_network_admin_and_invited(net_db):
     network = "NET-PART"
     admin = _owner(

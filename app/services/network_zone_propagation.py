@@ -245,6 +245,11 @@ def resolve_network_geo_propagation_recipients(
   geometry at the sender's coordinates. This allows **non-invited** owners (not on
   the network account) who are physically inside another network's primary zone to
   reach that network's administrator and invited members.
+
+  When the point falls inside zones from **multiple** networks, **all** matched
+  networks are served, each by its own tier (primary → admin + members, secondary →
+  creator). Recipients across networks are merged; ``matched_network_zone_ids`` in
+  the returned meta lists every network reached.
     """
     zone_record_ids = evaluate_zone_records_containing_point(db, float(latitude), float(longitude))
     zone_rows = _zone_rows_for_records(db, zone_record_ids)
@@ -285,7 +290,12 @@ def resolve_network_geo_propagation_recipients(
         elif secondary_rows:
             secondary_matches.append((network_id, network_rows))
 
-    chosen = primary_matches or secondary_matches
+    # Every matched network is served by its own tier: a network with a primary
+    # zone at the point resolves to admin + invited members; a network matched only
+    # by a secondary zone resolves to that zone's creator. Unioning the two lists
+    # (instead of primary-tier winning globally) lets a single point that overlaps
+    # multiple networks fan out to all of them simultaneously.
+    chosen = primary_matches + secondary_matches
     partial_results: list[tuple[list[str], list[int], list[int], dict]] = []
     for network_id, network_rows in chosen:
         partial = _recipients_for_network_zone_rows(
