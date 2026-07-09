@@ -78,20 +78,18 @@ class Settings(BaseSettings):
     H3_MIN_RESOLUTION: int = 0
     H3_MAX_RESOLUTION: int = 15
 
-    # Zone capacity policy (per account: administrator + linked members share quota)
-    # Defaults keep current behavior (3 zones per account) while reserving at least
-    # one slot for standard users. Increase MAX_ZONES_TOTAL to 5 in future
-    # deployments without code changes.
+    # Zone capacity policy (per user via zones.creator_id)
+    # Each user may create up to MAX_ZONES_TOTAL zones (default 3).
     MAX_ZONES_TOTAL: int = 3
     RESERVED_FOR_STANDARD_USERS: int = 1
-    # Legacy env aliases for MAX_ZONES_TOTAL (per-account cap).
+    # Legacy env aliases for MAX_ZONES_TOTAL (per-user cap).
     MAX_ZONES_PER_ACCOUNT: int | None = None
     MAX_ZONES_PER_USER: int | None = None
     REGISTRATION_CODE_EXPIRE_HOURS: int = 24
 
     @model_validator(mode="after")
     def _resolve_zone_capacity(self) -> "Settings":
-        """Accept legacy env names; MAX_ZONES_TOTAL is the per-account cap."""
+        """Accept legacy env names; MAX_ZONES_TOTAL is the per-user cap."""
         for legacy in (self.MAX_ZONES_PER_ACCOUNT, self.MAX_ZONES_PER_USER):
             if legacy is not None:
                 object.__setattr__(self, "MAX_ZONES_TOTAL", int(legacy))

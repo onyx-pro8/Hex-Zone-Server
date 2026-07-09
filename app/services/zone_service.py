@@ -8,13 +8,12 @@ from app.core.h3_utils import has_h3_overlap, validate_h3_cell
 from app.services.access_policy import visible_zone_owner_ids
 from app.services.zone_policy import (
     account_owner_ids_for_policy,
-    build_capabilities,
-    count_zones_for_owners,
-    enforce_can_create,
     ensure_unique_zone_name,
     ensure_zone_delete_allowed,
     ensure_zone_edit_allowed,
+    enforce_can_create,
     normalize_zone_name,
+    prepare_create_zone_policy,
 )
 
 CONTRACT_TO_MODEL_ZONE_TYPE = {
@@ -81,10 +80,10 @@ def _serialize_zone(zone: Zone) -> dict:
 
 
 def create_zone(db: Session, owner: Owner, payload: dict) -> dict:
-    account_owner_ids = account_owner_ids_for_policy(db, owner)
-    total_zones = count_zones_for_owners(db, account_owner_ids)
-    capabilities = build_capabilities(owner.role.value, total_zones)
+    capabilities = prepare_create_zone_policy(db, owner)
     enforce_can_create(capabilities)
+
+    account_owner_ids = account_owner_ids_for_policy(db, owner)
 
     zone_type = payload["type"]
     if zone_type not in CONTRACT_TO_MODEL_ZONE_TYPE:

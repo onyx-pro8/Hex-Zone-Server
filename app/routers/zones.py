@@ -32,13 +32,13 @@ from app.services.government_zone_service import (
 )
 from app.services.zone_policy import (
     account_owner_ids_for_policy,
-    build_capabilities,
-    count_zones_for_owners,
+    capabilities_for_owner,
     enforce_can_create,
     ensure_unique_zone_name,
     ensure_zone_delete_allowed,
     ensure_zone_edit_allowed,
     normalize_zone_name,
+    prepare_create_zone_policy,
 )
 
 router = APIRouter(prefix="/zones", tags=["zones"])
@@ -658,10 +658,10 @@ async def create_zone(
 
     normalized = _normalize_payload(zone.model_dump(exclude_none=True), partial=False)
 
-    account_owner_ids = account_owner_ids_for_policy(db, owner)
-    total_zones = count_zones_for_owners(db, account_owner_ids)
-    capabilities = build_capabilities(owner.role.value, total_zones)
+    capabilities = prepare_create_zone_policy(db, owner)
     enforce_can_create(capabilities)
+
+    account_owner_ids = account_owner_ids_for_policy(db, owner)
 
     geometry = normalized.get("geometry", {})
     config = normalized.get("config", {})
@@ -796,9 +796,7 @@ async def get_zone_capabilities(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"message": "Owner not found", "error_code": "OWNER_NOT_FOUND"},
         )
-    owner_ids = account_owner_ids_for_policy(db, owner)
-    total_zones = count_zones_for_owners(db, owner_ids)
-    return ZoneCapabilitiesResponse.model_validate(build_capabilities(owner.role.value, total_zones).to_dict())
+    return ZoneCapabilitiesResponse.model_validate(capabilities_for_owner(db, owner).to_dict())
 
 
 def _resolve_dynamic_cluster_for_owner(

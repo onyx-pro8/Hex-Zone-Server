@@ -1,4 +1,4 @@
-"""Centralized per-account zone quota, naming, and edit policy helpers."""
+"""Centralized per-user zone quota (by creator_id), naming, and edit policy helpers."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -39,16 +39,12 @@ class ZoneCapabilities:
         }
 
 
-def _policy_limits() -> tuple[int, int]:
-    max_total = max(1, int(settings.MAX_ZONES_TOTAL))
-    reserved = max(0, int(settings.RESERVED_FOR_STANDARD_USERS))
-    if reserved >= max_total:
-        reserved = max_total - 1
-    return max_total, reserved
+def _max_zones_per_user() -> int:
+    return max(1, int(settings.MAX_ZONES_TOTAL))
 
 
 def lock_account_for_zone_policy(db: Session, root_owner_id: int) -> list[int]:
-    """Lock all owners in account scope to avoid quota races."""
+    """Lock all owners in account scope (used for account-wide name uniqueness)."""
     rows = db.execute(
         select(Owner.id)
         .where((Owner.id == root_owner_id) | (Owner.account_owner_id == root_owner_id))
@@ -61,37 +57,41 @@ def lock_account_for_zone_policy(db: Session, root_owner_id: int) -> list[int]:
     return owner_ids
 
 
-def count_zones_for_owners(db: Session, owner_ids: Sequence[int]) -> int:
-    if not owner_ids:
-        return 0
-    total = db.execute(select(func.count(Zone.id)).where(Zone.owner_id.in_(tuple(owner_ids)))).scalar()
+def lock_creator_for_zone_policy(db: Session, creator_id: int) -> int:
+    """Lock the creator row to avoid per-user quota races on concurrent creates."""
+    row = db.execute(
+        select(Owner.id).where(Owner.id == creator_id).with_for_update()
+    ).first()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "OWNER_NOT_FOUND", "message": "Owner not found."},
+        )
+    return creator_id
+
+
+def count_zones_for_creator(db: Session, creator_id: int) -> int:
+    """Count zones created by this user (`zones.creator_id`)."""
+    total = db.execute(
+        select(func.count(Zone.id)).where(Zone.creator_id == creator_id)
+    ).scalar()
     return int(total or 0)
 
 
 def build_capabilities(role: str, total_zones: int) -> ZoneCapabilities:
-    max_total, reserved = _policy_limits()
+    max_total = _max_zones_per_user()
     remaining_total = max(0, max_total - total_zones)
-    is_admin = role == "administrator"
-    if is_admin:
-        remaining_for_role = max(0, max_total - reserved - total_zones)
-    else:
-        remaining_for_role = remaining_total
-    can_create = remaining_for_role > 0 and remaining_total > 0
+    can_create = remaining_total > 0
     reason = None
     if not can_create:
-        if remaining_total <= 0:
-            reason = "Maximum zone capacity reached for this account."
-        elif is_admin:
-            reason = "A standard-user slot must remain available."
-        else:
-            reason = "No standard-user slots remain available."
+        reason = f"Maximum of {max_total} zones per user reached."
     return ZoneCapabilities(
         role=role,
         can_create_zone=can_create,
         remaining_total=remaining_total,
-        remaining_for_role=remaining_for_role,
+        remaining_for_role=remaining_total,
         max_total=max_total,
-        reserved_for_standard_users=reserved,
+        reserved_for_standard_users=0,
         reason=reason,
     )
 
@@ -99,19 +99,12 @@ def build_capabilities(role: str, total_zones: int) -> ZoneCapabilities:
 def enforce_can_create(capabilities: ZoneCapabilities) -> None:
     if capabilities.can_create_zone:
         return
-    if capabilities.remaining_total <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": "ZONE_QUOTA_MAX_TOTAL_REACHED",
-                "message": "Maximum zone capacity has been reached for this account.",
-            },
-        )
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={
-            "error_code": "ZONE_QUOTA_RESERVED_FOR_STANDARD",
-            "message": "At least one zone slot is reserved for standard users.",
+            "error_code": "ZONE_QUOTA_MAX_TOTAL_REACHED",
+            "message": capabilities.reason
+            or "Maximum zone capacity has been reached for this user.",
         },
     )
 
@@ -169,9 +162,15 @@ def account_owner_ids_for_policy(db: Session, owner: Owner) -> list[int]:
     return lock_account_for_zone_policy(db, root_id)
 
 
+def prepare_create_zone_policy(db: Session, owner: Owner) -> ZoneCapabilities:
+    """Lock creator and evaluate whether this user may create another zone."""
+    lock_creator_for_zone_policy(db, owner.id)
+    total = count_zones_for_creator(db, owner.id)
+    return build_capabilities(owner.role.value, total)
+
+
 def capabilities_for_owner(db: Session, owner: Owner) -> ZoneCapabilities:
-    owner_ids = account_owner_ids_for_policy(db, owner)
-    total = count_zones_for_owners(db, owner_ids)
+    total = count_zones_for_creator(db, owner.id)
     return build_capabilities(owner.role.value, total)
 
 
