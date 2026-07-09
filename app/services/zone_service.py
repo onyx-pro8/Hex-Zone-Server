@@ -12,6 +12,7 @@ from app.services.zone_policy import (
     count_zones_for_owners,
     enforce_can_create,
     ensure_unique_zone_name,
+    ensure_zone_delete_allowed,
     ensure_zone_edit_allowed,
     normalize_zone_name,
 )
@@ -175,7 +176,8 @@ def update_zone(db: Session, owner: Owner, zone_id: str, payload: dict) -> dict:
 
 
 def delete_zone(db: Session, owner: Owner, zone_id: str) -> None:
-    zone = db.query(Zone).filter(Zone.owner_id == owner.id, Zone.zone_id == zone_id).first()
+    zone = db.query(Zone).filter(Zone.zone_id == zone_id).first()
     if not zone:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Zone not found")
+    ensure_zone_delete_allowed(db, owner, zone)
     db.delete(zone)

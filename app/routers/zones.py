@@ -36,6 +36,7 @@ from app.services.zone_policy import (
     count_zones_for_owners,
     enforce_can_create,
     ensure_unique_zone_name,
+    ensure_zone_delete_allowed,
     ensure_zone_edit_allowed,
     normalize_zone_name,
 )
@@ -1274,32 +1275,28 @@ async def update_zone(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete zone",
     description=(
-        "Delete a zone owned by the authenticated caller. "
-        "This route accepts shared zone identifiers (zone_id string), not DB record IDs."
+        "Delete a zone by DB record id (`zone.id`). "
+        "The zone owner may delete their zone; the account administrator may delete member zones."
     ),
     responses={
-        422: {
-            "description": "Invalid shared zone identifier.",
+        403: {
+            "description": "Caller is not allowed to delete this zone.",
         },
         404: {
-            "description": "Zone not found for the authenticated owner.",
+            "description": "Owner or zone not found.",
+        },
+        422: {
+            "description": "Invalid zone id path parameter.",
         },
     },
     response_description="Zone deleted successfully.",
 )
 async def delete_zone(
-    zone_id: str = Path(
-        ...,
-        min_length=1,
-        description=(
-            "Shared zone identifier string (`zone.zone_id`) for the caller-owned zone "
-            "to remove."
-        ),
-    ),
+    zone_id: int = Path(..., ge=1, description="Zone DB record id (`zone.id`)."),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete a zone."""
+    """Delete a zone by record id."""
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
         raise HTTPException(
@@ -1307,26 +1304,13 @@ async def delete_zone(
             detail="Owner not found",
         )
 
-    if is_system_administrator(owner):
-        target = zone_crud.get_zone(db, zone_id=zone_id)
-        if not target:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Zone not found",
-            )
-        allowed_ids = set(visible_zone_owner_ids(db, owner))
-        if target.owner_id not in allowed_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Forbidden: cannot delete this zone",
-            )
-        db.delete(target)
-        deleted = True
-    else:
-        deleted = zone_crud.delete_zone(db, zone_id, owner_id=current_user["user_id"])
-    if not deleted:
+    target = zone_crud.get_zone_by_record_id_with_geojson(db, zone_id)
+    if not target:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Zone not found",
         )
+
+    ensure_zone_delete_allowed(db, owner, target)
+    db.delete(target)
     db.commit()

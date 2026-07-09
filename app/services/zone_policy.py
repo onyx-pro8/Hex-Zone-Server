@@ -1,4 +1,4 @@
-"""Centralized zone quota, naming, and edit policy helpers."""
+"""Centralized per-account zone quota, naming, and edit policy helpers."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models import Owner, Zone
-from app.services.access_policy import account_root_id
+from app.services.access_policy import account_root_id, visible_zone_owner_ids
 from app.services.account_type_policy import is_system_administrator
 
 ZONE_NAME_MIN_LENGTH = 1
@@ -80,7 +80,7 @@ def build_capabilities(role: str, total_zones: int) -> ZoneCapabilities:
     reason = None
     if not can_create:
         if remaining_total <= 0:
-            reason = "Maximum zone capacity reached."
+            reason = "Maximum zone capacity reached for this account."
         elif is_admin:
             reason = "A standard-user slot must remain available."
         else:
@@ -104,7 +104,7 @@ def enforce_can_create(capabilities: ZoneCapabilities) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "error_code": "ZONE_QUOTA_MAX_TOTAL_REACHED",
-                "message": "Maximum zone capacity has been reached.",
+                "message": "Maximum zone capacity has been reached for this account.",
             },
         )
     raise HTTPException(
@@ -188,3 +188,25 @@ def ensure_zone_edit_allowed(owner: Owner, zone: Zone) -> None:
                 "message": "You can edit only zones you created.",
             },
         )
+
+
+def ensure_zone_delete_allowed(db: Session, owner: Owner, zone: Zone) -> None:
+    """Zone owner may delete; account administrator may delete member zones."""
+    if is_system_administrator(owner):
+        return
+
+    if zone.owner_id == owner.id:
+        return
+
+    if owner.role.value == "administrator":
+        allowed_ids = set(visible_zone_owner_ids(db, owner))
+        if zone.owner_id in allowed_ids:
+            return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error_code": "ZONE_DELETE_FORBIDDEN",
+            "message": "You can delete only your own zones, or member zones as the account administrator.",
+        },
+    )

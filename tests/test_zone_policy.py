@@ -175,6 +175,68 @@ async def test_update_auth_and_normalized_name(zone_test_db, policy_limits):
 
 
 @pytest.mark.asyncio
+async def test_owner_can_delete_zone_by_record_id(zone_test_db, policy_limits):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        _, admin_token = await _register_and_login(client, "admin-del@example.com", "administrator", "del-shared")
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        created = await client.post("/zones/", headers=headers, json=_zone_payload("Delete Me"))
+        assert created.status_code == 201
+        zone_record_id = created.json()["id"]
+
+        deleted = await client.delete(f"/zones/{zone_record_id}", headers=headers)
+        assert deleted.status_code == 204
+
+        missing = await client.get(f"/zones/{zone_record_id}", headers=headers)
+        assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_admin_can_delete_member_zone(zone_test_db, policy_limits):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        admin_id, admin_token = await _register_and_login(client, "admin-mdel@example.com", "administrator", "mdel-shared")
+        _, user_token = await _register_and_login(
+            client,
+            "user-mdel@example.com",
+            "user",
+            "mdel-shared",
+            account_owner_id=admin_id,
+        )
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+        user_headers = {"Authorization": f"Bearer {user_token}"}
+
+        created = await client.post("/zones/", headers=user_headers, json=_zone_payload("Member Zone"))
+        assert created.status_code == 201
+        zone_record_id = created.json()["id"]
+
+        deleted = await client.delete(f"/zones/{zone_record_id}", headers=admin_headers)
+        assert deleted.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_delete_admin_zone(zone_test_db, policy_limits):
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        admin_id, admin_token = await _register_and_login(client, "admin-ndel@example.com", "administrator", "ndel-shared")
+        _, user_token = await _register_and_login(
+            client,
+            "user-ndel@example.com",
+            "user",
+            "ndel-shared",
+            account_owner_id=admin_id,
+        )
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+        user_headers = {"Authorization": f"Bearer {user_token}"}
+
+        created = await client.post("/zones/", headers=admin_headers, json=_zone_payload("Admin Zone"))
+        assert created.status_code == 201
+        zone_record_id = created.json()["id"]
+
+        forbidden = await client.delete(f"/zones/{zone_record_id}", headers=user_headers)
+        assert forbidden.status_code == 403
+        assert forbidden.json()["error_code"] == "ZONE_DELETE_FORBIDDEN"
+
+
+@pytest.mark.asyncio
 async def test_concurrent_create_at_boundary_allows_single_success(zone_test_db, policy_limits):
     original_max = settings.MAX_ZONES_TOTAL
     original_reserved = settings.RESERVED_FOR_STANDARD_USERS

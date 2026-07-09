@@ -1,10 +1,10 @@
 # Zones API capability contract
 
-This backend enforces zone capacity and edit authorization in server-side policy.
+This backend enforces per-account zone capacity and edit authorization in server-side policy.
 
 ## Policy defaults
 
-- `MAX_ZONES_TOTAL=3`
+- `MAX_ZONES_TOTAL=3` (maximum **3 zones per account**; administrator and linked members share the quota)
 - `RESERVED_FOR_STANDARD_USERS=1`
 
 Administrators cannot consume slots reserved for standard users.
