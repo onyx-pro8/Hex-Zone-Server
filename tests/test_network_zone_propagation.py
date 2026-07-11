@@ -597,6 +597,17 @@ def test_private_plus_secondary_zone_panic_reaches_full_network(net_db, monkeypa
         lon=-122.3330,
         account_type=AccountType.PRIVATE_PLUS,
     )
+    sibling = _owner(
+        net_db,
+        oid=3,
+        email="pp-sibling@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        lat=47.6080,
+        lon=-122.3340,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
     net_db.commit()
     _patch_secondary_zone(monkeypatch, network=network, admin=admin, member=member)
 
@@ -605,6 +616,49 @@ def test_private_plus_secondary_zone_panic_reaches_full_network(net_db, monkeypa
         hid="device-pp",
         position=CoordinatePayload(latitude=47.6070, longitude=-122.3330),
         msg={"description": "family panic"},
+    )
+    result = mfs.create_geo_propagated_message(net_db, member, payload)
+    assert result["fanout"]["strategy"] == "private_plus_network_shared"
+    assert set(result["delivered_owner_ids"]) == {admin.id, sibling.id}
+
+
+def test_private_plus_outside_zone_panic_reaches_full_network(net_db, monkeypatch):
+    network = "NET-PP-OUT"
+    admin = _owner(
+        net_db,
+        oid=1,
+        email="pp-out-admin@x.com",
+        network_id=network,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.6062,
+        lon=-122.3321,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    admin.account_owner_id = admin.id
+    member = _owner(
+        net_db,
+        oid=2,
+        email="pp-out-member@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        lat=47.6070,
+        lon=-122.3330,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    net_db.commit()
+    monkeypatch.setattr(
+        nzp,
+        "evaluate_zone_records_containing_point",
+        lambda db, lat, lon: [],
+    )
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.PANIC,
+        hid="device-pp-out",
+        position=CoordinatePayload(latitude=47.6070, longitude=-122.3330),
+        msg={"description": "family panic outside zone"},
     )
     result = mfs.create_geo_propagated_message(net_db, member, payload)
     assert result["fanout"]["strategy"] == "private_plus_network_shared"

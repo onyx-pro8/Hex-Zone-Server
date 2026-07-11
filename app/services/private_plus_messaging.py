@@ -69,16 +69,20 @@ def apply_private_plus_network_shared_recipients(
     zone_meta: dict,
     exclude_sender_id: int | None,
 ) -> tuple[list[int], dict]:
-    """Expand delivery to the full Private+ network when sender is inside any acceptable zone.
+    """Fan out PANIC / NS_PANIC / PA / SERVICE to every active member + admin on Private+.
 
-    SENSOR, WELLNESS_CHECK, PRIVATE, UNKNOWN, and ACCESS types are unchanged.
+    Applies whenever the sender belongs to a Private+ network, regardless of primary vs
+    secondary acceptable-zone routing. SENSOR, WELLNESS_CHECK, PRIVATE, UNKNOWN, and ACCESS
+    types are unchanged.
     """
+    _ = sender_zone_record_ids  # zone geometry still recorded in zone_meta for audit
     if not private_plus_network_shared_delivery_applies(db, sender, message_type):
-        return recipient_owner_ids, zone_meta
-    if not sender_zone_record_ids:
         return recipient_owner_ids, zone_meta
 
     network_id = (sender.zone_id or "").strip()
+    if not network_id:
+        return recipient_owner_ids, zone_meta
+
     admin = resolve_network_administrator(db, network_id)
     if admin is None:
         return recipient_owner_ids, zone_meta
