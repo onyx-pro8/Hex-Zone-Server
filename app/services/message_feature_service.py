@@ -44,6 +44,7 @@ from app.services.network_zone_propagation import (
     resolve_network_administrator,
     resolve_network_geo_propagation_recipients,
 )
+from app.services.private_plus_messaging import apply_private_plus_network_shared_recipients
 from app.services.owner_home_service import (
     apply_owner_home_geocode,
     get_owner_home_coordinates,
@@ -467,6 +468,16 @@ def _zone_based_recipients(
         )
     )
     zone_meta = {**zone_meta, "geo_evaluation_source": geo_source}
+
+    recipient_owner_ids, zone_meta = apply_private_plus_network_shared_recipients(
+        db,
+        sender=sender,
+        message_type=canonical_type,
+        sender_zone_record_ids=sender_zone_record_ids,
+        recipient_owner_ids=recipient_owner_ids,
+        zone_meta=zone_meta,
+        exclude_sender_id=sender.id if exclude_sender_from_recipients else None,
+    )
 
     if scope == MessageScope.PRIVATE and payload.receiver_owner_id is None:
         raise ValueError("receiver_owner_id is required for private-scope message types")

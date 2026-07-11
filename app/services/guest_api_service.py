@@ -22,6 +22,7 @@ from app.services import message_block_service
 from app.services.access_policy import zone_listing_owner_ids
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
+from app.services.private_plus_messaging import geo_event_visible_in_private_plus_shared_inbox
 from app.core.config import settings
 from app.websocket.manager import ws_manager
 
@@ -301,6 +302,14 @@ def list_geo_propagation_events_for_owner_inbox(
         meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
         delivered = meta.get("delivered_owner_ids")
         if isinstance(delivered, list) and owner.id in delivered:
+            visible.append(row)
+            continue
+        if geo_event_visible_in_private_plus_shared_inbox(
+            db,
+            owner,
+            sender_id=row.sender_id,
+            message_type=row.type,
+        ):
             visible.append(row)
     return visible
 

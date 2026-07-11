@@ -46,6 +46,7 @@ from app.domain.message_types import (
     normalize_message_type,
 )
 from app.services import guest_access_service, message_block_service, message_feature_service, permission_service
+from app.services.private_plus_messaging import geo_event_visible_in_private_plus_shared_inbox
 from app.services.message_feature_service import (
     GeoMessageSkipped,
     PrivateScopeRecipientError,
@@ -874,6 +875,10 @@ async def list_new_feature_messages(
         .all()
     )
 
+    viewer = owner_crud.get_owner(db, viewer_id)
+    if not viewer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+
     def _visible_to_viewer(row: ZoneMessageEvent) -> bool:
         # Mirror the inbox rule: a caller only sees events they sent, that target
         # them, or that they were a delivered recipient of. Prevents the polling
@@ -882,7 +887,14 @@ async def list_new_feature_messages(
             return True
         meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
         delivered = meta.get("delivered_owner_ids")
-        return isinstance(delivered, list) and viewer_id in delivered
+        if isinstance(delivered, list) and viewer_id in delivered:
+            return True
+        return geo_event_visible_in_private_plus_shared_inbox(
+            db,
+            viewer,
+            sender_id=row.sender_id,
+            message_type=row.type,
+        )
 
     return [
         {

@@ -36,6 +36,7 @@ def _owner(
     account_owner_id: int | None,
     lat: float,
     lon: float,
+    account_type: AccountType = AccountType.PRIVATE,
 ) -> Owner:
     owner = Owner(
         id=oid,
@@ -43,7 +44,7 @@ def _owner(
         zone_id=network_id,
         first_name="T",
         last_name=str(oid),
-        account_type=AccountType.PRIVATE,
+        account_type=account_type,
         role=role,
         account_owner_id=account_owner_id,
         hashed_password="x",
@@ -549,3 +550,140 @@ def test_non_invited_user_inside_foreign_primary_zone(net_db, monkeypatch):
     assert meta["strategy"] == "primary_zone_network_members"
     assert meta["network_zone_id"] == network
     assert set(recipients) == {admin.id, invited.id}
+
+
+def _patch_secondary_zone(monkeypatch, *, network: str, admin: Owner, member: Owner, record_id: int = 201):
+    monkeypatch.setattr(
+        nzp,
+        "evaluate_zone_records_containing_point",
+        lambda db, lat, lon: [record_id],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "zone_ids_for_zone_records",
+        lambda db, ids: [network],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "_zone_rows_for_records",
+        lambda db, ids: [
+            _zone_row(record_id=record_id, network_id=network, creator_id=member.id, owner_id=member.id)
+        ],
+    )
+
+
+def test_private_plus_secondary_zone_panic_reaches_full_network(net_db, monkeypatch):
+    network = "NET-PP"
+    admin = _owner(
+        net_db,
+        oid=1,
+        email="pp-admin@x.com",
+        network_id=network,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.6062,
+        lon=-122.3321,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    admin.account_owner_id = admin.id
+    member = _owner(
+        net_db,
+        oid=2,
+        email="pp-member@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        lat=47.6070,
+        lon=-122.3330,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    net_db.commit()
+    _patch_secondary_zone(monkeypatch, network=network, admin=admin, member=member)
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.PANIC,
+        hid="device-pp",
+        position=CoordinatePayload(latitude=47.6070, longitude=-122.3330),
+        msg={"description": "family panic"},
+    )
+    result = mfs.create_geo_propagated_message(net_db, member, payload)
+    assert result["fanout"]["strategy"] == "private_plus_network_shared"
+    assert set(result["delivered_owner_ids"]) == {admin.id}
+
+
+def test_private_plus_secondary_zone_sensor_still_creator_only(net_db, monkeypatch):
+    network = "NET-PP-SENSOR"
+    admin = _owner(
+        net_db,
+        oid=1,
+        email="pp-s-admin@x.com",
+        network_id=network,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.6062,
+        lon=-122.3321,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    admin.account_owner_id = admin.id
+    member = _owner(
+        net_db,
+        oid=2,
+        email="pp-s-member@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        lat=47.6070,
+        lon=-122.3330,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    net_db.commit()
+    _patch_secondary_zone(monkeypatch, network=network, admin=admin, member=member)
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.SENSOR,
+        hid="device-pp-s",
+        position=CoordinatePayload(latitude=47.6070, longitude=-122.3330),
+        msg={"description": "sensor"},
+    )
+    result = mfs.create_geo_propagated_message(net_db, member, payload)
+    assert result["fanout"]["strategy"] == "secondary_zone_creator_only"
+    assert result["delivered_owner_ids"] == []
+
+
+def test_exclusive_secondary_zone_panic_still_creator_only(net_db, monkeypatch):
+    network = "NET-EX"
+    admin = _owner(
+        net_db,
+        oid=1,
+        email="ex-admin@x.com",
+        network_id=network,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.6062,
+        lon=-122.3321,
+        account_type=AccountType.EXCLUSIVE,
+    )
+    admin.account_owner_id = admin.id
+    member = _owner(
+        net_db,
+        oid=2,
+        email="ex-member@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        lat=47.6070,
+        lon=-122.3330,
+        account_type=AccountType.EXCLUSIVE,
+    )
+    net_db.commit()
+    _patch_secondary_zone(monkeypatch, network=network, admin=admin, member=member)
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.PANIC,
+        hid="device-ex",
+        position=CoordinatePayload(latitude=47.6070, longitude=-122.3330),
+        msg={"description": "exclusive panic"},
+    )
+    result = mfs.create_geo_propagated_message(net_db, member, payload)
+    assert result["fanout"]["strategy"] == "secondary_zone_creator_only"
+    assert result["delivered_owner_ids"] == []
