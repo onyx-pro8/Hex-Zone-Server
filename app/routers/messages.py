@@ -215,7 +215,9 @@ async def create_message(
             zr = db.get(ZoneMessageEvent, eid)
             if zr:
                 await guest_api_service.notify_access_chat_inbox_ws(db, zr)
-        return guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db)
+        return guest_api_service.zone_message_event_to_member_zone_message_response(
+            event, db=db, viewer_owner_id=sender.id
+        )
 
     try:
         canonical_type = normalize_message_type(payload.type or "")
