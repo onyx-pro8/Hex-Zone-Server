@@ -378,11 +378,64 @@ async def acknowledge_wellness_check(
         note=body.note,
     )
     db.commit()
-    sender_id = None
-    event = db.get(ZoneMessageEvent, message_event_id)
-    if event and event.sender_id:
-        sender_id = event.sender_id
-    notify_ids = list({int(owner.id), int(sender_id)} if sender_id else {int(owner.id)})
+    notify_ids = wellness_ack_service.wellness_ack_notify_owner_ids(
+        db, message_event_id=message_event_id
+    )
+    await ws_manager.broadcast_to_users(notify_ids, "WELLNESS_ACK", result)
+    return result
+
+
+@router.post(
+    "/messages/{message_event_id}/wellness-ask-sender",
+    status_code=status.HTTP_201_CREATED,
+    summary="Ask the wellness check sender to confirm they are OK",
+)
+async def ask_wellness_sender(
+    message_event_id: str = Path(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = wellness_ack_service.record_recipient_ask_sender(
+        db,
+        message_event_id=message_event_id,
+        owner=owner,
+    )
+    db.commit()
+    notify_ids = wellness_ack_service.wellness_ack_notify_owner_ids(
+        db, message_event_id=message_event_id
+    )
+    await ws_manager.broadcast_to_users(notify_ids, "WELLNESS_ACK", result)
+    return result
+
+
+@router.post(
+    "/messages/{message_event_id}/wellness-sender-reply",
+    status_code=status.HTTP_201_CREATED,
+    summary="Sender replies to all pending recipient wellness asks at once",
+)
+async def reply_to_wellness_asks(
+    body: WellnessAckRequest,
+    message_event_id: str = Path(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = wellness_ack_service.record_sender_reply_to_asks(
+        db,
+        message_event_id=message_event_id,
+        owner=owner,
+        status_value=body.status,
+        note=body.note,
+    )
+    db.commit()
+    notify_ids = wellness_ack_service.wellness_ack_notify_owner_ids(
+        db, message_event_id=message_event_id
+    )
     await ws_manager.broadcast_to_users(notify_ids, "WELLNESS_ACK", result)
     return result
 

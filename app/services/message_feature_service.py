@@ -40,9 +40,11 @@ from app.services.member_service import (
     set_member_live_position,
     upsert_member_location,
 )
+from app.services.message_relevant_zone_service import attach_relevant_zone_metadata
 from app.services.network_zone_propagation import (
     resolve_network_administrator,
     resolve_network_geo_propagation_recipients,
+    expand_primary_zone_gps_alert_recipients,
 )
 from app.services.private_plus_messaging import apply_private_plus_network_shared_recipients
 from app.services.owner_home_service import (
@@ -450,7 +452,8 @@ def _zone_based_recipients(
 ) -> tuple[list[str], list[int], dict]:
     """Resolve recipients for geo alarm/alert types (not UNKNOWN).
 
-    Primary acceptable zone → administrator + all invited account members.
+    Primary acceptable zone → administrator + invited account members, plus for
+    PANIC / NS_PANIC / PA / SERVICE every owner GPS-located inside that primary zone.
     Secondary acceptable zone → zone creator only.
     Outside both → no recipients.
     """
@@ -474,6 +477,13 @@ def _zone_based_recipients(
         sender=sender,
         message_type=canonical_type,
         sender_zone_record_ids=sender_zone_record_ids,
+        recipient_owner_ids=recipient_owner_ids,
+        zone_meta=zone_meta,
+        exclude_sender_id=sender.id if exclude_sender_from_recipients else None,
+    )
+    recipient_owner_ids, zone_meta = expand_primary_zone_gps_alert_recipients(
+        db,
+        message_type=canonical_type,
         recipient_owner_ids=recipient_owner_ids,
         zone_meta=zone_meta,
         exclude_sender_id=sender.id if exclude_sender_from_recipients else None,
@@ -642,6 +652,13 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
         "priority": priority.value,
         "response_tracking_enabled": response_tracking,
     }
+    if fanout_meta.get("sender_zone_record_ids") or fanout_meta.get("recipient_zone_record_ids"):
+        attach_relevant_zone_metadata(
+            db,
+            metadata=metadata,
+            zone_meta=fanout_meta,
+            delivered_owner_ids=delivered_owner_ids,
+        )
 
     event = ZoneMessageEvent(
         zone_id=(zone_ids[0] if zone_ids else sender.zone_id),
@@ -807,6 +824,13 @@ def create_network_guest_geo_propagated_message(
         "guest_name": guest_session.guest_name,
         "network_zone_id": network_id,
     }
+    if fanout_meta.get("sender_zone_record_ids") or fanout_meta.get("recipient_zone_record_ids"):
+        attach_relevant_zone_metadata(
+            db,
+            metadata=metadata,
+            zone_meta=fanout_meta,
+            delivered_owner_ids=delivered_owner_ids,
+        )
 
     event = ZoneMessageEvent(
         zone_id=(zone_ids[0] if zone_ids else network_id),

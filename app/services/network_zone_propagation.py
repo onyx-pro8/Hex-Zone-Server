@@ -3,12 +3,23 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.domain.message_types import CanonicalMessageType
 from app.models import Owner, Zone
 from app.models.owner import OwnerRole
 from app.services.access_policy import account_propagation_owner_ids
 from app.services.geospatial_service import (
     evaluate_zone_records_containing_point,
+    owner_ids_located_within_zone_records,
     zone_ids_for_zone_records,
+)
+
+PRIMARY_ZONE_GPS_ALERT_TYPES: frozenset[CanonicalMessageType] = frozenset(
+    {
+        CanonicalMessageType.PANIC,
+        CanonicalMessageType.NS_PANIC,
+        CanonicalMessageType.PA,
+        CanonicalMessageType.SERVICE,
+    }
 )
 
 
@@ -160,6 +171,15 @@ def _recipients_for_network_zone_rows(
         recipient_ids.discard(int(exclude_owner_id))
 
     sorted_recipients = sorted(recipient_ids)
+    recipient_zone_record_ids: dict[str, int] = {}
+    if primary_rows:
+        zone_record_id = int(primary_rows[0].id)
+        for owner_id in sorted_recipients:
+            recipient_zone_record_ids[str(owner_id)] = zone_record_id
+    else:
+        for zone_row in secondary_rows:
+            recipient_zone_record_ids[str(int(zone_row.creator_id))] = int(zone_row.id)
+
     meta = {
         "strategy": strategy,
         "network_zone_id": network_id,
@@ -169,6 +189,7 @@ def _recipients_for_network_zone_rows(
         "primary_zone_record_ids": [int(z.id) for z in primary_rows],
         "secondary_zone_record_ids": [int(z.id) for z in secondary_rows],
         "recipient_owner_ids": sorted_recipients,
+        "recipient_zone_record_ids": recipient_zone_record_ids,
         "matched_network_zone_ids": [network_id],
     }
     return zone_ids, matched_record_ids, sorted_recipients, meta
@@ -182,6 +203,7 @@ def _merge_propagation_results(
     all_recipients: set[int] = set()
     all_primary: list[int] = []
     all_secondary: list[int] = []
+    all_recipient_zone_record_ids: dict[str, int] = {}
     network_ids: list[str] = []
     strategy = "network_no_acceptable_zone"
     admin_id: int | None = None
@@ -200,6 +222,13 @@ def _merge_propagation_results(
         for rid in meta.get("secondary_zone_record_ids") or []:
             if rid not in all_secondary:
                 all_secondary.append(int(rid))
+        partial_map = meta.get("recipient_zone_record_ids")
+        if isinstance(partial_map, dict):
+            for owner_key, record_id in partial_map.items():
+                if isinstance(record_id, int) and not isinstance(record_id, bool):
+                    all_recipient_zone_record_ids[str(owner_key)] = int(record_id)
+                elif isinstance(record_id, (float, str)) and str(record_id).strip().isdigit():
+                    all_recipient_zone_record_ids[str(owner_key)] = int(record_id)
         for nid in meta.get("matched_network_zone_ids") or []:
             if nid not in network_ids:
                 network_ids.append(nid)
@@ -219,6 +248,7 @@ def _merge_propagation_results(
         "primary_zone_record_ids": all_primary,
         "secondary_zone_record_ids": all_secondary,
         "recipient_owner_ids": sorted(all_recipients),
+        "recipient_zone_record_ids": all_recipient_zone_record_ids,
         "matched_network_zone_ids": network_ids,
     }
     return all_zone_ids, all_record_ids, sorted(all_recipients), merged_meta
@@ -342,3 +372,69 @@ def network_owner_ids_with_coordinates(
     if exclude_owner_id is not None:
         out = [oid for oid in out if oid != int(exclude_owner_id)]
     return out
+
+
+def expand_primary_zone_gps_alert_recipients(
+    db: Session,
+    *,
+    message_type: CanonicalMessageType,
+    recipient_owner_ids: list[int],
+    zone_meta: dict,
+    exclude_sender_id: int | None = None,
+) -> tuple[list[int], dict]:
+    """Add every owner GPS-located inside matched primary zones for alert types.
+
+    PANIC / NS_PANIC / PA / SERVICE inside a primary acceptable zone also reach
+    non-invited owners physically present in that geometry (stored member location).
+    Account members from the prior routing step are kept (union).
+    """
+    if message_type not in PRIMARY_ZONE_GPS_ALERT_TYPES:
+        return recipient_owner_ids, zone_meta
+
+    primary_ids = [
+        int(rid)
+        for rid in (zone_meta.get("primary_zone_record_ids") or [])
+        if rid is not None
+    ]
+    if not primary_ids:
+        return recipient_owner_ids, zone_meta
+
+    gps_ids = owner_ids_located_within_zone_records(
+        db,
+        primary_ids,
+        exclude_owner_id=exclude_sender_id,
+    )
+    if not gps_ids:
+        return recipient_owner_ids, zone_meta
+
+    pool = set(recipient_owner_ids) | set(gps_ids)
+    if exclude_sender_id is not None:
+        pool.discard(int(exclude_sender_id))
+    sorted_recipients = sorted(pool)
+
+    primary_zone_id = primary_ids[0]
+    recipient_zone_map: dict[str, int] = {}
+    raw_map = zone_meta.get("recipient_zone_record_ids")
+    if isinstance(raw_map, dict):
+        for owner_key, record_id in raw_map.items():
+            if isinstance(record_id, int) and not isinstance(record_id, bool):
+                recipient_zone_map[str(owner_key)] = int(record_id)
+            elif isinstance(record_id, (float, str)) and str(record_id).strip().isdigit():
+                recipient_zone_map[str(owner_key)] = int(record_id)
+    for owner_id in sorted_recipients:
+        recipient_zone_map.setdefault(str(owner_id), primary_zone_id)
+
+    extra_gps = sorted(set(gps_ids) - set(recipient_owner_ids))
+    strategy = zone_meta.get("strategy") or "primary_zone_network_members"
+    if extra_gps or gps_ids:
+        strategy = "primary_zone_gps_fanout"
+
+    return sorted_recipients, {
+        **zone_meta,
+        "strategy": strategy,
+        "primary_zone_gps_fanout": True,
+        "gps_recipient_ids": sorted(set(gps_ids)),
+        "primary_zone_gps_added_owner_ids": extra_gps,
+        "recipient_owner_ids": sorted_recipients,
+        "recipient_zone_record_ids": recipient_zone_map,
+    }

@@ -362,9 +362,12 @@ def list_zone_guest_access_chat_events_for_owner_inbox(
 def zone_message_event_to_member_zone_message_response(
     row: ZoneMessageEvent,
     db: Session | None = None,
+    *,
+    viewer_owner_id: int | None = None,
 ):
     """Build **`ZoneMessageResponse`** for admin/member clients (import local to avoid circular imports)."""
     from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageResponse
+    from app.services.message_relevant_zone_service import resolve_relevant_zone_for_viewer
 
     gtype = normalize_message_type(row.type)
     meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
@@ -434,6 +437,15 @@ def zone_message_event_to_member_zone_message_response(
         elif subject:
             message_text = subject
 
+    relevant_zone_fields: dict[str, str | None] = {}
+    if db is not None and viewer_owner_id is not None:
+        relevant_zone_fields = resolve_relevant_zone_for_viewer(
+            db,
+            metadata=meta,
+            viewer_owner_id=int(viewer_owner_id),
+            sender_id=row.sender_id,
+        )
+
     return ZoneMessageResponse(
         id=row.id,
         zone_id=row.zone_id,
@@ -460,6 +472,7 @@ def zone_message_event_to_member_zone_message_response(
         subject=subject,
         topic=topic,
         subtopic=subtopic,
+        **relevant_zone_fields,
     )
 
 

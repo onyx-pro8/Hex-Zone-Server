@@ -85,16 +85,18 @@ def validate_service_pa_message_fields(
         raise ServicePaValidationError("Subject is required for PA and SERVICE messages.")
     if len(subject) > 200:
         raise ServicePaValidationError("Subject must be 200 characters or fewer.")
-    if not topic:
-        raise ServicePaValidationError("Topic is required for PA and SERVICE messages.")
-    if topic not in _TOPIC_BY_ID:
-        raise ServicePaValidationError("Invalid topic for PA or SERVICE message.")
-
-    if msg_type == CanonicalMessageType.SERVICE and service_topic_requires_subtopic(topic):
-        if not subtopic:
-            raise ServicePaValidationError("Subtopic is required for SERVICE Products messages.")
-        if subtopic_label(topic, subtopic) is None:
-            raise ServicePaValidationError("Invalid subtopic for SERVICE Products message.")
+    if msg_type == CanonicalMessageType.SERVICE:
+        if not topic:
+            raise ServicePaValidationError("Topic is required for SERVICE messages.")
+        if topic not in _TOPIC_BY_ID:
+            raise ServicePaValidationError("Invalid topic for SERVICE message.")
+        if service_topic_requires_subtopic(topic):
+            if not subtopic:
+                raise ServicePaValidationError("Subtopic is required for SERVICE Products messages.")
+            if subtopic_label(topic, subtopic) is None:
+                raise ServicePaValidationError("Invalid subtopic for SERVICE Products message.")
+    elif topic and topic not in _TOPIC_BY_ID:
+        raise ServicePaValidationError("Invalid topic for PA message.")
 
     description = str(msg.get("description") or msg.get("text") or "").strip()
     if not description:

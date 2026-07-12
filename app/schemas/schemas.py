@@ -670,6 +670,18 @@ class ZoneMessageResponse(BaseModel):
         default=None,
         description="SERVICE Products subtopic id from **`body_json.subtopic`**.",
     )
+    relevant_zone_name: Optional[str] = Field(
+        default=None,
+        description="Acceptable zone name explaining why this viewer received the geo message.",
+    )
+    relevant_zone_network_id: Optional[str] = Field(
+        default=None,
+        description="Network id (`zones.zone_id`) for the relevant acceptable zone.",
+    )
+    relevant_zone_label: Optional[str] = Field(
+        default=None,
+        description="Display label: zone name plus network id, e.g. `Home District (DISTRICT-11)`.",
+    )
 
     model_config = ConfigDict(
         from_attributes=True,

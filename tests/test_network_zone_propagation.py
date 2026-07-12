@@ -741,3 +741,70 @@ def test_exclusive_secondary_zone_panic_still_creator_only(net_db, monkeypatch):
     result = mfs.create_geo_propagated_message(net_db, member, payload)
     assert result["fanout"]["strategy"] == "secondary_zone_creator_only"
     assert result["delivered_owner_ids"] == []
+
+
+def test_primary_zone_panic_reaches_gps_non_invited_in_zone(net_db, monkeypatch):
+    """Invited member PANIC in admin primary zone also reaches outsiders GPS-located there."""
+    network = "NET-GPS"
+    admin = _owner(
+        net_db,
+        oid=1,
+        email="gps-admin@x.com",
+        network_id=network,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.6062,
+        lon=-122.3321,
+    )
+    admin.account_owner_id = admin.id
+    member = _owner(
+        net_db,
+        oid=2,
+        email="gps-member@x.com",
+        network_id=network,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        lat=47.6063,
+        lon=-122.3322,
+    )
+    outsider = _owner(
+        net_db,
+        oid=3,
+        email="gps-outsider@x.com",
+        network_id="NET-SOLO",
+        role=OwnerRole.USER,
+        account_owner_id=None,
+        lat=47.6064,
+        lon=-122.3323,
+    )
+    net_db.commit()
+    monkeypatch.setattr(
+        nzp,
+        "evaluate_zone_records_containing_point",
+        lambda db, lat, lon: [401],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "zone_ids_for_zone_records",
+        lambda db, ids: [network],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "_zone_rows_for_records",
+        lambda db, ids: [_zone_row(record_id=401, network_id=network, creator_id=admin.id, owner_id=admin.id)],
+    )
+    monkeypatch.setattr(
+        "app.services.network_zone_propagation.owner_ids_located_within_zone_records",
+        lambda db, zone_record_ids, exclude_owner_id=None: [outsider.id],
+    )
+
+    payload = PropagationMessageCreate(
+        type=MessageFeatureType.PANIC,
+        hid="device-gps",
+        position=CoordinatePayload(latitude=47.6063, longitude=-122.3322),
+        msg={"description": "panic in primary"},
+    )
+    result = mfs.create_geo_propagated_message(net_db, member, payload)
+    assert result["fanout"]["strategy"] == "primary_zone_gps_fanout"
+    assert result["fanout"]["primary_zone_gps_fanout"] is True
+    assert set(result["delivered_owner_ids"]) == {admin.id, outsider.id}

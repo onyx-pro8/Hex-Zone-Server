@@ -45,7 +45,17 @@ def test_validate_service_products_subtopic_ok():
     )
 
 
-def test_validate_pa_requires_subject_but_not_products_subtopic():
+def test_validate_pa_requires_subject_but_not_topic():
+    validate_service_pa_message_fields(
+        CanonicalMessageType.PA,
+        {
+            "subject": "Garage sale",
+            "description": "Saturday morning",
+        },
+    )
+
+
+def test_validate_pa_accepts_optional_topic():
     validate_service_pa_message_fields(
         CanonicalMessageType.PA,
         {

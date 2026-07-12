@@ -429,7 +429,9 @@ async def _list_zone_messages_for_owner(
             viewer_owner_id=owner.id,
         )
         responses = [
-            guest_api_service.zone_message_event_to_member_zone_message_response(event, db=db) for event in rows
+            guest_api_service.zone_message_event_to_member_zone_message_response(
+                event, db=db, viewer_owner_id=owner_id
+            ) for event in rows
         ]
         return _finalize_inbox_responses(db, owner_id, responses)
 
@@ -501,7 +503,12 @@ async def _list_zone_messages_for_owner(
         owner=owner,
         max_scan=fetch_cap + 250,
     )
-    perm_responses = [guest_api_service.zone_message_event_to_member_zone_message_response(e, db=db) for e in perm_events]
+    perm_responses = [
+        guest_api_service.zone_message_event_to_member_zone_message_response(
+            e, db=db, viewer_owner_id=owner_id
+        )
+        for e in perm_events
+    ]
     chat_responses: list[ZoneMessageResponse] = []
     if settings.MESSAGES_INBOX_MERGE_GUEST_ACCESS_CHAT:
         chat_events = guest_api_service.list_zone_guest_access_chat_events_for_owner_inbox(
@@ -510,7 +517,10 @@ async def _list_zone_messages_for_owner(
             max_scan=fetch_cap + 250,
         )
         chat_responses = [
-            guest_api_service.zone_message_event_to_member_zone_message_response(e, db=db) for e in chat_events
+            guest_api_service.zone_message_event_to_member_zone_message_response(
+                e, db=db, viewer_owner_id=owner_id
+            )
+            for e in chat_events
         ]
     geo_events = guest_api_service.list_geo_propagation_events_for_owner_inbox(
         db,
@@ -518,7 +528,10 @@ async def _list_zone_messages_for_owner(
         max_scan=fetch_cap + 250,
     )
     geo_responses = [
-        guest_api_service.zone_message_event_to_member_zone_message_response(e, db=db) for e in geo_events
+        guest_api_service.zone_message_event_to_member_zone_message_response(
+            e, db=db, viewer_owner_id=owner_id
+        )
+        for e in geo_events
     ]
     merged = sorted(
         [*msg_responses, *perm_responses, *chat_responses, *geo_responses],

@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 from app.domain.message_types import CanonicalMessageType, normalize_message_type
 from app.models.owner import Owner
 from app.models.wellness_check_acknowledgement import WellnessCheckAcknowledgement
+from app.models.wellness_recipient_ask import WellnessRecipientAsk
+from app.models.wellness_sender_reply import WellnessSenderReply
 from app.models.zone_message_event import ZoneMessageEvent
+
+_VALID_WELLNESS_STATUS = {"ok", "need_help"}
 
 
 def _expected_recipient_ids(event: ZoneMessageEvent) -> list[int]:
@@ -41,6 +45,70 @@ def _assert_wellness_event(event: ZoneMessageEvent) -> None:
         )
 
 
+def _normalize_wellness_status(status_value: str) -> str:
+    normalized_status = (status_value or "ok").strip().lower()
+    if normalized_status not in _VALID_WELLNESS_STATUS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="status must be 'ok' or 'need_help'.",
+        )
+    return normalized_status
+
+
+def _serialize_sender_ask(row: WellnessRecipientAsk) -> dict:
+    return {
+        "id": row.id,
+        "asker_owner_id": row.asker_owner_id,
+        "created_at": row.created_at.isoformat(),
+        "sender_reply_id": row.sender_reply_id,
+    }
+
+
+def _serialize_sender_reply(
+    row: WellnessSenderReply,
+    *,
+    answered_asker_ids: list[int],
+) -> dict:
+    return {
+        "id": row.id,
+        "status": row.status,
+        "note": row.note,
+        "created_at": row.created_at.isoformat(),
+        "answered_asker_ids": answered_asker_ids,
+    }
+
+
+def _load_sender_ask_state(db: Session, *, message_event_id: str) -> tuple[list[dict], list[dict]]:
+    ask_rows = (
+        db.query(WellnessRecipientAsk)
+        .filter(WellnessRecipientAsk.message_event_id == message_event_id)
+        .order_by(WellnessRecipientAsk.created_at.asc())
+        .all()
+    )
+    reply_rows = (
+        db.query(WellnessSenderReply)
+        .filter(WellnessSenderReply.message_event_id == message_event_id)
+        .order_by(WellnessSenderReply.created_at.asc())
+        .all()
+    )
+    reply_askers: dict[str, list[int]] = {}
+    for ask in ask_rows:
+        if ask.sender_reply_id:
+            reply_askers.setdefault(ask.sender_reply_id, []).append(ask.asker_owner_id)
+
+    pending_sender_asks = [
+        _serialize_sender_ask(row) for row in ask_rows if row.sender_reply_id is None
+    ]
+    sender_replies = [
+        _serialize_sender_reply(
+            row,
+            answered_asker_ids=sorted(reply_askers.get(row.id, [])),
+        )
+        for row in reply_rows
+    ]
+    return pending_sender_asks, sender_replies
+
+
 def list_wellness_acknowledgements(db: Session, *, message_event_id: str) -> dict:
     event = db.get(ZoneMessageEvent, message_event_id)
     if not event:
@@ -56,9 +124,13 @@ def list_wellness_acknowledgements(db: Session, *, message_event_id: str) -> dic
     expected = _expected_recipient_ids(event)
     ack_owner_ids = {row.owner_id for row in rows}
     pending = [oid for oid in expected if oid not in ack_owner_ids]
+    pending_sender_asks, sender_replies = _load_sender_ask_state(
+        db, message_event_id=message_event_id
+    )
 
     return {
         "message_event_id": message_event_id,
+        "sender_id": event.sender_id,
         "expected_recipient_ids": expected,
         "pending_recipient_ids": pending,
         "acknowledgements": [
@@ -71,6 +143,8 @@ def list_wellness_acknowledgements(db: Session, *, message_event_id: str) -> dic
             }
             for row in rows
         ],
+        "pending_sender_asks": pending_sender_asks,
+        "sender_replies": sender_replies,
         "response_tracking_enabled": True,
     }
 
@@ -95,12 +169,7 @@ def record_wellness_acknowledgement(
             detail="You are not an expected recipient for this wellness check.",
         )
 
-    normalized_status = (status_value or "ok").strip().lower()
-    if normalized_status not in {"ok", "need_help"}:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="status must be 'ok' or 'need_help'.",
-        )
+    normalized_status = _normalize_wellness_status(status_value)
 
     existing = (
         db.query(WellnessCheckAcknowledgement)
@@ -136,3 +205,117 @@ def record_wellness_acknowledgement(
         },
         **summary,
     }
+
+
+def record_recipient_ask_sender(
+    db: Session,
+    *,
+    message_event_id: str,
+    owner: Owner,
+) -> dict:
+    event = db.get(ZoneMessageEvent, message_event_id)
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+    _assert_wellness_event(event)
+
+    expected = set(_expected_recipient_ids(event))
+    if owner.id not in expected:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only wellness check recipients can ask the sender to respond.",
+        )
+
+    existing_pending = (
+        db.query(WellnessRecipientAsk)
+        .filter(
+            WellnessRecipientAsk.message_event_id == message_event_id,
+            WellnessRecipientAsk.asker_owner_id == owner.id,
+            WellnessRecipientAsk.sender_reply_id.is_(None),
+        )
+        .first()
+    )
+    if existing_pending:
+        row = existing_pending
+    else:
+        row = WellnessRecipientAsk(
+            message_event_id=message_event_id,
+            asker_owner_id=owner.id,
+        )
+        db.add(row)
+        db.flush()
+
+    summary = list_wellness_acknowledgements(db, message_event_id=message_event_id)
+    return {
+        "recipient_ask": _serialize_sender_ask(row),
+        **summary,
+    }
+
+
+def record_sender_reply_to_asks(
+    db: Session,
+    *,
+    message_event_id: str,
+    owner: Owner,
+    status_value: str = "ok",
+    note: str | None = None,
+) -> dict:
+    event = db.get(ZoneMessageEvent, message_event_id)
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+    _assert_wellness_event(event)
+
+    if event.sender_id is None or owner.id != event.sender_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the wellness check sender can reply to recipient asks.",
+        )
+
+    pending_asks = (
+        db.query(WellnessRecipientAsk)
+        .filter(
+            WellnessRecipientAsk.message_event_id == message_event_id,
+            WellnessRecipientAsk.sender_reply_id.is_(None),
+        )
+        .order_by(WellnessRecipientAsk.created_at.asc())
+        .all()
+    )
+    if not pending_asks:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No pending recipient asks for this wellness check.",
+        )
+
+    normalized_status = _normalize_wellness_status(status_value)
+    reply = WellnessSenderReply(
+        message_event_id=message_event_id,
+        status=normalized_status,
+        note=note,
+    )
+    db.add(reply)
+    db.flush()
+
+    answered_asker_ids: list[int] = []
+    for ask in pending_asks:
+        ask.sender_reply_id = reply.id
+        answered_asker_ids.append(ask.asker_owner_id)
+    db.flush()
+
+    summary = list_wellness_acknowledgements(db, message_event_id=message_event_id)
+    return {
+        "sender_reply": _serialize_sender_reply(
+            reply,
+            answered_asker_ids=sorted(answered_asker_ids),
+        ),
+        **summary,
+    }
+
+
+def wellness_ack_notify_owner_ids(db: Session, *, message_event_id: str) -> list[int]:
+    """Owner ids that should receive a realtime wellness summary refresh."""
+    event = db.get(ZoneMessageEvent, message_event_id)
+    if not event:
+        return []
+    ids = set(_expected_recipient_ids(event))
+    if event.sender_id is not None:
+        ids.add(int(event.sender_id))
+    return sorted(ids)
