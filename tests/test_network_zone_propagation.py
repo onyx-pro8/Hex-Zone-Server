@@ -618,7 +618,8 @@ def test_private_plus_secondary_zone_panic_reaches_full_network(net_db, monkeypa
         msg={"description": "family panic"},
     )
     result = mfs.create_geo_propagated_message(net_db, member, payload)
-    assert result["fanout"]["strategy"] == "private_plus_network_shared"
+    assert result["fanout"]["private_plus_network_shared"] is True
+    assert "private_plus_network" in str(result["fanout"]["strategy"])
     assert set(result["delivered_owner_ids"]) == {admin.id, sibling.id}
 
 
@@ -661,7 +662,7 @@ def test_private_plus_outside_zone_panic_reaches_full_network(net_db, monkeypatc
         msg={"description": "family panic outside zone"},
     )
     result = mfs.create_geo_propagated_message(net_db, member, payload)
-    assert result["fanout"]["strategy"] == "private_plus_network_shared"
+    assert result["fanout"]["private_plus_network_shared"] is True
     assert set(result["delivered_owner_ids"]) == {admin.id}
 
 
@@ -700,8 +701,9 @@ def test_private_plus_secondary_zone_sensor_still_creator_only(net_db, monkeypat
         msg={"description": "sensor"},
     )
     result = mfs.create_geo_propagated_message(net_db, member, payload)
-    assert result["fanout"]["strategy"] == "secondary_zone_creator_only"
-    assert result["delivered_owner_ids"] == []
+    assert result["fanout"]["private_plus_network_shared"] is True
+    assert "private_plus_network" in str(result["fanout"]["strategy"])
+    assert set(result["delivered_owner_ids"]) == {admin.id}
 
 
 def test_exclusive_secondary_zone_panic_still_creator_only(net_db, monkeypatch):

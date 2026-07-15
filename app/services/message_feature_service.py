@@ -46,7 +46,11 @@ from app.services.network_zone_propagation import (
     resolve_network_geo_propagation_recipients,
     expand_primary_zone_gps_alert_recipients,
 )
-from app.services.private_plus_messaging import apply_private_plus_network_shared_recipients
+from app.services.private_plus_messaging import (
+    apply_private_plus_network_shared_recipients,
+    is_private_plus_network_account,
+    resolve_private_plus_network_member_owner_ids,
+)
 from app.services.owner_home_service import (
     apply_owner_home_geocode,
     get_owner_home_coordinates,
@@ -265,6 +269,17 @@ def _assert_private_receiver_reachable(
         sender=sender,
         network_zone_id=network_zone_id,
     )
+    if is_private_plus_network_account(db, sender):
+        pool = sorted(
+            set(pool)
+            | set(
+                resolve_private_plus_network_member_owner_ids(
+                    db,
+                    sender,
+                    exclude_owner_id=None,
+                )
+            )
+        )
     if receiver.id not in pool:
         raise PrivateScopeRecipientError(
             "PRIVATE receiver must be reachable under current primary/secondary zone routing."
@@ -377,6 +392,17 @@ def search_private_message_recipients(
         exclude_owner_id=sender.id,
         sender=sender,
     )
+    if is_private_plus_network_account(db, sender):
+        candidate_ids = sorted(
+            set(candidate_ids)
+            | set(
+                resolve_private_plus_network_member_owner_ids(
+                    db,
+                    sender,
+                    exclude_owner_id=sender.id,
+                )
+            )
+        )
     members = _private_search_members(db, candidate_ids, query, limit=limit)
     return {"zone_ids": zone_ids, "members": members, "location_status": "inside_zone"}
 
@@ -600,6 +626,16 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
                 "source": origin_source,
             },
         }
+        candidate_recipients, fanout_meta = apply_private_plus_network_shared_recipients(
+            db,
+            sender=sender,
+            message_type=canonical_type,
+            sender_zone_record_ids=[],
+            recipient_owner_ids=candidate_recipients,
+            zone_meta=fanout_meta,
+            exclude_sender_id=sender.id,
+        )
+        fanout_meta["target_x"] = len(candidate_recipients)
         position_for_metadata = {"latitude": origin_lat, "longitude": origin_lon}
     else:
         if canonical_type == CanonicalMessageType.SENSOR:
@@ -760,6 +796,16 @@ def create_network_guest_geo_propagated_message(
                 "source": origin_source,
             },
         }
+        candidate_recipients, fanout_meta = apply_private_plus_network_shared_recipients(
+            db,
+            sender=routing_owner,
+            message_type=canonical_type,
+            sender_zone_record_ids=[],
+            recipient_owner_ids=candidate_recipients,
+            zone_meta=fanout_meta,
+            exclude_sender_id=None,
+        )
+        fanout_meta["target_x"] = len(candidate_recipients)
         position_for_metadata = {"latitude": origin_lat, "longitude": origin_lon}
     else:
         if canonical_type == CanonicalMessageType.SENSOR:
