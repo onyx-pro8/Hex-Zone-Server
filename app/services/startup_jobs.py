@@ -25,7 +25,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.database import session_maker
-from app.domain.message_types import CanonicalMessageType
+from app.domain.message_types import CanonicalMessageType, is_smart_home_sender_hid
 from app.models import Owner
 from app.models.wellness_check_acknowledgement import WellnessCheckAcknowledgement
 from app.models.zone_message_event import ZoneMessageEvent
@@ -151,6 +151,9 @@ def _scan_wellness_reminders_once(db: Session) -> int:
     reminded = 0
     for event in events:
         metadata = event.metadata_json if isinstance(event.metadata_json, dict) else {}
+        if not bool(metadata.get("response_tracking_enabled")):
+            if not is_smart_home_sender_hid(str(metadata.get("hid") or "")):
+                continue
         reminders_sent = int(metadata.get("wellness_reminders") or 0)
         if reminders_sent >= max_reminders:
             continue

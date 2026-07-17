@@ -3,6 +3,7 @@ from datetime import datetime
 import uuid
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -62,7 +63,11 @@ def _wellness_event(
         text="Wellness check",
         body_json={},
         zone_id="zone-1",
-        metadata_json={"delivered_owner_ids": delivered_owner_ids},
+        metadata_json={
+            "delivered_owner_ids": delivered_owner_ids,
+            "response_tracking_enabled": True,
+            "hid": "HOME-SENSOR-01",
+        },
         created_at=datetime.utcnow(),
     )
     db.add(event)
@@ -179,3 +184,37 @@ def test_recipient_ack_and_ask_are_independent(wellness_db):
     ask = was.record_recipient_ask_sender(db, message_event_id=event_id, owner=recipient)
     assert len(ask["pending_sender_asks"]) == 1
     assert db.query(WellnessCheckAcknowledgement).count() == 1
+
+
+def test_mobile_wellness_check_rejects_responses(wellness_db):
+    db = wellness_db
+    sender = _owner(db, oid=1, email="sender@test.com")
+    recipient = _owner(db, oid=2, email="recipient@test.com")
+    event_id = str(uuid.uuid4())
+    event = ZoneMessageEvent(
+        id=event_id,
+        sender_id=sender.id,
+        type=CanonicalMessageType.WELLNESS_CHECK.value,
+        category=MessageCategory.ALARM,
+        scope=MessageScope.PUBLIC,
+        text="Wellness check",
+        body_json={},
+        zone_id="zone-1",
+        metadata_json={
+            "delivered_owner_ids": [sender.id, recipient.id],
+            "response_tracking_enabled": False,
+            "hid": "MOB-ABCDEFGH",
+        },
+        created_at=datetime.utcnow(),
+    )
+    db.add(event)
+    db.flush()
+
+    with pytest.raises(HTTPException) as exc:
+        was.record_wellness_acknowledgement(
+            db,
+            message_event_id=event_id,
+            owner=recipient,
+            status_value="ok",
+        )
+    assert exc.value.status_code == 422

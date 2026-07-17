@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.domain.message_types import CanonicalMessageType, normalize_message_type
+from app.domain.message_types import CanonicalMessageType, is_smart_home_sender_hid, normalize_message_type
 from app.models.owner import Owner
 from app.models.wellness_check_acknowledgement import WellnessCheckAcknowledgement
 from app.models.wellness_recipient_ask import WellnessRecipientAsk
@@ -28,6 +28,21 @@ def _expected_recipient_ids(event: ZoneMessageEvent) -> list[int]:
             continue
         ids.append(raw)
     return ids
+
+
+def _response_tracking_enabled(event: ZoneMessageEvent) -> bool:
+    metadata = event.metadata_json if isinstance(event.metadata_json, dict) else {}
+    if "response_tracking_enabled" in metadata:
+        return bool(metadata.get("response_tracking_enabled"))
+    return is_smart_home_sender_hid(str(metadata.get("hid") or ""))
+
+
+def _assert_wellness_response_tracking(event: ZoneMessageEvent) -> None:
+    if not _response_tracking_enabled(event):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="This wellness check does not accept recipient responses.",
+        )
 
 
 def _assert_wellness_event(event: ZoneMessageEvent) -> None:
@@ -145,7 +160,7 @@ def list_wellness_acknowledgements(db: Session, *, message_event_id: str) -> dic
         ],
         "pending_sender_asks": pending_sender_asks,
         "sender_replies": sender_replies,
-        "response_tracking_enabled": True,
+        "response_tracking_enabled": _response_tracking_enabled(event),
     }
 
 
@@ -161,6 +176,7 @@ def record_wellness_acknowledgement(
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
     _assert_wellness_event(event)
+    _assert_wellness_response_tracking(event)
 
     expected = set(_expected_recipient_ids(event))
     if owner.id not in expected and owner.id != event.sender_id:
@@ -217,6 +233,7 @@ def record_recipient_ask_sender(
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
     _assert_wellness_event(event)
+    _assert_wellness_response_tracking(event)
 
     expected = set(_expected_recipient_ids(event))
     if owner.id not in expected:
@@ -263,6 +280,7 @@ def record_sender_reply_to_asks(
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
     _assert_wellness_event(event)
+    _assert_wellness_response_tracking(event)
 
     if event.sender_id is None or owner.id != event.sender_id:
         raise HTTPException(

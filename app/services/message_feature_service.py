@@ -669,7 +669,10 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
     fanout_meta["resolved_x"] = len(delivered_owner_ids)
 
     priority = type_priority(canonical_type)
-    response_tracking = enables_response_tracking(canonical_type)
+    response_tracking = enables_response_tracking(
+        canonical_type,
+        sender_hid=payload.hid,
+    )
 
     metadata = {
         "hid": payload.hid,
@@ -847,7 +850,10 @@ def create_network_guest_geo_propagated_message(
     fanout_meta["resolved_x"] = len(delivered_owner_ids)
 
     priority = type_priority(canonical_type)
-    response_tracking = enables_response_tracking(canonical_type)
+    response_tracking = enables_response_tracking(
+        canonical_type,
+        sender_hid=payload.hid,
+    )
 
     metadata = {
         "hid": payload.hid,

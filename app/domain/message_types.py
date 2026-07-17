@@ -132,8 +132,25 @@ def bypasses_delivery_blocks(message_type: CanonicalMessageType) -> bool:
     return message_type in BLOCK_BYPASS_TYPES
 
 
-def enables_response_tracking(message_type: CanonicalMessageType) -> bool:
-    return message_type in RESPONSE_TRACKING_TYPES
+def enables_response_tracking(
+    message_type: CanonicalMessageType,
+    *,
+    sender_hid: str | None = None,
+) -> bool:
+    """Wellness acknowledgements only when the check was sent from a smart-home device."""
+    if message_type not in RESPONSE_TRACKING_TYPES:
+        return False
+    normalized_hid = (sender_hid or "").strip().upper()
+    if not normalized_hid:
+        return False
+    return not normalized_hid.startswith(("MOB-", "WEB-"))
+
+
+def is_smart_home_sender_hid(sender_hid: str | None) -> bool:
+    normalized_hid = (sender_hid or "").strip().upper()
+    if not normalized_hid:
+        return False
+    return not normalized_hid.startswith(("MOB-", "WEB-"))
 
 
 # Alarm types that trigger mobile push (FCM/APNS) in addition to WebSocket fan-out.
