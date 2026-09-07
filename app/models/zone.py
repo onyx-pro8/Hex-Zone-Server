@@ -95,6 +95,8 @@ class Zone(Base):
     
     # Status
     active = Column(Boolean, default=True, nullable=False)
+    # Primary zones are account-visible and admin-managed; secondary are creator-only.
+    is_primary = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

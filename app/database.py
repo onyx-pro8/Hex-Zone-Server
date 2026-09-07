@@ -699,6 +699,40 @@ def init_db():
             conn.execute(
                 text(
                     """
+                    ALTER TABLE zones
+                    ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;
+                    """
+                )
+            )
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_zones_is_primary ON zones (is_primary);"))
+            # Backfill: for each account administrator, mark their earliest
+            # MAX_ZONES_ADMINISTRATOR_PRIMARY (2) zones as primary; all others secondary.
+            conn.execute(
+                text(
+                    """
+                    WITH admin_zones AS (
+                        SELECT
+                            z.id AS zone_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY z.creator_id
+                                ORDER BY z.created_at ASC NULLS LAST, z.id ASC
+                            ) AS rn
+                        FROM zones z
+                        INNER JOIN owners o ON o.id = z.creator_id
+                        WHERE lower(o.role::text) = 'administrator'
+                    )
+                    UPDATE zones
+                    SET is_primary = TRUE
+                    WHERE id IN (
+                        SELECT zone_id FROM admin_zones WHERE rn <= 2
+                    )
+                    AND is_primary IS DISTINCT FROM TRUE;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
                     DO $$
                     BEGIN
                         IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'contractmessagetype') THEN

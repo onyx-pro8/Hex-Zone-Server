@@ -583,6 +583,11 @@ async def post_zones(
 ):
     data = controllers.create_zone(db, owner, payload.model_dump())
     db.commit()
+    evicted = data.get("evicted_zones") or []
+    if evicted:
+        from app.services.zone_service import notify_zone_evictions
+
+        await notify_zone_evictions(db, admin=owner, evicted=evicted)
     return success_response(data)
 
 

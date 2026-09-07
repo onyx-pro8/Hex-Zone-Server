@@ -1,18 +1,27 @@
 # Zones API capability contract
 
-This backend enforces per-creator zone capacity (by `zones.creator_id` and role) and edit authorization in server-side policy.
+This backend enforces per-creator zone capacity, primary/secondary tiering, and
+edit/delete authorization in server-side policy.
 
 ## Policy defaults
 
-- `MAX_ZONES_ADMINISTRATOR=2` — account administrators may create up to **2 primary zones**
-- `MAX_ZONES_USER=1` — each invited member may create **1 secondary zone**
-- Primary zones = geometries created by the network administrator
-- Secondary zones = geometries created by invited members
-- Listing visibility: administrators see account primary + all member secondaries; members see admin primary zones plus their own secondary
+- `MAX_ZONES_ADMINISTRATOR=3` — account administrators may create up to **3 zones total**
+- `MAX_ZONES_ADMINISTRATOR_PRIMARY=2` — of those, up to **2 are primary**; additional admin zones are **secondary**
+- Invited members create **secondary zones only**
+- Member secondary cap = `MAX_ZONES_ADMINISTRATOR - admin_primary_count`
+  - 1 admin primary → each member may create **2** secondary zones
+  - 2 admin primaries → each member may create **1** secondary zone
+- When an admin creates an additional primary and a member is over the new secondary cap, that member's **latest** secondary zone is removed automatically
+- Listing visibility:
+  - **Primary** zones: visible to the account administrator and all members
+  - **Secondary** zones: visible only to the creator
+- System administrator listing/edit rules are unchanged
 
-## Edit authorization
+## Edit / delete authorization
 
-Option A is enforced: a caller may edit only zones they created (`creator_id == caller.id`).
+- **Primary** zones: modified and removed by the **account administrator** only
+- **Secondary** zones: modified and removed by the **creator** only
+- System administrators retain full access
 
 ## Naming policy
 
@@ -28,11 +37,17 @@ Option A is enforced: a caller may edit only zones they created (`creator_id == 
 ```json
 {
   "role": "administrator",
-  "can_create_zone": false,
-  "remaining_total": 0,
-  "remaining_for_role": 0,
-  "max_total": 2,
-  "reserved_for_standard_users": 1,
-  "reason": "Maximum of 2 primary zones for administrators reached."
+  "can_create_zone": true,
+  "remaining_total": 1,
+  "remaining_for_role": 1,
+  "max_total": 3,
+  "max_primary": 2,
+  "admin_primary_count": 1,
+  "next_zone_is_primary": true,
+  "member_secondary_limit": 2,
+  "reserved_for_standard_users": 2,
+  "reason": null
 }
 ```
+
+Create responses may include `evicted_zones` when member secondaries were trimmed. Affected users also receive a `ZONE_EVICTED` WebSocket event (and push when available).

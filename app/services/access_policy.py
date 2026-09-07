@@ -157,11 +157,12 @@ def can_message_owner(sender: Owner, receiver: Owner, *, require_same_zone: bool
 
 
 def zone_listing_owner_ids(db: Session, owner: Owner) -> list[int]:
-    """Return owner ids whose zones the caller may list or read.
+    """Return owner ids whose zone *records* may appear in a listing query.
 
     System administrators see every zone on the platform.
-    Account administrators see every linked user's zones (primary + member secondaries).
-    Users see their own secondary zone(s) plus the administrator's primary zones (account root).
+    Account administrators and members still receive account owner ids so primary
+    zones (owned by the admin) can be loaded; secondary visibility is filtered
+    afterward to creator-only via ``is_primary`` / ``creator_id``.
     """
     if is_system_administrator(owner):
         return _all_owner_ids(db, include_inactive=True)

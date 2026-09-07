@@ -87,10 +87,14 @@ class Settings(BaseSettings):
     H3_MIN_RESOLUTION: int = 0
     H3_MAX_RESOLUTION: int = 15
 
-    # Zone capacity policy (per creator_id / role):
-    # - Administrators create up to MAX_ZONES_ADMINISTRATOR primary zones (default 2).
-    # - Invited members (role=user) create up to MAX_ZONES_USER secondary zones (default 1).
-    MAX_ZONES_ADMINISTRATOR: int = 2
+    # Zone capacity policy:
+    # - Administrators create up to MAX_ZONES_ADMINISTRATOR zones total (default 3).
+    # - Of those, up to MAX_ZONES_ADMINISTRATOR_PRIMARY are primary (default 2); the rest secondary.
+    # - Each invited member may create secondary zones only; their cap is
+    #   (MAX_ZONES_ADMINISTRATOR - admin_primary_count), e.g. 1 primary → 2, 2 primary → 1.
+    # - MAX_ZONES_USER is legacy and ignored for quota math (kept for old .env files).
+    MAX_ZONES_ADMINISTRATOR: int = 3
+    MAX_ZONES_ADMINISTRATOR_PRIMARY: int = 2
     MAX_ZONES_USER: int = 1
     # Legacy flat-cap names (ignored for quota math; kept so old .env files still load).
     MAX_ZONES_TOTAL: int | None = None
@@ -101,11 +105,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _resolve_zone_capacity(self) -> "Settings":
-        """Optional: RESERVED_FOR_STANDARD_USERS aliases MAX_ZONES_USER."""
-        if self.RESERVED_FOR_STANDARD_USERS is not None:
-            object.__setattr__(
-                self, "MAX_ZONES_USER", max(1, int(self.RESERVED_FOR_STANDARD_USERS))
-            )
+        """Clamp primary max so it never exceeds administrator total capacity."""
+        total = max(1, int(self.MAX_ZONES_ADMINISTRATOR))
+        primary = max(1, int(self.MAX_ZONES_ADMINISTRATOR_PRIMARY))
+        if primary > total:
+            object.__setattr__(self, "MAX_ZONES_ADMINISTRATOR_PRIMARY", total)
         return self
 
     # Geocoding / area boundaries (OpenStreetMap Nominatim)

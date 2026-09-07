@@ -2005,6 +2005,27 @@ async def test_zone_limit_exceeded_returns_clear_message(test_db, override_get_d
         assert user_login.status_code == 200
         user_headers = {"Authorization": f"Bearer {user_login.json()['access_token']}"}
 
+        admin_login = await client.post(
+            "/owners/login",
+            json={"email": "zone-limit-admin@example.com", "password": "SecurePassword123"},
+        )
+        assert admin_login.status_code == 200
+        admin_headers = {"Authorization": f"Bearer {admin_login.json()['access_token']}"}
+        # Two admin primary zones → each member may create only 1 secondary.
+        for index in range(2):
+            created = await client.post(
+                "/zones/",
+                headers=admin_headers,
+                json={
+                    "zone_id": f"ADMIN-LIMIT-ZONE-{index + 1}",
+                    "zone_type": "warn",
+                    "name": f"Admin Zone {index + 1}",
+                    "description": "admin",
+                    "h3_cells": [],
+                },
+            )
+            assert created.status_code == 201, created.text
+
         first = await client.post(
             "/zones/",
             headers=user_headers,

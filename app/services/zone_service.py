@@ -11,9 +11,10 @@ from app.services.zone_policy import (
     ensure_unique_zone_name,
     ensure_zone_delete_allowed,
     ensure_zone_edit_allowed,
-    enforce_can_create,
+    list_zones_visibility_filter,
     normalize_zone_name,
-    prepare_create_zone_policy,
+    prepare_zone_tier_on_create,
+    zone_is_primary,
 )
 
 CONTRACT_TO_MODEL_ZONE_TYPE = {
@@ -73,6 +74,7 @@ def _serialize_zone(
     zone: Zone,
     *,
     owners_by_id: dict[int, Owner] | None = None,
+    evicted_zones: list[dict] | None = None,
 ) -> dict:
     contract_type = (zone.parameters or {}).get("contractType")
     config = dict((zone.parameters or {}).get("config", {}) or {})
@@ -84,7 +86,7 @@ def _serialize_zone(
     owner_name = None
     if owners_by_id is not None:
         owner_name = _owner_display_name(owners_by_id.get(preferred_id))
-    return {
+    payload = {
         "id": zone.id,
         "zone_id": zone.zone_id,
         "owner_id": zone.owner_id,
@@ -94,12 +96,15 @@ def _serialize_zone(
         "type": contract_type or MODEL_TO_CONTRACT_ZONE_TYPE.get(zone.zone_type, "dynamic"),
         "geometry": (zone.parameters or {}).get("geometry", {}),
         "config": config,
+        "is_primary": zone_is_primary(zone),
     }
+    if evicted_zones:
+        payload["evicted_zones"] = evicted_zones
+    return payload
 
 
 def create_zone(db: Session, owner: Owner, payload: dict) -> dict:
-    capabilities = prepare_create_zone_policy(db, owner)
-    enforce_can_create(capabilities)
+    is_primary, evicted = prepare_zone_tier_on_create(db, owner)
 
     account_owner_ids = account_owner_ids_for_policy(db, owner)
 
@@ -128,6 +133,7 @@ def create_zone(db: Session, owner: Owner, payload: dict) -> dict:
         creator_id=owner.id,
         zone_type=CONTRACT_TO_MODEL_ZONE_TYPE[zone_type],
         name=normalized_name,
+        is_primary=is_primary,
         parameters={
             "contractType": zone_type,
             "geometry": geometry,
@@ -139,16 +145,20 @@ def create_zone(db: Session, owner: Owner, payload: dict) -> dict:
     db.add(zone)
     db.flush()
     db.refresh(zone)
-    return _serialize_zone(zone, owners_by_id={int(owner.id): owner})
+    return _serialize_zone(
+        zone,
+        owners_by_id={int(owner.id): owner},
+        evicted_zones=[item.to_dict() for item in evicted] or None,
+    )
 
 
 def list_zones(db: Session, owner: Owner) -> list[dict]:
     owner_ids = visible_zone_owner_ids(db, owner)
-    zones = (
-        db.query(Zone)
-        .filter(Zone.owner_id.in_(owner_ids), Zone.active.is_(True))
-        .all()
-    )
+    query = db.query(Zone).filter(Zone.owner_id.in_(owner_ids), Zone.active.is_(True))
+    visibility = list_zones_visibility_filter(owner)
+    if visibility is not None:
+        query = query.filter(visibility)
+    zones = query.all()
     lookup_ids: set[int] = set()
     for zone in zones:
         lookup_ids.add(int(zone.owner_id))
@@ -212,3 +222,62 @@ def delete_zone(db: Session, owner: Owner, zone_id: str) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Zone not found")
     ensure_zone_delete_allowed(db, owner, zone)
     db.delete(zone)
+
+
+async def notify_zone_evictions(db: Session, *, admin: Owner, evicted: list) -> None:
+    """Notify admin + affected members when secondary zones are auto-removed."""
+    if not evicted:
+        return
+    from app.services import push_notification_service
+    from app.websocket.manager import ws_manager
+
+    by_creator: dict[int, list] = {}
+    for item in evicted:
+        creator_id = int(item["creator_id"] if isinstance(item, dict) else item.creator_id)
+        by_creator.setdefault(creator_id, []).append(item)
+
+    def _as_dict(item) -> dict:
+        return item if isinstance(item, dict) else item.to_dict()
+
+    def _name(item) -> str:
+        return str(item["name"] if isinstance(item, dict) else item.name)
+
+    admin_payload = {
+        "message": (
+            f"{len(evicted)} member secondary zone(s) were removed automatically "
+            "to make room for an additional primary zone."
+        ),
+        "evicted_zones": [_as_dict(item) for item in evicted],
+        "reason": "primary_quota_rebalance",
+    }
+    try:
+        await ws_manager.broadcast_to_users([admin.id], "ZONE_EVICTED", admin_payload)
+    except Exception:
+        pass
+
+    for creator_id, items in by_creator.items():
+        names = ", ".join(f'"{_name(z)}"' for z in items)
+        member_payload = {
+            "message": (
+                f"Your secondary zone {names} was removed automatically because "
+                "the administrator created another primary zone."
+            ),
+            "evicted_zones": [_as_dict(z) for z in items],
+            "reason": "primary_quota_rebalance",
+        }
+        try:
+            await ws_manager.broadcast_to_users(
+                [creator_id], "ZONE_EVICTED", member_payload
+            )
+        except Exception:
+            pass
+        try:
+            await push_notification_service.send_plain_push_to_owners(
+                db,
+                [creator_id],
+                title="Zone removed",
+                body=member_payload["message"],
+                data={"event": "ZONE_EVICTED", "reason": "primary_quota_rebalance"},
+            )
+        except Exception:
+            pass

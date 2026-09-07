@@ -9,7 +9,11 @@ from sqlalchemy.pool import StaticPool
 from app.core.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app.services.zone_policy import build_capabilities, normalize_zone_name
+from app.services.zone_policy import (
+    build_capabilities,
+    member_secondary_limit_for_primary_count,
+    normalize_zone_name,
+)
 
 
 @pytest.fixture
@@ -40,11 +44,14 @@ def zone_test_db():
 @pytest.fixture
 def policy_limits():
     original_admin = settings.MAX_ZONES_ADMINISTRATOR
+    original_primary = settings.MAX_ZONES_ADMINISTRATOR_PRIMARY
     original_user = settings.MAX_ZONES_USER
-    settings.MAX_ZONES_ADMINISTRATOR = 2
+    settings.MAX_ZONES_ADMINISTRATOR = 3
+    settings.MAX_ZONES_ADMINISTRATOR_PRIMARY = 2
     settings.MAX_ZONES_USER = 1
     yield
     settings.MAX_ZONES_ADMINISTRATOR = original_admin
+    settings.MAX_ZONES_ADMINISTRATOR_PRIMARY = original_primary
     settings.MAX_ZONES_USER = original_user
 
 
@@ -93,21 +100,44 @@ def _zone_payload(name: str) -> dict:
     }
 
 
-def test_build_capabilities_admin_blocks_at_two_primary(policy_limits):
-    caps = build_capabilities("administrator", total_zones=2)
-    assert caps.can_create_zone is False
-    assert caps.remaining_total == 0
-    assert caps.max_total == 2
-    assert caps.reserved_for_standard_users == 1
-    assert caps.reason == "Maximum of 2 primary zones for administrators reached."
+def test_member_secondary_limit_tracks_admin_primary_count(policy_limits):
+    assert member_secondary_limit_for_primary_count(1) == 2
+    assert member_secondary_limit_for_primary_count(2) == 1
+    assert member_secondary_limit_for_primary_count(0) == 3
 
 
-def test_build_capabilities_member_blocks_at_one_secondary(policy_limits):
-    caps = build_capabilities("user", total_zones=1)
+def test_build_capabilities_admin_allows_third_as_secondary(policy_limits):
+    caps = build_capabilities(
+        "administrator", total_zones=2, admin_primary_count=2
+    )
+    assert caps.can_create_zone is True
+    assert caps.remaining_total == 1
+    assert caps.max_total == 3
+    assert caps.next_zone_is_primary is False
+
+
+def test_build_capabilities_admin_blocks_at_three(policy_limits):
+    caps = build_capabilities(
+        "administrator", total_zones=3, admin_primary_count=2
+    )
     assert caps.can_create_zone is False
     assert caps.remaining_total == 0
-    assert caps.max_total == 1
-    assert caps.reason == "Maximum of 1 secondary zone for members reached."
+    assert "3 zones" in (caps.reason or "")
+
+
+def test_build_capabilities_member_depends_on_primary_count(policy_limits):
+    with_one_primary = build_capabilities(
+        "user", total_zones=0, admin_primary_count=1
+    )
+    assert with_one_primary.max_total == 2
+    assert with_one_primary.can_create_zone is True
+
+    with_two_primary = build_capabilities(
+        "user", total_zones=1, admin_primary_count=2
+    )
+    assert with_two_primary.max_total == 1
+    assert with_two_primary.can_create_zone is False
+    assert with_two_primary.reason == "Maximum of 1 secondary zone for members reached."
 
 
 def test_normalize_zone_name_trims_and_validates():
@@ -117,76 +147,102 @@ def test_normalize_zone_name_trims_and_validates():
 
 
 @pytest.mark.asyncio
-async def test_admin_cannot_create_more_than_two_primary_zones(zone_test_db, policy_limits):
+async def test_admin_third_zone_is_secondary(zone_test_db, policy_limits):
     async with _client() as client:
         _, admin_token = await _register_and_login(
-            client, "admin-quota@example.com", "administrator", "quota-shared"
+            client, "admin-tier@example.com", "administrator", "tier-shared"
         )
         headers = {"Authorization": f"Bearer {admin_token}"}
 
-        first = await client.post("/zones/", headers=headers, json=_zone_payload("  Zone A  "))
+        first = await client.post("/zones/", headers=headers, json=_zone_payload("Zone A"))
         second = await client.post("/zones/", headers=headers, json=_zone_payload("Zone B"))
         third = await client.post("/zones/", headers=headers, json=_zone_payload("Zone C"))
+        fourth = await client.post("/zones/", headers=headers, json=_zone_payload("Zone D"))
 
         assert first.status_code == 201
+        assert first.json()["is_primary"] is True
         assert second.status_code == 201
-        assert third.status_code == 409
-        assert third.json()["error_code"] == "ZONE_QUOTA_MAX_TOTAL_REACHED"
+        assert second.json()["is_primary"] is True
+        assert third.status_code == 201
+        assert third.json()["is_primary"] is False
+        assert fourth.status_code == 409
+        assert fourth.json()["error_code"] == "ZONE_QUOTA_MAX_TOTAL_REACHED"
 
 
 @pytest.mark.asyncio
-async def test_member_cannot_create_more_than_one_secondary_zone(zone_test_db, policy_limits):
+async def test_member_secondary_quota_and_eviction(zone_test_db, policy_limits):
     async with _client() as client:
         admin_id, admin_token = await _register_and_login(
-            client, "admin-cap@example.com", "administrator", "caps-shared"
+            client, "admin-evict@example.com", "administrator", "evict-shared"
         )
-        _, user_token = await _register_and_login(
+        user_id, user_token = await _register_and_login(
             client,
-            "user-cap@example.com",
+            "user-evict@example.com",
             "user",
-            "caps-shared",
+            "evict-shared",
             account_owner_id=admin_id,
         )
         admin_headers = {"Authorization": f"Bearer {admin_token}"}
         user_headers = {"Authorization": f"Bearer {user_token}"}
 
-        for index in range(2):
-            response = await client.post(
-                "/zones/",
-                headers=admin_headers,
-                json=_zone_payload(f"Admin {index + 1}"),
-            )
-            assert response.status_code == 201, response.text
-
-        user_create = await client.post(
-            "/zones/", headers=user_headers, json=_zone_payload("  User One  ")
+        primary = await client.post(
+            "/zones/", headers=admin_headers, json=_zone_payload("Admin Primary")
         )
-        assert user_create.status_code == 201
-        assert user_create.json()["name"] == "User One"
+        assert primary.status_code == 201
+        assert primary.json()["is_primary"] is True
 
-        user_second = await client.post(
+        first_secondary = await client.post(
+            "/zones/", headers=user_headers, json=_zone_payload("User One")
+        )
+        second_secondary = await client.post(
             "/zones/", headers=user_headers, json=_zone_payload("User Two")
         )
-        assert user_second.status_code == 409
-        assert user_second.json()["error_code"] == "ZONE_QUOTA_MAX_TOTAL_REACHED"
+        assert first_secondary.status_code == 201
+        assert first_secondary.json()["is_primary"] is False
+        assert second_secondary.status_code == 201
+        overflow = await client.post(
+            "/zones/", headers=user_headers, json=_zone_payload("User Three")
+        )
+        assert overflow.status_code == 409
 
-        caps = await client.get("/zones/capabilities", headers=admin_headers)
-        assert caps.status_code == 200
-        payload = caps.json()
-        assert payload["role"] == "administrator"
-        assert payload["can_create_zone"] is False
-        assert payload["max_total"] == 2
-        assert payload["reason"] == "Maximum of 2 primary zones for administrators reached."
+        # Member can see own secondaries + admin primary; admin cannot see member secondaries.
+        user_list = await client.get("/zones/", headers=user_headers)
+        admin_list = await client.get("/zones/", headers=admin_headers)
+        assert user_list.status_code == 200
+        assert {row["name"] for row in user_list.json()} == {
+            "Admin Primary",
+            "User One",
+            "User Two",
+        }
+        assert admin_list.status_code == 200
+        assert {row["name"] for row in admin_list.json()} == {"Admin Primary"}
 
+        # Creating a second admin primary evicts the member's latest secondary.
+        second_primary = await client.post(
+            "/zones/", headers=admin_headers, json=_zone_payload("Admin Primary 2")
+        )
+        assert second_primary.status_code == 201
+        assert second_primary.json()["is_primary"] is True
+        evicted = second_primary.json().get("evicted_zones") or []
+        assert len(evicted) == 1
+        assert evicted[0]["name"] == "User Two"
+        assert int(evicted[0]["creator_id"]) == int(user_id)
+
+        user_list_after = await client.get("/zones/", headers=user_headers)
+        names_after = {row["name"] for row in user_list_after.json()}
+        assert "User Two" not in names_after
+        assert "User One" in names_after
+        assert "Admin Primary 2" in names_after
+
+        # With 2 primaries, member may keep only 1 secondary.
         user_caps = await client.get("/zones/capabilities", headers=user_headers)
         assert user_caps.status_code == 200
         assert user_caps.json()["can_create_zone"] is False
-        assert user_caps.json()["remaining_total"] == 0
         assert user_caps.json()["max_total"] == 1
 
 
 @pytest.mark.asyncio
-async def test_update_auth_and_normalized_name(zone_test_db, policy_limits):
+async def test_update_auth_primary_admin_only(zone_test_db, policy_limits):
     async with _client() as client:
         admin_id, admin_token = await _register_and_login(
             client, "admin-edit@example.com", "administrator", "edit-shared"
@@ -224,7 +280,7 @@ async def test_update_auth_and_normalized_name(zone_test_db, policy_limits):
 
 
 @pytest.mark.asyncio
-async def test_user_cannot_delete_admin_zone(zone_test_db, policy_limits):
+async def test_user_cannot_delete_admin_primary_zone(zone_test_db, policy_limits):
     async with _client() as client:
         admin_id, admin_token = await _register_and_login(
             client, "admin-ndel@example.com", "administrator", "ndel-shared"
@@ -251,9 +307,40 @@ async def test_user_cannot_delete_admin_zone(zone_test_db, policy_limits):
 
 
 @pytest.mark.asyncio
+async def test_admin_cannot_delete_member_secondary(zone_test_db, policy_limits):
+    async with _client() as client:
+        admin_id, admin_token = await _register_and_login(
+            client, "admin-sdel@example.com", "administrator", "sdel-shared"
+        )
+        _, user_token = await _register_and_login(
+            client,
+            "user-sdel@example.com",
+            "user",
+            "sdel-shared",
+            account_owner_id=admin_id,
+        )
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+        user_headers = {"Authorization": f"Bearer {user_token}"}
+
+        await client.post(
+            "/zones/", headers=admin_headers, json=_zone_payload("Admin Zone")
+        )
+        created = await client.post(
+            "/zones/", headers=user_headers, json=_zone_payload("Member Zone")
+        )
+        assert created.status_code == 201
+        zone_record_id = created.json()["id"]
+
+        forbidden = await client.delete(f"/zones/{zone_record_id}", headers=admin_headers)
+        assert forbidden.status_code == 403
+        assert forbidden.json()["error_code"] == "ZONE_DELETE_FORBIDDEN"
+
+
+@pytest.mark.asyncio
 async def test_concurrent_create_at_boundary_allows_single_success(zone_test_db, policy_limits):
     original_admin = settings.MAX_ZONES_ADMINISTRATOR
     settings.MAX_ZONES_ADMINISTRATOR = 1
+    settings.MAX_ZONES_ADMINISTRATOR_PRIMARY = 1
     try:
         async with _client() as client:
             _, admin_token = await _register_and_login(
@@ -271,3 +358,4 @@ async def test_concurrent_create_at_boundary_allows_single_success(zone_test_db,
             assert codes == [201, 409]
     finally:
         settings.MAX_ZONES_ADMINISTRATOR = original_admin
+        settings.MAX_ZONES_ADMINISTRATOR_PRIMARY = 2

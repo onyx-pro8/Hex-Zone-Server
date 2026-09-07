@@ -51,9 +51,16 @@ def _zone_rows_for_records(db: Session, zone_record_ids: list[int]) -> list[Zone
 
 
 def _is_primary_zone_row(zone: Zone, *, network_admin_id: int | None) -> bool:
-    """Primary acceptable zone = geometry created by the network administrator."""
+    """Primary acceptable zone uses explicit ``is_primary`` when set.
+
+    Falls back to creator==network admin for legacy rows / test doubles that
+    omit the flag — messaging fan-out rules are otherwise unchanged.
+    """
     if network_admin_id is None:
         return False
+    flag = getattr(zone, "is_primary", None)
+    if flag is not None:
+        return bool(flag)
     return int(zone.creator_id) == int(network_admin_id)
 
 

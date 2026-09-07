@@ -319,6 +319,40 @@ async def send_test_push_to_owner(
     return {**counts, "tokens": len(tokens)}
 
 
+async def send_plain_push_to_owners(
+    db: Session,
+    owner_ids: list[int],
+    *,
+    title: str,
+    body: str,
+    data: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Best-effort non-alarm push (zone eviction notices, etc.). Never raises."""
+    if not owner_ids:
+        return {"push_sent": 0, "push_failed": 0}
+    tokens = (
+        db.query(PushToken)
+        .filter(
+            PushToken.owner_id.in_(owner_ids),
+            PushToken.active.is_(True),
+        )
+        .all()
+    )
+    if not tokens:
+        return {"push_sent": 0, "push_failed": 0, "push_no_tokens": True}
+    try:
+        return await _dispatch_to_tokens(
+            tokens,
+            title=title,
+            body=body,
+            data=data or {},
+            channel_id=ANDROID_DEFAULT_PUSH_CHANNEL,
+        )
+    except Exception:
+        logger.exception("send_plain_push_to_owners failed")
+        return {"push_sent": 0, "push_failed": len(tokens)}
+
+
 async def _fetch_expo_receipts(
     ticket_ids: list[str],
     *,

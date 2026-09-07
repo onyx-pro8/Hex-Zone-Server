@@ -370,6 +370,7 @@ class ZoneResponse(BaseModel):
     geo_fence_polygon: Optional[dict] = None
     parameters: Optional[dict]
     active: bool
+    is_primary: bool = False
     created_at: datetime
     updated_at: datetime
 

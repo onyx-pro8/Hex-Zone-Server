@@ -15,8 +15,10 @@ from app.models.zone import Zone, ZoneType
 from app.services.access_policy import visible_owner_ids, visible_zone_owner_ids
 from app.services.account_type_policy import is_system_administrator
 from app.services.communal_zone_service import (
+    assign_communal_id,
     generate_communal_reference,
     is_valid_reference_format,
+    list_public_defining_zones,
     normalize_reference_id,
     resolution_to_response_payload as communal_resolution_to_response_payload,
     resolve_communal_reference,
@@ -34,13 +36,16 @@ from app.services.government_zone_service import (
 from app.services.zone_policy import (
     account_owner_ids_for_policy,
     capabilities_for_owner,
-    enforce_can_create,
     ensure_unique_zone_name,
     ensure_zone_delete_allowed,
     ensure_zone_edit_allowed,
+    list_zones_visibility_filter,
     normalize_zone_name,
     prepare_create_zone_policy,
+    prepare_zone_tier_on_create,
+    zone_is_primary,
 )
+from app.services.zone_service import notify_zone_evictions
 
 router = APIRouter(prefix="/zones", tags=["zones"])
 
@@ -181,6 +186,13 @@ class ZoneContractUpdate(BaseModel):
     geo_fence_polygon: Optional[dict[str, Any]] = None
 
 
+class EvictedZoneInfoResponse(BaseModel):
+    id: int
+    name: str
+    creator_id: int
+    zone_id: str = ""
+
+
 class ZoneContractResponse(BaseModel):
     """Canonical zone shape returned to frontend."""
 
@@ -193,8 +205,10 @@ class ZoneContractResponse(BaseModel):
     type: str
     geometry: dict[str, Any]
     config: dict[str, Any]
+    is_primary: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    evicted_zones: Optional[list[EvictedZoneInfoResponse]] = None
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -206,6 +220,7 @@ class ZoneContractResponse(BaseModel):
                 "owner_name": "Alex Rivera",
                 "name": "Warehouse Perimeter",
                 "type": "geofence",
+                "is_primary": True,
                 "geometry": {"geo_fence_polygon": {"type": "Polygon", "coordinates": [[[106.8, -6.2], [106.9, -6.2], [106.9, -6.3], [106.8, -6.2]]]}},
                 "config": {"h3_cells": ["8928308280fffff"]},
                 "created_at": "2026-04-23T09:00:00",
@@ -260,6 +275,17 @@ class ZoneReferenceValidateRequest(BaseModel):
     )
 
 
+class CommunalZoneSummary(BaseModel):
+    id: int
+    zone_id: str
+    name: str
+    type: str
+    owner_id: int
+    owner_name: Optional[str] = None
+    communal_id: Optional[str] = None
+    is_public: bool = True
+
+
 class ZoneReferenceValidateResponse(BaseModel):
     valid: bool
     zone_type: str
@@ -270,6 +296,8 @@ class ZoneReferenceValidateResponse(BaseModel):
     h3_cells: list[str] = Field(default_factory=list)
     source: Optional[str] = None
     message: Optional[str] = None
+    exists: Optional[bool] = None
+    zones: list[CommunalZoneSummary] = Field(default_factory=list)
 
 
 class ZoneReferenceGenerateRequest(BaseModel):
@@ -280,6 +308,28 @@ class ZoneReferenceGenerateRequest(BaseModel):
     )
 
 
+class AssignCommunalRequest(BaseModel):
+    communal_id: str = Field(..., min_length=3, max_length=32)
+    zone_ids: list[int] = Field(..., min_length=1, description="Zone DB record ids")
+    is_public: Optional[bool] = True
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "communal_id": "COMM-ABC123",
+                "zone_ids": [12, 15],
+                "is_public": True,
+            }
+        }
+    )
+
+
+class AssignCommunalResponse(BaseModel):
+    communal_id: str
+    updated: list[ZoneContractResponse]
+    message: str
+
+
 class ZoneCapabilitiesResponse(BaseModel):
     role: str
     can_create_zone: bool
@@ -288,6 +338,10 @@ class ZoneCapabilitiesResponse(BaseModel):
     max_total: int
     reserved_for_standard_users: int
     reason: Optional[str] = None
+    admin_primary_count: int = 0
+    max_primary: int = 2
+    next_zone_is_primary: bool = False
+    member_secondary_limit: int = 1
 
 
 class _DynamicResolvedCenter(BaseModel):
@@ -477,6 +531,7 @@ def _validate_zone_payload(zone_type: str, geometry: dict[str, Any], config: dic
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="communal_id requires non-empty config.communal_id",
             )
+        # Communal mode does not define geometry — membership is via shared ID.
         return
 
     if zone_type in {"government_local_code", "custom_2"}:
@@ -633,6 +688,7 @@ def _serialize_zone(
         "type": normalized_type,
         "geometry": geometry if isinstance(geometry, dict) else {},
         "config": config if isinstance(config, dict) else {},
+        "is_primary": zone_is_primary(zone),
         "created_at": zone.created_at.isoformat() if zone.created_at else None,
         "updated_at": zone.updated_at.isoformat() if zone.updated_at else None,
     }
@@ -704,7 +760,9 @@ async def create_zone(
     normalized = _normalize_payload(zone.model_dump(exclude_none=True), partial=False)
 
     capabilities = prepare_create_zone_policy(db, owner)
-    enforce_can_create(capabilities)
+    is_primary, evicted = prepare_zone_tier_on_create(
+        db, owner, capabilities=capabilities
+    )
 
     account_owner_ids = account_owner_ids_for_policy(db, owner)
 
@@ -730,12 +788,19 @@ async def create_zone(
     h3_cells = _extract_h3_cells(config)
     geo_fence_polygon = _extract_geo_fence_polygon(geometry)
 
+    # Defining zones are public by default so Communal mode can list them.
+    if zone_type not in {"communal_id", "custom_1"}:
+        if "is_public" not in config and "isPublic" not in config:
+            config = dict(config)
+            config["is_public"] = True
+
     db_zone = Zone(
         zone_id=zone.zone_id or owner.zone_id,
         owner_id=owner.id,
         creator_id=owner.id,
         zone_type=model_zone_type,
         name=normalized_name,
+        is_primary=is_primary,
         parameters={
             "contractType": zone_type,
             "geometry": geometry,
@@ -747,10 +812,17 @@ async def create_zone(
     db.add(db_zone)
     db.flush()
     db.commit()
+
+    if evicted:
+        await notify_zone_evictions(db, admin=owner, evicted=evicted)
+
     created_zone = zone_crud.get_zone_by_record_id_with_geojson(db, db_zone.id)
     if not created_zone:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve created zone")
-    return ZoneContractResponse.model_validate(_serialize_zone(created_zone, db=db))
+    payload = _serialize_zone(created_zone, db=db)
+    if evicted:
+        payload["evicted_zones"] = [item.to_dict() for item in evicted]
+    return ZoneContractResponse.model_validate(payload)
 
 
 @router.get(
@@ -807,6 +879,13 @@ async def list_zones(
             limit=limit,
         )
         zones = [zone for zone in zones if zone.owner_id in allowed_ids]
+        visibility = list_zones_visibility_filter(caller)
+        if visibility is not None:
+            zones = [
+                zone
+                for zone in zones
+                if zone_is_primary(zone) or int(zone.creator_id) == int(caller.id)
+            ]
         return [
             ZoneContractResponse.model_validate(row)
             for row in _serialize_zones(db, zones)
@@ -825,6 +904,13 @@ async def list_zones(
         skip=skip,
         limit=limit,
     )
+    visibility = list_zones_visibility_filter(caller)
+    if visibility is not None:
+        zones = [
+            zone
+            for zone in zones
+            if zone_is_primary(zone) or int(zone.creator_id) == int(caller.id)
+        ]
     return [
         ZoneContractResponse.model_validate(row)
         for row in _serialize_zones(db, zones)
@@ -1001,12 +1087,13 @@ async def validate_zone_reference(
     owner_ids = account_owner_ids_for_policy(db, owner)
 
     if resolved_type == "communal_id":
-        reference_id = normalize_reference_id(body.reference_id)
+        reference_id = normalize_reference_id(body.reference_id or "")
         if not is_valid_reference_format(reference_id):
             return ZoneReferenceValidateResponse(
                 valid=False,
                 zone_type=resolved_type,
                 reference_id=reference_id,
+                exists=False,
                 message="Reference ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
             )
         resolution = resolve_communal_reference(db, owner_ids, reference_id)
@@ -1015,9 +1102,29 @@ async def validate_zone_reference(
                 valid=False,
                 zone_type=resolved_type,
                 reference_id=reference_id,
-                message="Communal ID could not be resolved.",
+                exists=False,
+                message="Communal ID not found. You can generate a new one.",
             )
         payload = communal_resolution_to_response_payload(resolution)
+        matched_zones = resolution.get("zones") or []
+        summaries: list[CommunalZoneSummary] = []
+        if matched_zones:
+            serialized = _serialize_zones(db, matched_zones)
+            for row in serialized:
+                cfg = row.get("config") if isinstance(row.get("config"), dict) else {}
+                summaries.append(
+                    CommunalZoneSummary(
+                        id=int(row["id"]),
+                        zone_id=str(row["zone_id"]),
+                        name=str(row["name"]),
+                        type=str(row["type"]),
+                        owner_id=int(row["owner_id"]),
+                        owner_name=row.get("owner_name"),
+                        communal_id=str(cfg.get("communal_id") or reference_id),
+                        is_public=cfg.get("is_public", True) is not False,
+                    )
+                )
+        payload["zones"] = [s.model_dump() for s in summaries]
         return ZoneReferenceValidateResponse.model_validate(payload)
 
     address_payload = {
@@ -1155,7 +1262,90 @@ async def generate_zone_reference(
     owner_ids = account_owner_ids_for_policy(db, owner)
     resolution = generate_communal_reference(db, owner_ids)
     payload = communal_resolution_to_response_payload(resolution)
+    payload["zones"] = []
     return ZoneReferenceValidateResponse.model_validate(payload)
+
+
+@router.get(
+    "/public",
+    response_model=list[ZoneContractResponse],
+    summary="List public defining zones",
+    description=(
+        "List active public defining zones created by the caller and other users. "
+        "Communal mode uses this catalog for selection; geometry is not defined here."
+    ),
+)
+async def list_public_zones(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    zones = list_public_defining_zones(db, skip=skip, limit=limit)
+    return [
+        ZoneContractResponse.model_validate(row)
+        for row in _serialize_zones(db, zones)
+    ]
+
+
+@router.post(
+    "/assign-communal",
+    response_model=AssignCommunalResponse,
+    summary="Assign Communal ID to selected zones",
+    description=(
+        "Set config.communal_id on one or more zones the caller can edit. "
+        "Used by Communal mode after selecting public zones."
+    ),
+)
+async def assign_communal_to_zones(
+    body: AssignCommunalRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+
+    reference_id = normalize_reference_id(body.communal_id)
+    if not is_valid_reference_format(reference_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Communal ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
+        )
+
+    updated_rows: list[Zone] = []
+    for record_id in body.zone_ids:
+        target = zone_crud.get_zone_by_record_id_with_geojson(db, record_id)
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Zone {record_id} not found",
+            )
+        ensure_zone_edit_allowed(owner, target)
+        assign_communal_id(target, reference_id, is_public=body.is_public)
+        updated_rows.append(target)
+
+    db.flush()
+    db.commit()
+
+    refreshed: list[Zone] = []
+    for zone in updated_rows:
+        row = zone_crud.get_zone_by_record_id_with_geojson(db, zone.id)
+        if row:
+            refreshed.append(row)
+
+    serialized = [
+        ZoneContractResponse.model_validate(row)
+        for row in _serialize_zones(db, refreshed)
+    ]
+    return AssignCommunalResponse(
+        communal_id=reference_id,
+        updated=serialized,
+        message=f"Assigned {reference_id} to {len(serialized)} zone(s).",
+    )
 
 
 @router.get(
