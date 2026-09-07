@@ -23,6 +23,7 @@ from app.services.access_policy import zone_listing_owner_ids
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
 from app.services.private_plus_messaging import geo_event_visible_in_private_plus_shared_inbox
+from app.services.ns_panic_privacy import apply_ns_panic_redaction_to_zone_message_fields
 from app.core.config import settings
 from app.websocket.manager import ws_manager
 
@@ -472,12 +473,24 @@ def zone_message_event_to_member_zone_message_response(
         if urls:
             images = urls
 
-    return ZoneMessageResponse(
-        id=row.id,
+    # NS_PANIC: withhold sender / network / GPS on client payloads (anti-retaliation).
+    privacy = apply_ns_panic_redaction_to_zone_message_fields(
+        message_type=row.type,
         zone_id=row.zone_id,
         sender_id=row.sender_id,
-        receiver_id=row.receiver_id,
         broadcast_name=broadcast_name,
+        latitude=latitude,
+        longitude=longitude,
+        delivered_owner_ids=delivered_owner_ids,
+        relevant_zone_fields=relevant_zone_fields,
+    )
+
+    return ZoneMessageResponse(
+        id=row.id,
+        zone_id=str(privacy["zone_id"]),
+        sender_id=privacy.get("sender_id"),
+        receiver_id=row.receiver_id,
+        broadcast_name=privacy.get("broadcast_name"),
         type=row.type,
         category=type_category(gtype).value,
         scope=type_scope(gtype).value,
@@ -488,9 +501,9 @@ def zone_message_event_to_member_zone_message_response(
         ),
         message=message_text,
         created_at=row.created_at,
-        latitude=latitude,
-        longitude=longitude,
-        delivered_owner_ids=delivered_owner_ids,
+        latitude=privacy.get("latitude"),
+        longitude=privacy.get("longitude"),
+        delivered_owner_ids=privacy.get("delivered_owner_ids"),
         guest_id=access_thread_guest_marker(row),
         permission_visibility=perm_vis,
         guest_access_session_id=row.guest_access_session_id,
@@ -499,7 +512,9 @@ def zone_message_event_to_member_zone_message_response(
         topic=topic,
         subtopic=subtopic,
         images=images,
-        **relevant_zone_fields,
+        relevant_zone_name=privacy.get("relevant_zone_name"),
+        relevant_zone_network_id=privacy.get("relevant_zone_network_id"),
+        relevant_zone_label=privacy.get("relevant_zone_label"),
     )
 
 

@@ -61,6 +61,7 @@ from app.services import smart_home_webhook_service
 from app.services import wellness_ack_service
 from app.services import alarm_read_service
 from app.services.member_service import get_owner_live_coordinates, upsert_member_location
+from app.services.ns_panic_privacy import redact_ns_panic_geo_result
 from app.websocket.manager import ws_manager
 
 router = APIRouter(prefix="/message-feature", tags=["message-feature"])
@@ -76,21 +77,36 @@ async def _finalize_geo_propagation(db: Session, result: dict) -> dict:
     ws_recipients = list({int(oid) for oid in delivered if isinstance(oid, int)})
     if isinstance(sender_id, int) and sender_id not in ws_recipients:
         ws_recipients.append(sender_id)
+
+    # NS_PANIC: clients receive content only (text/images + Private labels).
+    # Routing / push targeting still uses the unredacted delivered / sender ids above.
+    client_result = redact_ns_panic_geo_result(result)
+
     if ws_recipients:
-        await ws_manager.broadcast_to_users(ws_recipients, "NEW_GEO_MESSAGE", result)
+        await ws_manager.broadcast_to_users(ws_recipients, "NEW_GEO_MESSAGE", client_result)
 
     if is_pushable_geo_type(str(result.get("type") or "")):
-        push_stats = await push_notification_service.send_alarm_push_to_owners(db, delivered, result)
-        result.update(push_stats)
-        push_notification_service.schedule_panic_retries_if_needed(delivered, result, push_stats)
+        push_stats = await push_notification_service.send_alarm_push_to_owners(
+            db, delivered, client_result
+        )
+        client_result.update(push_stats)
+        push_notification_service.schedule_panic_retries_if_needed(
+            delivered, client_result, push_stats
+        )
         # Deliver to each recipient/sender hub that configured sn_webhook.
         webhook_stats = await smart_home_webhook_service.send_smart_home_webhooks(
             db,
             ws_recipients,
-            result,
+            client_result,
         )
-        result.update(webhook_stats)
-    return result
+        client_result.update(webhook_stats)
+
+    # Keep delivery diagnostics on the HTTP response for the sender; identity/GPS
+    # stay redacted. Recipients already received the fully redacted WS/push payload.
+    if client_result is not result:
+        client_result["delivered_owner_ids"] = delivered
+        client_result["blocked_owner_ids"] = list(result.get("blocked_owner_ids") or [])
+    return client_result
 
 
 def _handle_geo_propagation_errors(exc: Exception) -> None:
