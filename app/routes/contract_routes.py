@@ -140,6 +140,7 @@ class ZoneUpsertRequest(BaseModel):
     geometry: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     id: str | None = None
+    is_primary: bool | None = None
 
     @model_validator(mode="before")
     @classmethod

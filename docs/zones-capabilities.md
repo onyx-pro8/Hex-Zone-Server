@@ -11,7 +11,8 @@ edit/delete authorization in server-side policy.
 - Member secondary cap = `MAX_ZONES_ADMINISTRATOR - admin_primary_count`
   - 1 admin primary → each member may create **2** secondary zones
   - 2 admin primaries → each member may create **1** secondary zone
-- When an admin creates an additional primary and a member is over the new secondary cap, that member's **latest** secondary zone is removed automatically
+- Create quota is **lifetime**: soft-deleted zones still count toward the creator's max. Deleting a zone does **not** free a create slot.
+- Active primary count (only) drives member secondary caps and messaging visibility.
 - Listing visibility:
   - **Primary** zones: visible to the account administrator and all members
   - **Secondary** zones: visible only to the creator
@@ -22,6 +23,7 @@ edit/delete authorization in server-side policy.
 - **Primary** zones: modified and removed by the **account administrator** only
 - **Secondary** zones: modified and removed by the **creator** only
 - System administrators retain full access
+- Administrators may **choose** primary vs secondary on create when both slots remain (`is_primary` on create payload / Zone tier UI)
 
 ## Naming policy
 

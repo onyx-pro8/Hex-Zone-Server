@@ -327,12 +327,16 @@ def get_zone_by_record_id_with_geojson(db: Session, record_id: int) -> Optional[
 
 
 def delete_zone(db: Session, zone_id: str, owner_id: Optional[int] = None) -> bool:
-    """Delete a zone."""
+    """Soft-delete a zone (active=False). Create quota still counts the row."""
+    from app.services.zone_policy import soft_delete_zone
+
     db_zone = get_zone(db, zone_id, owner_id)
     if not db_zone:
         return False
-    
-    db.delete(db_zone)
+    if not bool(getattr(db_zone, "active", True)):
+        return False
+    soft_delete_zone(db_zone)
+    db.flush()
     return True
 
 

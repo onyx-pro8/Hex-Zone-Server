@@ -14,6 +14,7 @@ from app.services.zone_policy import (
     list_zones_visibility_filter,
     normalize_zone_name,
     prepare_zone_tier_on_create,
+    soft_delete_zone,
     zone_is_primary,
 )
 
@@ -104,7 +105,12 @@ def _serialize_zone(
 
 
 def create_zone(db: Session, owner: Owner, payload: dict) -> dict:
-    is_primary, evicted = prepare_zone_tier_on_create(db, owner)
+    requested = payload.get("is_primary")
+    if requested is not None and not isinstance(requested, bool):
+        requested = None
+    is_primary, evicted = prepare_zone_tier_on_create(
+        db, owner, requested_is_primary=requested
+    )
 
     account_owner_ids = account_owner_ids_for_policy(db, owner)
 
@@ -217,11 +223,12 @@ def update_zone(db: Session, owner: Owner, zone_id: str, payload: dict) -> dict:
 
 
 def delete_zone(db: Session, owner: Owner, zone_id: str) -> None:
-    zone = db.query(Zone).filter(Zone.zone_id == zone_id).first()
+    zone = db.query(Zone).filter(Zone.zone_id == zone_id, Zone.active.is_(True)).first()
     if not zone:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Zone not found")
     ensure_zone_delete_allowed(db, owner, zone)
-    db.delete(zone)
+    soft_delete_zone(zone)
+    db.flush()
 
 
 async def notify_zone_evictions(db: Session, *, admin: Owner, evicted: list) -> None:

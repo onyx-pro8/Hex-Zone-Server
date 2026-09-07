@@ -46,6 +46,8 @@ class ZoneCapabilities:
     max_primary: int = 2
     next_zone_is_primary: bool = False
     member_secondary_limit: int = 1
+    can_create_primary: bool = False
+    can_create_secondary: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -60,6 +62,8 @@ class ZoneCapabilities:
             "max_primary": self.max_primary,
             "next_zone_is_primary": self.next_zone_is_primary,
             "member_secondary_limit": self.member_secondary_limit,
+            "can_create_primary": self.can_create_primary,
+            "can_create_secondary": self.can_create_secondary,
         }
 
 
@@ -113,7 +117,10 @@ def lock_creator_for_zone_policy(db: Session, creator_id: int) -> int:
 
 
 def count_zones_for_creator(db: Session, creator_id: int) -> int:
-    """Count zones created by this user (`zones.creator_id`)."""
+    """Count all zones ever created by this user (active + soft-deleted).
+
+    Create quota is lifetime: deleting a zone does not free a create slot.
+    """
     total = db.execute(
         select(func.count(Zone.id)).where(Zone.creator_id == creator_id)
     ).scalar()
@@ -121,12 +128,14 @@ def count_zones_for_creator(db: Session, creator_id: int) -> int:
 
 
 def count_primary_zones_for_creators(db: Session, creator_ids: Sequence[int]) -> int:
+    """Count active primary zones (used for member secondary caps / visibility tier)."""
     if not creator_ids:
         return 0
     total = db.execute(
         select(func.count(Zone.id)).where(
             Zone.creator_id.in_(tuple(creator_ids)),
             Zone.is_primary.is_(True),
+            Zone.active.is_(True),
         )
     ).scalar()
     return int(total or 0)
@@ -168,12 +177,14 @@ def build_capabilities(
     if normalized == "administrator":
         max_total = max_admin_zones()
         remaining_total = max(0, max_total - total_zones)
-        next_is_primary = admin_primary_count < max_primary
+        can_primary = remaining_total > 0 and admin_primary_count < max_primary
+        can_secondary = remaining_total > 0
+        next_is_primary = can_primary
         reason = None
         if remaining_total <= 0:
             reason = (
                 f"Maximum of {max_total} zones for administrators reached "
-                f"(up to {max_primary} primary)."
+                f"(up to {max_primary} primary). Deleting a zone does not free a create slot."
             )
         return ZoneCapabilities(
             role=role,
@@ -187,6 +198,8 @@ def build_capabilities(
             max_primary=max_primary,
             next_zone_is_primary=next_is_primary,
             member_secondary_limit=member_limit,
+            can_create_primary=can_primary,
+            can_create_secondary=can_secondary,
         )
 
     max_total = member_limit
@@ -201,7 +214,8 @@ def build_capabilities(
         else:
             reason = (
                 f"Maximum of {max_total} secondary zone"
-                f"{'' if max_total == 1 else 's'} for members reached."
+                f"{'' if max_total == 1 else 's'} for members reached. "
+                "Deleting a zone does not free a create slot."
             )
     return ZoneCapabilities(
         role=role,
@@ -215,6 +229,8 @@ def build_capabilities(
         max_primary=max_primary,
         next_zone_is_primary=False,
         member_secondary_limit=member_limit,
+        can_create_primary=False,
+        can_create_secondary=remaining_total > 0,
     )
 
 
@@ -369,6 +385,11 @@ def list_zones_visibility_filter(owner: Owner):
     return or_(Zone.is_primary.is_(True), Zone.creator_id == owner.id)
 
 
+def soft_delete_zone(zone: Zone) -> None:
+    """Mark a zone inactive. Create quota still counts this row."""
+    zone.active = False
+
+
 def evict_member_secondary_overflow(
     db: Session,
     *,
@@ -378,7 +399,7 @@ def evict_member_secondary_overflow(
 ) -> list[EvictedZoneInfo]:
     """When admin primary count rises, trim each member down to the new secondary max.
 
-    Removes the member's most recently created secondary zone when over quota.
+    Soft-deletes the member's most recently created active secondary when over quota.
     """
     new_limit = member_secondary_limit_for_primary_count(new_primary_count)
     evicted: list[EvictedZoneInfo] = []
@@ -390,6 +411,7 @@ def evict_member_secondary_overflow(
                 .where(
                     Zone.creator_id == member_id,
                     Zone.is_primary.is_(False),
+                    Zone.active.is_(True),
                 )
                 .order_by(Zone.created_at.desc(), Zone.id.desc())
             )
@@ -406,7 +428,7 @@ def evict_member_secondary_overflow(
                     zone_id=str(zone.zone_id or ""),
                 )
             )
-            db.delete(zone)
+            soft_delete_zone(zone)
     if evicted:
         db.flush()
     return evicted
@@ -417,23 +439,62 @@ def prepare_zone_tier_on_create(
     owner: Owner,
     *,
     capabilities: ZoneCapabilities | None = None,
+    requested_is_primary: bool | None = None,
 ) -> tuple[bool, list[EvictedZoneInfo]]:
     """Decide is_primary for the new zone and evict member overflow if needed.
 
-    Returns ``(is_primary, evicted_zones)``.
+    Administrators may explicitly choose primary vs secondary when both slots
+    remain. Members are always secondary. Returns ``(is_primary, evicted_zones)``.
     """
     caps = capabilities or prepare_create_zone_policy(db, owner)
     enforce_can_create(caps)
-    will_be_primary = bool(caps.next_zone_is_primary)
+
+    is_admin = (owner.role.value or "").strip().lower() == "administrator"
+    if not is_admin:
+        if requested_is_primary is True:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error_code": "ZONE_PRIMARY_FORBIDDEN",
+                    "message": "Members can create secondary zones only.",
+                },
+            )
+        return False, []
+
+    if requested_is_primary is None:
+        will_be_primary = bool(caps.next_zone_is_primary)
+    else:
+        will_be_primary = bool(requested_is_primary)
+
+    if will_be_primary and not caps.can_create_primary:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "ZONE_PRIMARY_QUOTA_REACHED",
+                "message": (
+                    f"Maximum of {caps.max_primary} primary zones for "
+                    "administrators reached."
+                ),
+            },
+        )
+    if not will_be_primary and not caps.can_create_secondary:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "ZONE_QUOTA_MAX_TOTAL_REACHED",
+                "message": caps.reason
+                or "Maximum zone capacity has been reached for this user.",
+            },
+        )
+
     evicted: list[EvictedZoneInfo] = []
     if will_be_primary:
         new_primary_count = caps.admin_primary_count + 1
-        if new_primary_count > caps.admin_primary_count:
-            root_ids = account_owner_ids_for_policy(db, owner)
-            evicted = evict_member_secondary_overflow(
-                db,
-                account_owner_ids=root_ids,
-                admin_id=owner.id,
-                new_primary_count=new_primary_count,
-            )
+        root_ids = account_owner_ids_for_policy(db, owner)
+        evicted = evict_member_secondary_overflow(
+            db,
+            account_owner_ids=root_ids,
+            admin_id=owner.id,
+            new_primary_count=new_primary_count,
+        )
     return will_be_primary, evicted

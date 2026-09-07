@@ -43,6 +43,7 @@ from app.services.zone_policy import (
     normalize_zone_name,
     prepare_create_zone_policy,
     prepare_zone_tier_on_create,
+    soft_delete_zone,
     zone_is_primary,
 )
 from app.services.zone_service import notify_zone_evictions
@@ -153,6 +154,13 @@ class ZoneContractCreate(BaseModel):
     h3_cells: Optional[list[str]] = None
     geo_fence_polygon: Optional[dict[str, Any]] = None
     zone_id: Optional[str] = None
+    is_primary: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Administrators may choose primary vs secondary when both slots remain. "
+            "Members must omit or set false (secondary only)."
+        ),
+    )
 
 
 class ZoneContractUpdate(BaseModel):
@@ -342,6 +350,8 @@ class ZoneCapabilitiesResponse(BaseModel):
     max_primary: int = 2
     next_zone_is_primary: bool = False
     member_secondary_limit: int = 1
+    can_create_primary: bool = False
+    can_create_secondary: bool = False
 
 
 class _DynamicResolvedCenter(BaseModel):
@@ -761,7 +771,10 @@ async def create_zone(
 
     capabilities = prepare_create_zone_policy(db, owner)
     is_primary, evicted = prepare_zone_tier_on_create(
-        db, owner, capabilities=capabilities
+        db,
+        owner,
+        capabilities=capabilities,
+        requested_is_primary=zone.is_primary,
     )
 
     account_owner_ids = account_owner_ids_for_policy(db, owner)
@@ -1551,5 +1564,10 @@ async def delete_zone(
         )
 
     ensure_zone_delete_allowed(db, owner, target)
-    db.delete(target)
+    if not bool(getattr(target, "active", True)):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Zone not found",
+        )
+    soft_delete_zone(target)
     db.commit()
