@@ -312,6 +312,7 @@ async def _register_and_login(
     zone_id: str,
     first_name: str,
     last_name: str,
+    account_type: str = "private",
 ) -> tuple[int, str]:
     register_response = await client.post(
         "/owners/register",
@@ -320,7 +321,7 @@ async def _register_and_login(
             "zone_id": zone_id,
             "first_name": first_name,
             "last_name": last_name,
-            "account_type": "private",
+            "account_type": account_type,
             "password": "SecurePassword123",
             "registration_code": "FREE",
             "address": "Test Address 1",
@@ -341,7 +342,7 @@ async def _register_and_login(
 
 @pytest.mark.asyncio
 async def test_qr_join_uses_inviter_zone_id(test_db, override_get_db):
-    """QR join should always inherit inviter zone_id."""
+    """Network-admin QR join should inherit inviter zone_id as a user member."""
     async with AsyncClient(app=app, base_url="http://test") as client:
         _, inviter_token = await _register_and_login(
             client,
@@ -349,6 +350,7 @@ async def test_qr_join_uses_inviter_zone_id(test_db, override_get_db):
             zone_id="inviter-zone-id",
             first_name="Invite",
             last_name="Owner",
+            account_type="private_plus",
         )
 
         generate_response = await client.post(
@@ -373,6 +375,8 @@ async def test_qr_join_uses_inviter_zone_id(test_db, override_get_db):
         assert join_response.status_code == 200
         joined_owner = join_response.json()
         assert joined_owner["zone_id"] == "inviter-zone-id"
+        assert joined_owner["role"] == "user"
+        assert joined_owner["account_type"] == "private_plus"
 
 
 @pytest.mark.asyncio

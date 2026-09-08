@@ -45,7 +45,7 @@ async def _register_admin(client: AsyncClient, *, zone_id: str) -> tuple[int, st
             "zone_id": zone_id,
             "first_name": "Zone",
             "last_name": "Admin",
-            "account_type": "private",
+            "account_type": "private_plus",
             "password": "SecurePassword123",
             "registration_code": "FREE",
             "address": "Admin Address",

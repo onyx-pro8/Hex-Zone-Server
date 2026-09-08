@@ -7,6 +7,7 @@ from app.schemas.schemas import (
     H3ConversionRequest,
     H3ConversionResponse,
     QRRegistrationCreate,
+    QRRegistrationPreview,
     QRRegistrationResponse,
     QRRegistrationUse,
     OwnerResponse,
@@ -15,6 +16,7 @@ from app.core.h3_utils import lat_lng_to_h3_cell
 from app.core.security import get_current_user
 from app.crud import qr_registration as qr_crud
 from app.crud import owner as owner_crud
+from app.models.owner import Owner, OwnerRole
 from app.services.registration_code_service import (
     issue_registration_code_for_email_tier,
     mint_registration_code,
@@ -24,7 +26,10 @@ from app.services.device_entitlements import (
     assert_admin_user_member_capacity,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
-from app.services.account_type_policy import account_type_for_invited_member
+from app.services.account_type_policy import (
+    account_type_for_invited_member,
+    is_system_administrator,
+)
 from app.services.system_admin_seed import (
     SYSTEM_ADMIN_EMAIL,
     SYSTEM_ADMIN_ZONE_ID,
@@ -207,19 +212,20 @@ async def convert_to_h3(
     response_model=QRRegistrationResponse,
     summary="Generate QR registration token",
     description=(
-        "Generate invite token used by **account/member join** QR flow only. "
+        "Generate invite token used by the QR registration flow. "
         "Not for door guest access — use **`GET /api/access/qr-link`** for canonical **`/access?zid=`** URLs. "
-        "Available to administrators of account tiers that support invited user members: "
-        "**Private**, **Private+**, and **Enhanced+**. "
-        "**Exclusive** and **Enhanced** (solo) accounts cannot generate member invites. "
+        "**System administrator (Private):** provisions a new **Exclusive** network administrator "
+        "(invitee chooses their own network ID on join). "
+        "**Private+ / Enhanced+:** invites a user member onto the inviter's existing network. "
+        "**Exclusive** and **Enhanced** (solo) accounts cannot generate these invites. "
         "Send **`expires_in_hours`: 0** (or **null**) for a never-expiring "
         "**multi-use** token (printed outdoor-sign QR). Timed tokens are single-use."
     ),
     responses={
         status.HTTP_403_FORBIDDEN: {
             "description": (
-                "Caller is not an administrator of an invite-capable tier, or the "
-                "administrator has already reached their invited-user capacity."
+                "Caller is not an administrator of an invite-capable tier, or a "
+                "non–system-admin has already reached invited-user capacity."
             ),
         },
         status.HTTP_404_NOT_FOUND: {
@@ -233,7 +239,7 @@ async def generate_qr_registration(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Generate QR registration token for inviting a user member."""
+    """Generate QR registration token for member invite or new-network provisioning."""
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
         raise HTTPException(
@@ -255,9 +261,10 @@ async def generate_qr_registration(
             ),
         )
 
-    # Reject up-front when the administrator has already filled their invited-user
-    # capacity so they get a clean error instead of a token that cannot be redeemed.
-    assert_admin_user_member_capacity(db, owner)
+    # System-admin tokens provision new Exclusive network admins (not members),
+    # so invited-user capacity does not apply.
+    if not is_system_administrator(owner):
+        assert_admin_user_member_capacity(db, owner)
 
     qr = qr_crud.create_qr_registration(
         db,
@@ -269,15 +276,93 @@ async def generate_qr_registration(
     return QRRegistrationResponse.model_validate(qr)
 
 
+def _load_valid_qr_and_inviter(db: Session, token: str):
+    """Validate token lifecycle and return (qr, inviter_admin)."""
+    qr = qr_crud.get_qr_registration(db, token)
+    if not qr:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invalid or expired QR registration token",
+        )
+
+    if qr.used and not qr.is_reusable():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="QR registration token already used",
+        )
+
+    if qr.is_expired():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="QR registration token has expired",
+        )
+
+    owner = owner_crud.get_owner(db, qr.owner_id)
+    if (
+        not owner
+        or owner.role.value != "administrator"
+        or not account_type_supports_member_invite(owner.account_type.value)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid QR registration token",
+        )
+    return qr, owner
+
+
+@router.get(
+    "/qr/preview",
+    response_model=QRRegistrationPreview,
+    summary="Preview QR invite token",
+    description=(
+        "Public (no auth) preview of a QR invite. Clients use this to choose the "
+        "join form: **member** (inherit inviter zone) vs **new_network_admin** "
+        "(Exclusive administrator of a new network ID supplied on join)."
+    ),
+    responses={
+        status.HTTP_400_BAD_REQUEST: {
+            "description": "QR token already used (timed) or expired.",
+        },
+        status.HTTP_403_FORBIDDEN: {
+            "description": "QR token is invalid for account join policy.",
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "QR token not found.",
+        },
+    },
+)
+async def preview_qr_registration(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Return invite kind for the join UI."""
+    _, owner = _load_valid_qr_and_inviter(db, token.strip())
+    if is_system_administrator(owner):
+        return QRRegistrationPreview(
+            invite_kind="new_network_admin",
+            account_type="exclusive",
+            zone_id=None,
+        )
+    member_type = account_type_for_invited_member(owner)
+    return QRRegistrationPreview(
+        invite_kind="member",
+        account_type=member_type.value,
+        zone_id=owner.zone_id,
+    )
+
+
 @router.post(
     "/qr/join",
     response_model=OwnerResponse,
     summary="Join account with QR token",
     description=(
         "Complete registration by consuming an invite token from the QR flow. "
+        "**System administrator (Private) tokens:** create an **Exclusive** "
+        "administrator for a **new** network; require **`zone_id`** in the body. "
+        "**Other invite-capable admins:** create a **user** member on the inviter's "
+        "zone (inherit zone / account type). "
         "Timed tokens (1h / 24h / 7d / 30d) are single-use. Never-expiring (∞) "
-        "tokens can be redeemed by multiple members until the account's member "
-        "capacity is reached."
+        "tokens can be redeemed multiple times until policy limits apply."
     ),
     responses={
         status.HTTP_400_BAD_REQUEST: {
@@ -290,7 +375,10 @@ async def generate_qr_registration(
             "description": "QR token not found.",
         },
         status.HTTP_409_CONFLICT: {
-            "description": "Email already registered.",
+            "description": "Email already registered, or network ID already in use.",
+        },
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            "description": "Missing zone_id on a system-administrator invite.",
         },
     },
     response_description="Newly created owner account from QR flow.",
@@ -299,46 +387,9 @@ async def join_with_qr(
     qr_data: QRRegistrationUse,
     db: Session = Depends(get_db),
 ):
-    """Join a Private account using QR registration token."""
-    # Find QR registration by token
-    qr = qr_crud.get_qr_registration(db, qr_data.token)
-    if not qr:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Invalid or expired QR registration token",
-        )
-    
-    # Timed tokens are single-use. Never-expiring (∞) tokens stay redeemable
-    # for additional members (subject to account capacity).
-    if qr.used and not qr.is_reusable():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="QR registration token already used",
-        )
-    
-    # Check if expired
-    if qr.is_expired():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="QR registration token has expired",
-        )
-    
-    # Ensure this token belongs to an invite-capable administrator
-    owner = owner_crud.get_owner(db, qr.owner_id)
-    if (
-        not owner
-        or owner.role.value != "administrator"
-        or not account_type_supports_member_invite(owner.account_type.value)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid QR registration token",
-        )
+    """Redeem a QR invite as a member or as a new Exclusive network admin."""
+    qr, owner = _load_valid_qr_and_inviter(db, qr_data.token)
 
-    # Final capacity gate: e.g. Exclusive admin already has their 1 invited user.
-    assert_admin_user_member_capacity(db, owner)
-
-    # Check if email already exists
     existing = owner_crud.get_owner_by_email(db, qr_data.email)
     if existing:
         raise HTTPException(
@@ -346,13 +397,59 @@ async def join_with_qr(
             detail="Email already registered",
         )
 
-    # Invited members inherit the inviter's tier. Private is reserved for
-    # system administrators, so those invites become Exclusive.
     from app.schemas.schemas import OwnerCreate, AccountTypeEnum, OwnerRoleEnum
+
+    if is_system_administrator(owner):
+        new_zone_id = (qr_data.zone_id or "").strip()
+        if not new_zone_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "zone_id is required when joining via a system administrator "
+                    "invite (new Exclusive network)"
+                ),
+            )
+        conflict = (
+            db.query(Owner)
+            .filter(
+                Owner.zone_id == new_zone_id,
+                Owner.role == OwnerRole.ADMINISTRATOR,
+                Owner.active.is_(True),
+            )
+            .first()
+        )
+        if conflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Network ID already in use",
+            )
+
+        new_owner_data = OwnerCreate(
+            email=qr_data.email,
+            zone_id=new_zone_id,
+            first_name=qr_data.first_name,
+            last_name=qr_data.last_name,
+            password=qr_data.password,
+            account_type=AccountTypeEnum.EXCLUSIVE,
+            role=OwnerRoleEnum.ADMINISTRATOR,
+            account_owner_id=None,
+            address=qr_data.address,
+            phone=qr_data.phone,
+        )
+        new_owner = owner_crud.create_owner(db, new_owner_data)
+
+        if not qr.is_reusable():
+            qr_crud.mark_qr_registration_used(db, qr.token)
+        db.commit()
+
+        return OwnerResponse.model_validate(new_owner)
+
+    # Network-admin member invite: inherit inviter zone and tier.
+    assert_admin_user_member_capacity(db, owner)
+
     member_account_type = account_type_for_invited_member(owner)
     new_owner_data = OwnerCreate(
         email=qr_data.email,
-        # Enforce inviter zone ownership for all QR-based joins.
         zone_id=owner.zone_id,
         first_name=qr_data.first_name,
         last_name=qr_data.last_name,

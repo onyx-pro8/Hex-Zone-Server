@@ -69,18 +69,18 @@ def _admin(
     return owner, token
 
 
-async def _join(client: AsyncClient, token: str, email: str):
-    return await client.post(
-        "/utils/qr/join",
-        json={
-            "token": token,
-            "email": email,
-            "first_name": "New",
-            "last_name": "Member",
-            "password": "SecurePassword123",
-            "address": "Member Address",
-        },
-    )
+async def _join(client: AsyncClient, token: str, email: str, *, zone_id: str | None = None):
+    body = {
+        "token": token,
+        "email": email,
+        "first_name": "New",
+        "last_name": "Member",
+        "password": "SecurePassword123",
+        "address": "Member Address",
+    }
+    if zone_id is not None:
+        body["zone_id"] = zone_id
+    return await client.post("/utils/qr/join", json=body)
 
 
 @pytest.mark.asyncio
@@ -198,8 +198,8 @@ async def test_qr_generate_rejected_for_exclusive_admin(test_db, override_get_db
 
 
 @pytest.mark.asyncio
-async def test_qr_join_system_admin_assigns_exclusive(test_db, override_get_db):
-    """Private (system admin) invites must not create Private members."""
+async def test_qr_join_system_admin_provisions_exclusive_network_admin(test_db, override_get_db):
+    """Private (system admin) invites create Exclusive admins of a new network."""
     admin, token = _admin(
         test_db,
         email="admin@test.com",
@@ -214,11 +214,79 @@ async def test_qr_join_system_admin_assigns_exclusive(test_db, override_get_db):
         )
         assert generate.status_code == 200, generate.text
         assert generate.json()["expires_at"] is None
+        invite = generate.json()["token"]
 
-        join = await _join(client, generate.json()["token"], "invited-member@example.com")
+        preview = await client.get("/utils/qr/preview", params={"token": invite})
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["invite_kind"] == "new_network_admin"
+        assert preview.json()["account_type"] == "exclusive"
+        assert preview.json()["zone_id"] is None
+
+        missing_zone = await _join(client, invite, "invited-admin@example.com")
+        assert missing_zone.status_code == 422
+
+        join = await _join(
+            client,
+            invite,
+            "invited-admin@example.com",
+            zone_id="NEW-NETWORK-42",
+        )
         assert join.status_code == 200, join.text
         joined = join.json()
         assert joined["account_type"] == "exclusive"
-        assert joined["role"] == "user"
-        assert joined["zone_id"] == admin.zone_id
-        assert joined["account_owner_id"] == admin.id
+        assert joined["role"] == "administrator"
+        assert joined["zone_id"] == "NEW-NETWORK-42"
+        assert joined["zone_id"] != admin.zone_id
+        assert joined["account_owner_id"] == joined["id"]
+
+
+@pytest.mark.asyncio
+async def test_qr_join_system_admin_rejects_duplicate_network_id(test_db, override_get_db):
+    admin, token = _admin(
+        test_db,
+        email="admin@test.com",
+        zone_id="DISTRICT-11",
+        account_type=AccountType.PRIVATE,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert generate.status_code == 200, generate.text
+        join = await _join(
+            client,
+            generate.json()["token"],
+            "dup-network@example.com",
+            zone_id=admin.zone_id,
+        )
+        assert join.status_code == 409
+        text = str(join.json().get("message") or join.json().get("detail") or "").lower()
+        assert "network id" in text or "already" in text
+
+
+@pytest.mark.asyncio
+async def test_qr_preview_member_invite(test_db, override_get_db):
+    admin, token = _admin(
+        test_db,
+        email="plus-admin@example.com",
+        zone_id="plus-zone",
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert generate.status_code == 200, generate.text
+        preview = await client.get(
+            "/utils/qr/preview",
+            params={"token": generate.json()["token"]},
+        )
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+        assert body["invite_kind"] == "member"
+        assert body["zone_id"] == admin.zone_id
+        assert body["account_type"] == "private_plus"

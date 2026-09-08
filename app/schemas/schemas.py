@@ -407,6 +407,22 @@ class QRRegistrationResponse(BaseModel):
         from_attributes = True
 
 
+class QRRegistrationPreview(BaseModel):
+    """Public preview of a QR invite token (no auth required)."""
+
+    invite_kind: Literal["member", "new_network_admin"]
+    account_type: str = Field(
+        description=(
+            "Account type the redeeming user will receive. "
+            "System-admin invites always provision Exclusive network administrators."
+        ),
+    )
+    zone_id: Optional[str] = Field(
+        default=None,
+        description="Inviter zone id for member invites; null for new-network-admin invites.",
+    )
+
+
 class QRRegistrationUse(BaseModel):
     """QR registration use schema (for joining account)."""
     token: str = Field(..., min_length=1)
@@ -416,6 +432,15 @@ class QRRegistrationUse(BaseModel):
     password: str = Field(..., min_length=8)
     address: str = Field(..., min_length=1, max_length=255)
     phone: Optional[str] = Field(None, max_length=20)
+    zone_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description=(
+            "Required when redeeming a system-administrator invite: the new "
+            "Exclusive network administrator's network ID."
+        ),
+    )
 
 
 # ==================== AUTH SCHEMAS ====================
