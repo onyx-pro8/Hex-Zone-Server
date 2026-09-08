@@ -117,12 +117,15 @@ def lock_creator_for_zone_policy(db: Session, creator_id: int) -> int:
 
 
 def count_zones_for_creator(db: Session, creator_id: int) -> int:
-    """Count all zones ever created by this user (active + soft-deleted).
+    """Count active zones created by this user.
 
-    Create quota is lifetime: deleting a zone does not free a create slot.
+    Soft-deleted zones do not count toward create quota.
     """
     total = db.execute(
-        select(func.count(Zone.id)).where(Zone.creator_id == creator_id)
+        select(func.count(Zone.id)).where(
+            Zone.creator_id == creator_id,
+            Zone.active.is_(True),
+        )
     ).scalar()
     return int(total or 0)
 
@@ -184,7 +187,7 @@ def build_capabilities(
         if remaining_total <= 0:
             reason = (
                 f"Maximum of {max_total} zones for administrators reached "
-                f"(up to {max_primary} primary). Deleting a zone does not free a create slot."
+                f"(up to {max_primary} primary)."
             )
         return ZoneCapabilities(
             role=role,
@@ -214,8 +217,7 @@ def build_capabilities(
         else:
             reason = (
                 f"Maximum of {max_total} secondary zone"
-                f"{'' if max_total == 1 else 's'} for members reached. "
-                "Deleting a zone does not free a create slot."
+                f"{'' if max_total == 1 else 's'} for members reached."
             )
     return ZoneCapabilities(
         role=role,
@@ -280,6 +282,7 @@ def ensure_unique_zone_name(
         return
     query = select(Zone.id).where(
         Zone.owner_id.in_(tuple(owner_ids)),
+        Zone.active.is_(True),
         func.lower(Zone.name) == normalized_name.lower(),
     )
     if exclude_zone_record_id is not None:
@@ -386,7 +389,7 @@ def list_zones_visibility_filter(owner: Owner):
 
 
 def soft_delete_zone(zone: Zone) -> None:
-    """Mark a zone inactive. Create quota still counts this row."""
+    """Mark a zone inactive. Create quota no longer counts this row."""
     zone.active = False
 
 

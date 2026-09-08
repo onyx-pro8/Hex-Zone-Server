@@ -170,6 +170,44 @@ async def test_admin_third_zone_is_secondary(zone_test_db, policy_limits):
 
 
 @pytest.mark.asyncio
+async def test_delete_frees_create_slot_and_name(zone_test_db, policy_limits):
+    async with _client() as client:
+        _, admin_token = await _register_and_login(
+            client, "admin-reuse@example.com", "administrator", "reuse-shared"
+        )
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        created = []
+        for name in ("Zone A", "Zone B", "Zone C"):
+            response = await client.post(
+                "/zones/", headers=headers, json=_zone_payload(name)
+            )
+            assert response.status_code == 201, response.text
+            created.append(response.json())
+
+        blocked = await client.post(
+            "/zones/", headers=headers, json=_zone_payload("Zone D")
+        )
+        assert blocked.status_code == 409
+        assert blocked.json()["error_code"] == "ZONE_QUOTA_MAX_TOTAL_REACHED"
+
+        deleted = await client.delete(f"/zones/{created[2]['id']}", headers=headers)
+        assert deleted.status_code == 204
+
+        caps = await client.get("/zones/capabilities", headers=headers)
+        assert caps.status_code == 200
+        assert caps.json()["can_create_zone"] is True
+        assert caps.json()["remaining_total"] == 1
+
+        # Soft-deleted name may be reused once the slot is free.
+        recreated = await client.post(
+            "/zones/", headers=headers, json=_zone_payload("Zone C")
+        )
+        assert recreated.status_code == 201, recreated.text
+        assert recreated.json()["name"] == "Zone C"
+
+
+@pytest.mark.asyncio
 async def test_member_secondary_quota_and_eviction(zone_test_db, policy_limits):
     async with _client() as client:
         admin_id, admin_token = await _register_and_login(

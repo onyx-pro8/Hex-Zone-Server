@@ -11,7 +11,7 @@ edit/delete authorization in server-side policy.
 - Member secondary cap = `MAX_ZONES_ADMINISTRATOR - admin_primary_count`
   - 1 admin primary → each member may create **2** secondary zones
   - 2 admin primaries → each member may create **1** secondary zone
-- Create quota is **lifetime**: soft-deleted zones still count toward the creator's max. Deleting a zone does **not** free a create slot.
+- Create quota counts **active** zones only. Soft-deleting a zone frees a create slot.
 - Active primary count (only) drives member secondary caps and messaging visibility.
 - Listing visibility:
   - **Primary** zones: visible to the account administrator and all members
@@ -30,7 +30,7 @@ edit/delete authorization in server-side policy.
 - `name` is required on create.
 - `name` is trimmed before persistence.
 - Valid length is `1..120`.
-- Name must be unique within the account scope (administrator + linked users), case-insensitive.
+- Name must be unique among **active** zones within the account scope (administrator + linked users), case-insensitive. Soft-deleted names may be reused.
 
 ## Capabilities endpoint
 
