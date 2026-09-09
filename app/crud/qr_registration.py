@@ -14,9 +14,8 @@ def create_qr_registration(
 ) -> QRRegistration:
     """Create a new QR registration token.
 
-    ``expires_in_hours=None`` (or ``0``) means the token never expires and
-    can be redeemed by multiple members (printed outdoor-sign QR). Timed
-    tokens remain single-use.
+    ``expires_in_hours=None`` (or ``0``) means the token never expires.
+    Every invite token is single-use (one successful join).
     """
     token = generate_qr_token()
     if expires_in_hours is None or int(expires_in_hours) <= 0:

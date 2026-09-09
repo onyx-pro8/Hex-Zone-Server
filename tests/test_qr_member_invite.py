@@ -152,8 +152,9 @@ async def test_timed_qr_is_single_use(test_db, override_get_db):
 
 
 @pytest.mark.asyncio
-async def test_infinity_qr_is_multi_use(test_db, override_get_db):
-    admin, token = _admin(
+async def test_infinity_qr_is_single_use(test_db, override_get_db):
+    """Never-expiring invites are still single-use (one successful join)."""
+    _, token = _admin(
         test_db,
         email="plus-admin@example.com",
         zone_id="plus-zone",
@@ -170,10 +171,10 @@ async def test_infinity_qr_is_multi_use(test_db, override_get_db):
         first = await _join(client, invite, "first@example.com")
         assert first.status_code == 200, first.text
         second = await _join(client, invite, "second@example.com")
-        assert second.status_code == 200, second.text
-        assert second.json()["account_type"] == "exclusive"
-        assert second.json()["account_owner_id"] == admin.id
-        assert second.json()["email"] != first.json()["email"]
+        assert second.status_code == 400
+        body = second.json()
+        text = str(body.get("message") or body.get("detail") or "").lower()
+        assert "already used" in text
 
 
 @pytest.mark.asyncio

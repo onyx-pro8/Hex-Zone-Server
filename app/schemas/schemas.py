@@ -395,9 +395,8 @@ class QRRegistrationCreate(BaseModel):
         ge=0,
         le=720,
         description=(
-            "Hours until the invite token expires. Timed values are single-use. "
-            "Send 0 (or null) for a never-expiring multi-use token, e.g. a printed "
-            "QR on an outdoor sign."
+            "Hours until the invite token expires. All invite tokens are single-use. "
+            "Send 0 (or null) for a never-expiring single-use token."
         ),
     )
 

@@ -220,7 +220,7 @@ async def convert_to_h3(
         "the inviter's existing network. "
         "**Exclusive** and **Enhanced** (solo) accounts cannot generate these invites. "
         "Send **`expires_in_hours`: 0** (or **null**) for a never-expiring "
-        "**multi-use** token (printed outdoor-sign QR). Timed tokens are single-use."
+        "**single-use** token. All invite tokens are single-use."
     ),
     responses={
         status.HTTP_403_FORBIDDEN: {
@@ -362,12 +362,11 @@ async def preview_qr_registration(
         "user account for a **new** network; require **`zone_id`** in the body. "
         "**Other invite-capable admins:** create an **Individual** user member on "
         "the inviter's zone (inherit zone only; account type is always Exclusive). "
-        "Timed tokens (1h / 24h / 7d / 30d) are single-use. Never-expiring (∞) "
-        "tokens can be redeemed multiple times until policy limits apply."
+        "All invite tokens (timed and never-expiring) are single-use."
     ),
     responses={
         status.HTTP_400_BAD_REQUEST: {
-            "description": "QR token already used (timed tokens) or expired.",
+            "description": "QR token already used or expired.",
         },
         status.HTTP_403_FORBIDDEN: {
             "description": "QR token is invalid for account join policy.",

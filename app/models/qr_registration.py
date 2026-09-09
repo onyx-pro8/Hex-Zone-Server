@@ -36,8 +36,8 @@ class QRRegistration(Base):
         return datetime.utcnow() > self.expires_at
 
     def is_reusable(self) -> bool:
-        """Never-expiring (∞) tokens can be redeemed by multiple members."""
-        return self.expires_at is None
+        """Member-invite tokens are always single-use (including never-expiring)."""
+        return False
 
     def __repr__(self) -> str:
         return f"<QRRegistration(id={self.id}, owner_id={self.owner_id}, used={self.used})>"

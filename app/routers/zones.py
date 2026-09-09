@@ -943,6 +943,17 @@ async def list_zones(
             for zone in zones
             if zone_is_primary(zone) or int(zone.creator_id) == int(caller.id)
         ]
+
+    # Public defining zones are visible to every authenticated user.
+    if owner_id is None and zone_id is None:
+        seen = {int(zone.id) for zone in zones}
+        for public_zone in list_public_defining_zones(db, skip=0, limit=500):
+            record_id = int(public_zone.id)
+            if record_id in seen:
+                continue
+            zones.append(public_zone)
+            seen.add(record_id)
+
     return [
         ZoneContractResponse.model_validate(row)
         for row in _serialize_zones(db, zones)
