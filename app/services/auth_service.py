@@ -165,7 +165,13 @@ def login_user(db: Session, email: str, password: str) -> dict:
     except Exception as exc:  # pragma: no cover - never block login
         logger.warning("Address geocoding failed for owner %s: %s", owner.id, exc)
 
+    from app.services.communal_zone_service import assign_owner_communal_id
+
+    assign_owner_communal_id(db, owner)
+    db.flush()
+
     token = create_access_token({"sub": str(owner.id)})
+    communal_id = getattr(owner, "communal_id", None)
     return {
         "token": token,
         "user": {
@@ -175,5 +181,7 @@ def login_user(db: Session, email: str, password: str) -> dict:
             "registrationType": owner.role.value.upper(),
             "accountOwnerId": owner.account_owner_id or owner.id,
             "mapCenter": _get_map_center(db, owner.id),
+            "communalId": communal_id,
+            "communal_id": communal_id,
         },
     }

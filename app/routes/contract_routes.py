@@ -319,6 +319,7 @@ class OwnerContractResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     api_key: str
+    communal_id: str | None = None
 
 
 class ContractSuccessOwnerMeResponse(BaseModel):
@@ -334,6 +335,8 @@ class ContractLoginUserResponse(BaseModel):
     registrationType: Literal["ADMINISTRATOR", "USER"]
     accountOwnerId: int
     mapCenter: MemberLocationResponse | None = None
+    communalId: str | None = None
+    communal_id: str | None = None
 
 
 class ContractLoginDataResponse(BaseModel):
@@ -470,6 +473,14 @@ async def get_me(
             )
             db.rollback()
 
+    from app.services.communal_zone_service import assign_owner_communal_id
+
+    prior = getattr(owner, "communal_id", None)
+    assign_owner_communal_id(db, owner)
+    if getattr(owner, "communal_id", None) != prior:
+        db.commit()
+        db.refresh(owner)
+
     map_center: MemberLocationResponse | None = None
     if owner.latitude is not None and owner.longitude is not None:
         map_center = MemberLocationResponse(
@@ -497,6 +508,7 @@ async def get_me(
         created_at=owner.created_at,
         updated_at=owner.updated_at,
         api_key=owner.api_key,
+        communal_id=getattr(owner, "communal_id", None),
     )
     return success_response(data.model_dump())
 
