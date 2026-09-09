@@ -16,6 +16,18 @@ PRIVATE_ACCOUNT_PUBLIC_REGISTRATION_DETAIL = (
     "Private accounts are provisioned by the system administrator only."
 )
 
+INDIVIDUAL_ACCOUNT_USER_ROLE_ONLY_DETAIL = (
+    "Individual accounts always use the user role and cannot be administrators."
+)
+
+
+def is_individual_account_type(account_type: str | AccountType | None) -> bool:
+    """True for Exclusive / Individual tier."""
+    if account_type is None:
+        return False
+    value = account_type.value if isinstance(account_type, AccountType) else str(account_type)
+    return normalize_pricing_tier_key(value) == "exclusive"
+
 
 def assert_account_type_allowed_for_public_registration(account_type: str) -> None:
     """Reject self-service registration for the Private (system admin) tier."""
@@ -23,6 +35,29 @@ def assert_account_type_allowed_for_public_registration(account_type: str) -> No
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=PRIVATE_ACCOUNT_PUBLIC_REGISTRATION_DETAIL,
+        )
+
+
+def coerce_individual_registration_role(account_type: str, role: OwnerRole) -> OwnerRole:
+    """Individual accounts always register as user (never administrator)."""
+    if is_individual_account_type(account_type):
+        return OwnerRole.USER
+    return role
+
+
+def assert_individual_role_change_allowed(
+    *,
+    account_type: str | AccountType | None,
+    new_role: str | OwnerRole | None,
+) -> None:
+    """Reject promoting an Individual account to administrator."""
+    if new_role is None or not is_individual_account_type(account_type):
+        return
+    role_value = new_role.value if isinstance(new_role, OwnerRole) else str(new_role)
+    if role_value.strip().lower() == "administrator":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=INDIVIDUAL_ACCOUNT_USER_ROLE_ONLY_DETAIL,
         )
 
 
@@ -36,12 +71,13 @@ def is_system_administrator(owner: Owner) -> bool:
 def account_type_for_invited_member(administrator: Owner) -> AccountType:
     """Account type assigned to a user invited by this administrator.
 
-    Invited members inherit the inviter's tier. Private is reserved for
-    system administrators, so a Private inviter's members become Exclusive.
+    Invited members always receive Individual (Exclusive) features, regardless
+    of the inviter's tier. They remain linked under the inviter via
+    ``account_owner_id`` (except system-admin QR invites that provision a new
+    solo Individual network).
     """
-    if is_system_administrator(administrator):
-        return AccountType.EXCLUSIVE
-    return administrator.account_type
+    _ = administrator  # inviter used by callers for linkage / capacity checks
+    return AccountType.EXCLUSIVE
 
 
 def owner_may_edit_network_id(owner: Owner) -> bool:

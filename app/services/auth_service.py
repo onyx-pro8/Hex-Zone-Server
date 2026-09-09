@@ -15,7 +15,10 @@ from app.services.owner_home_service import (
     sync_owner_home_from_address,
 )
 from app.services.registration_code_service import require_and_consume_admin_registration_code
-from app.services.account_type_policy import assert_account_type_allowed_for_public_registration
+from app.services.account_type_policy import (
+    assert_account_type_allowed_for_public_registration,
+    coerce_individual_registration_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +87,10 @@ def register_user(db: Session, payload: dict) -> dict:
     first_name, last_name = _split_name(payload["name"])
     account_type_value = _to_contract_account_type(payload["accountType"]).lower()
     assert_account_type_allowed_for_public_registration(account_type_value)
-    role_value = _to_owner_role(payload.get("registrationType"))
+    role_value = coerce_individual_registration_role(
+        account_type_value,
+        _to_owner_role(payload.get("registrationType")),
+    )
     preallocated_api_key: str | None = None
     if role_value == OwnerRole.ADMINISTRATOR:
         preallocated_api_key = require_and_consume_admin_registration_code(
@@ -114,7 +120,7 @@ def register_user(db: Session, payload: dict) -> dict:
     )
     db.add(owner)
     db.flush()
-    if owner.role.value == "administrator" and owner.account_owner_id is None:
+    if owner.account_owner_id is None:
         owner.account_owner_id = owner.id
         db.flush()
     try:

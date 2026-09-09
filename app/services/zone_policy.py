@@ -16,6 +16,9 @@ from app.services.account_type_policy import is_system_administrator
 ZONE_NAME_MIN_LENGTH = 1
 ZONE_NAME_MAX_LENGTH = 120
 
+# Individual (exclusive) accounts: up to 3 secondary zones, never primary.
+INDIVIDUAL_SECONDARY_ZONE_LIMIT = 3
+
 
 @dataclass
 class EvictedZoneInfo:
@@ -172,8 +175,36 @@ def build_capabilities(
     *,
     total_zones: int,
     admin_primary_count: int,
+    account_type: str | None = None,
 ) -> ZoneCapabilities:
     normalized = (role or "").strip().lower()
+    account_key = str(account_type or "").strip().lower()
+
+    # Individual (exclusive): user-role only, up to 3 secondary zones, no primary.
+    if account_key == "exclusive":
+        max_total = INDIVIDUAL_SECONDARY_ZONE_LIMIT
+        remaining_total = max(0, max_total - total_zones)
+        reason = None
+        if remaining_total <= 0:
+            reason = (
+                f"Maximum of {max_total} secondary zones for Individual accounts reached."
+            )
+        return ZoneCapabilities(
+            role=role,
+            can_create_zone=remaining_total > 0,
+            remaining_total=remaining_total,
+            remaining_for_role=remaining_total,
+            max_total=max_total,
+            reserved_for_standard_users=0,
+            reason=reason,
+            admin_primary_count=0,
+            max_primary=0,
+            next_zone_is_primary=False,
+            member_secondary_limit=max_total,
+            can_create_primary=False,
+            can_create_secondary=remaining_total > 0,
+        )
+
     max_primary = max_admin_primary_zones()
     member_limit = member_secondary_limit_for_primary_count(admin_primary_count)
 
@@ -314,6 +345,7 @@ def prepare_create_zone_policy(db: Session, owner: Owner) -> ZoneCapabilities:
         owner.role.value,
         total_zones=total,
         admin_primary_count=admin_primary,
+        account_type=owner.account_type.value,
     )
 
 
@@ -324,6 +356,7 @@ def capabilities_for_owner(db: Session, owner: Owner) -> ZoneCapabilities:
         owner.role.value,
         total_zones=total,
         admin_primary_count=admin_primary,
+        account_type=owner.account_type.value,
     )
 
 
@@ -452,14 +485,20 @@ def prepare_zone_tier_on_create(
     caps = capabilities or prepare_create_zone_policy(db, owner)
     enforce_can_create(caps)
 
+    account_key = str(owner.account_type.value or "").strip().lower()
     is_admin = (owner.role.value or "").strip().lower() == "administrator"
-    if not is_admin:
+    # Individual accounts (and all non-admins) are secondary-only.
+    if not is_admin or account_key == "exclusive":
         if requested_is_primary is True:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "error_code": "ZONE_PRIMARY_FORBIDDEN",
-                    "message": "Members can create secondary zones only.",
+                    "message": (
+                        "Individual accounts can create secondary zones only."
+                        if account_key == "exclusive"
+                        else "Members can create secondary zones only."
+                    ),
                 },
             )
         return False, []

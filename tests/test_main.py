@@ -376,7 +376,7 @@ async def test_qr_join_uses_inviter_zone_id(test_db, override_get_db):
         joined_owner = join_response.json()
         assert joined_owner["zone_id"] == "inviter-zone-id"
         assert joined_owner["role"] == "user"
-        assert joined_owner["account_type"] == "private_plus"
+        assert joined_owner["account_type"] == "exclusive"
 
 
 @pytest.mark.asyncio
@@ -1298,27 +1298,37 @@ async def test_contract_register_admin_with_free_succeeds(test_db, override_get_
 
 
 @pytest.mark.asyncio
-async def test_exclusive_account_rejects_user_registration(test_db, override_get_db):
-    """Exclusive accounts are solo: no additional user members may be registered."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        admin = await client.post(
+async def test_exclusive_account_registers_as_user_and_rejects_members(
+    test_db, override_get_db
+):
+    """Individual (exclusive) is user-role only and cannot invite members."""
+    from httpx import ASGITransport
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        individual = await client.post(
             "/owners/register",
             json={
-                "email": "exclusive-admin@example.com",
+                "email": "exclusive-user@example.com",
                 "zone_id": "exclusive-zone",
-                "first_name": "Exclusive",
-                "last_name": "Admin",
+                "first_name": "Individual",
+                "last_name": "User",
                 "account_type": "exclusive",
-                "role": "administrator",
+                "role": "administrator",  # coerced to user
                 "password": "SecurePassword123",
                 "registration_code": "FREE",
-                "address": "Admin Address",
+                "address": "Home Address",
             },
         )
-        assert admin.status_code == 201
-        admin_id = admin.json()["id"]
+        assert individual.status_code == 201
+        body = individual.json()
+        assert body["role"] == "user"
+        assert body["account_type"] == "exclusive"
+        assert body["account_owner_id"] == body["id"]
+        individual_id = body["id"]
 
-        first_user = await client.post(
+        invited = await client.post(
             "/owners/register",
             json={
                 "email": "exclusive-user-1@example.com",
@@ -1327,14 +1337,19 @@ async def test_exclusive_account_rejects_user_registration(test_db, override_get
                 "last_name": "UserOne",
                 "account_type": "exclusive",
                 "role": "user",
-                "account_owner_id": admin_id,
+                "account_owner_id": individual_id,
                 "password": "SecurePassword123",
                 "address": "User Address",
             },
         )
-        assert first_user.status_code == 422, first_user.text
-        message = _http_error_message(first_user.json()).lower()
-        assert "exclusive" in message or "user members" in message
+        assert invited.status_code == 422
+        detail = invited.json().get("detail", "")
+        message = detail if isinstance(detail, str) else str(detail)
+        assert (
+            "individual" in message.lower()
+            or "exclusive" in message.lower()
+            or "member" in message.lower()
+        )
 
 
 @pytest.mark.asyncio
@@ -1451,6 +1466,7 @@ async def test_admin_can_manage_linked_user_device_and_device_shows_owner(test_d
             },
         )
         assert user.status_code == 201
+        assert user.json()["account_type"] == "exclusive"
 
         admin_login = await client.post(
             "/owners/login",
@@ -1465,10 +1481,11 @@ async def test_admin_can_manage_linked_user_device_and_device_shows_owner(test_d
         admin_headers = {"Authorization": f"Bearer {admin_login.json()['access_token']}"}
         user_headers = {"Authorization": f"Bearer {user_login.json()['access_token']}"}
 
+        # Invited users are Individual — smart-home hubs are disabled; phone sessions are allowed.
         created = await client.post(
             "/devices/",
             headers=user_headers,
-            json={"hid": "MANAGE-USER-DEVICE", "name": "User Phone", "address": "User Address"},
+            json={"hid": "MOB-MANAGE-USER-DEVICE", "name": "User Phone", "address": "User Address"},
         )
         assert created.status_code == 201
         device_id = created.json()["id"]

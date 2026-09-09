@@ -28,7 +28,8 @@ def create_owner(db: Session, owner: OwnerCreate, *, api_key: str | None = None)
     )
     db.add(db_owner)
     db.flush()
-    if db_owner.role.value == "administrator" and db_owner.account_owner_id is None:
+    # Account roots (admins and Individual user-only accounts) point at themselves.
+    if db_owner.account_owner_id is None:
         db_owner.account_owner_id = db_owner.id
         db.flush()
     db.refresh(db_owner)
@@ -94,11 +95,7 @@ def cascade_account_type_from_administrator(
     administrator: Owner,
     account_type: AccountType,
 ) -> None:
-    """Keep invited users' account_type aligned with their administrator.
-
-    Private (system administrator) does not cascade to members — they receive
-    Exclusive instead. Other tiers copy the administrator's type.
-    """
+    """Keep invited users on Individual (Exclusive) under this administrator."""
     if administrator.role.value != "administrator":
         return
     from app.services.account_type_policy import account_type_for_invited_member

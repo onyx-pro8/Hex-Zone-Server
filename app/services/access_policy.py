@@ -37,7 +37,13 @@ def resolve_account_owner_id(
     """Resolve account owner linkage for new owner registrations."""
     if role == "administrator":
         return None
-    assert_account_allows_user_members(account_type)
+
+    # Solo Individual (exclusive) registration — own account root, no inviter.
+    if (
+        str(account_type).strip().lower() == "exclusive"
+        and requested_account_owner_id is None
+    ):
+        return None
 
     if requested_account_owner_id is not None:
         account_owner = db.get(Owner, requested_account_owner_id)
@@ -48,13 +54,21 @@ def resolve_account_owner_id(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="account_owner_id must reference an administrator",
             )
-        if str(account_owner.account_type.value) != account_type:
+        # Invitees are always Individual (exclusive). The admin's tier must
+        # support members; invitee type need not match the admin's type.
+        assert_account_allows_user_members(account_owner.account_type.value)
+        if (
+            str(account_type).strip().lower() != "exclusive"
+            and str(account_owner.account_type.value) != account_type
+        ):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="account_owner_id account type mismatch",
             )
         assert_admin_user_member_capacity(db, account_owner)
         return account_owner.id
+
+    assert_account_allows_user_members(account_type)
 
     # Fallback to the matching administrator in the same main zone.
     account_owner = (

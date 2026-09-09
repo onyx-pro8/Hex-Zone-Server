@@ -4,6 +4,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.schemas import (
+    AccountTypeEnum,
     OwnerCreate,
     OwnerResponse,
     OwnerUpdate,
@@ -23,7 +24,10 @@ from app.services.registration_code_service import (
 from app.services.account_type_policy import (
     assert_account_type_allowed_for_public_registration,
     assert_account_type_change_allowed,
+    assert_individual_role_change_allowed,
     assert_owner_may_edit_network_id,
+    coerce_individual_registration_role,
+    is_individual_account_type,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
 from app.services.avatar_upload_service import avatar_bytes_and_media_type
@@ -44,8 +48,9 @@ def _normalize_owner_name(owner):
     description=(
         "Create an administrator/user account from setup wizard inputs. "
         "Supports all account tiers and links user registrations to an account owner. "
-        "User registration must match administrator zone/account_type, and exclusive "
-        "accounts cannot add user members. "
+        "Invited user members always receive Individual (Exclusive) features. "
+        "Individual (exclusive) accounts always register as user role, use FREE "
+        "registration, cannot invite members, and are their own account root. "
         "Administrators must include registration_code: echo GET /utils/registration-code "
         "(preferred) or GET /owners/registration-code, or use tier code FREE (stateless)."
     ),
@@ -74,6 +79,17 @@ async def register_owner(
 
     assert_account_type_allowed_for_public_registration(owner.account_type.value)
 
+    # Individual accounts are always user-role account roots.
+    from app.models import Owner as OwnerModel
+    from app.models.owner import OwnerRole as ModelOwnerRole
+    from app.services.account_type_policy import account_type_for_invited_member
+
+    coerced_role = coerce_individual_registration_role(
+        owner.account_type.value,
+        ModelOwnerRole(owner.role.value),
+    )
+    owner.role = OwnerRoleEnum(coerced_role.value)
+
     owner.account_owner_id = resolve_account_owner_id(
         db,
         role=owner.role.value,
@@ -81,6 +97,14 @@ async def register_owner(
         zone_id=owner.zone_id,
         account_type=owner.account_type.value,
     )
+
+    # Invited users always get Individual (Exclusive) features.
+    if owner.role == OwnerRoleEnum.USER and owner.account_owner_id is not None:
+        administrator = db.get(OwnerModel, owner.account_owner_id)
+        if administrator is not None:
+            member_type = account_type_for_invited_member(administrator)
+            owner.account_type = AccountTypeEnum(member_type.value)
+            owner.role = OwnerRoleEnum.USER
 
     preallocated_api_key: str | None = None
     if owner.role == OwnerRoleEnum.ADMINISTRATOR:
@@ -404,6 +428,30 @@ async def update_owner(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to change another owner's role",
         )
+
+    if owner_update.role is not None or owner_update.account_type is not None:
+        target = owner_crud.get_owner(db, owner_id)
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Owner not found",
+            )
+        effective_type = (
+            owner_update.account_type.value
+            if owner_update.account_type is not None
+            else target.account_type.value
+        )
+        assert_individual_role_change_allowed(
+            account_type=effective_type,
+            new_role=owner_update.role,
+        )
+        if owner_update.role is None and is_individual_account_type(effective_type):
+            # Changing into Individual forces user role.
+            from app.models.owner import OwnerRole as ModelOwnerRole
+            from app.schemas.schemas import OwnerRoleEnum as SchemaOwnerRole
+
+            if target.role != ModelOwnerRole.USER:
+                owner_update.role = SchemaOwnerRole.USER
 
     if owner_update.account_type is not None:
         target = owner_crud.get_owner(db, owner_id)

@@ -122,7 +122,7 @@ async def test_qr_join_never_expiring_token(test_db, override_get_db):
         assert join.status_code == 200, join.text
         joined = join.json()
         assert joined["zone_id"] == admin.zone_id
-        assert joined["account_type"] == "private_plus"
+        assert joined["account_type"] == "exclusive"
         assert joined["role"] == "user"
 
 
@@ -171,7 +171,7 @@ async def test_infinity_qr_is_multi_use(test_db, override_get_db):
         assert first.status_code == 200, first.text
         second = await _join(client, invite, "second@example.com")
         assert second.status_code == 200, second.text
-        assert second.json()["account_type"] == "private_plus"
+        assert second.json()["account_type"] == "exclusive"
         assert second.json()["account_owner_id"] == admin.id
         assert second.json()["email"] != first.json()["email"]
 
@@ -198,8 +198,8 @@ async def test_qr_generate_rejected_for_exclusive_admin(test_db, override_get_db
 
 
 @pytest.mark.asyncio
-async def test_qr_join_system_admin_provisions_exclusive_network_admin(test_db, override_get_db):
-    """Private (system admin) invites create Exclusive admins of a new network."""
+async def test_qr_join_system_admin_provisions_individual_user(test_db, override_get_db):
+    """Private (system admin) invites create Individual user accounts for a new network."""
     admin, token = _admin(
         test_db,
         email="admin@test.com",
@@ -234,7 +234,7 @@ async def test_qr_join_system_admin_provisions_exclusive_network_admin(test_db, 
         assert join.status_code == 200, join.text
         joined = join.json()
         assert joined["account_type"] == "exclusive"
-        assert joined["role"] == "administrator"
+        assert joined["role"] == "user"
         assert joined["zone_id"] == "NEW-NETWORK-42"
         assert joined["zone_id"] != admin.zone_id
         assert joined["account_owner_id"] == joined["id"]
@@ -289,4 +289,4 @@ async def test_qr_preview_member_invite(test_db, override_get_db):
         body = preview.json()
         assert body["invite_kind"] == "member"
         assert body["zone_id"] == admin.zone_id
-        assert body["account_type"] == "private_plus"
+        assert body["account_type"] == "exclusive"

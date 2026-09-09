@@ -214,9 +214,10 @@ async def convert_to_h3(
     description=(
         "Generate invite token used by the QR registration flow. "
         "Not for door guest access — use **`GET /api/access/qr-link`** for canonical **`/access?zid=`** URLs. "
-        "**System administrator (Private):** provisions a new **Exclusive** network administrator "
-        "(invitee chooses their own network ID on join). "
-        "**Private+ / Enhanced+:** invites a user member onto the inviter's existing network. "
+        "**System administrator (Private):** provisions a new **Individual (Exclusive)** user "
+        "account for a new network (invitee chooses their own network ID on join). "
+        "**Private+ / Enhanced+:** invites an **Individual (Exclusive)** user member onto "
+        "the inviter's existing network. "
         "**Exclusive** and **Enhanced** (solo) accounts cannot generate these invites. "
         "Send **`expires_in_hours`: 0** (or **null**) for a never-expiring "
         "**multi-use** token (printed outdoor-sign QR). Timed tokens are single-use."
@@ -316,8 +317,8 @@ def _load_valid_qr_and_inviter(db: Session, token: str):
     summary="Preview QR invite token",
     description=(
         "Public (no auth) preview of a QR invite. Clients use this to choose the "
-        "join form: **member** (inherit inviter zone) vs **new_network_admin** "
-        "(Exclusive administrator of a new network ID supplied on join)."
+        "join form: **member** (Individual account on inviter zone) vs **new_network_admin** "
+        "(Individual user account for a new network ID supplied on join)."
     ),
     responses={
         status.HTTP_400_BAD_REQUEST: {
@@ -357,10 +358,10 @@ async def preview_qr_registration(
     summary="Join account with QR token",
     description=(
         "Complete registration by consuming an invite token from the QR flow. "
-        "**System administrator (Private) tokens:** create an **Exclusive** "
-        "administrator for a **new** network; require **`zone_id`** in the body. "
-        "**Other invite-capable admins:** create a **user** member on the inviter's "
-        "zone (inherit zone / account type). "
+        "**System administrator (Private) tokens:** create an **Individual** "
+        "user account for a **new** network; require **`zone_id`** in the body. "
+        "**Other invite-capable admins:** create an **Individual** user member on "
+        "the inviter's zone (inherit zone only; account type is always Exclusive). "
         "Timed tokens (1h / 24h / 7d / 30d) are single-use. Never-expiring (∞) "
         "tokens can be redeemed multiple times until policy limits apply."
     ),
@@ -387,7 +388,7 @@ async def join_with_qr(
     qr_data: QRRegistrationUse,
     db: Session = Depends(get_db),
 ):
-    """Redeem a QR invite as a member or as a new Exclusive network admin."""
+    """Redeem a QR invite as a member or as a new Individual network account."""
     qr, owner = _load_valid_qr_and_inviter(db, qr_data.token)
 
     existing = owner_crud.get_owner_by_email(db, qr_data.email)
@@ -406,14 +407,13 @@ async def join_with_qr(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(
                     "zone_id is required when joining via a system administrator "
-                    "invite (new Exclusive network)"
+                    "invite (new Individual network)"
                 ),
             )
         conflict = (
             db.query(Owner)
             .filter(
                 Owner.zone_id == new_zone_id,
-                Owner.role == OwnerRole.ADMINISTRATOR,
                 Owner.active.is_(True),
             )
             .first()
@@ -431,7 +431,7 @@ async def join_with_qr(
             last_name=qr_data.last_name,
             password=qr_data.password,
             account_type=AccountTypeEnum.EXCLUSIVE,
-            role=OwnerRoleEnum.ADMINISTRATOR,
+            role=OwnerRoleEnum.USER,
             account_owner_id=None,
             address=qr_data.address,
             phone=qr_data.phone,
@@ -444,7 +444,7 @@ async def join_with_qr(
 
         return OwnerResponse.model_validate(new_owner)
 
-    # Network-admin member invite: inherit inviter zone and tier.
+    # Network-admin member invite: inherit inviter zone; Individual account type.
     assert_admin_user_member_capacity(db, owner)
 
     member_account_type = account_type_for_invited_member(owner)

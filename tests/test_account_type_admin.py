@@ -208,7 +208,7 @@ def test_private_account_type_requires_administrator_role(db):
     assert exc.value.status_code == 422
 
 
-def test_invited_member_account_type_matches_admin_tier(db):
+def test_invited_member_account_type_is_always_exclusive(db):
     exclusive_admin = _owner(
         db,
         email="exclusive-admin@example.com",
@@ -223,10 +223,18 @@ def test_invited_member_account_type_matches_admin_tier(db):
         account_type=AccountType.PRIVATE_PLUS,
         role=OwnerRole.ADMINISTRATOR,
     )
+    org_admin = _owner(
+        db,
+        email="org-admin@example.com",
+        zone_id="org-zone",
+        account_type=AccountType.ENHANCED_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+    )
     db.commit()
 
     assert account_type_for_invited_member(exclusive_admin) == AccountType.EXCLUSIVE
-    assert account_type_for_invited_member(plus_admin) == AccountType.PRIVATE_PLUS
+    assert account_type_for_invited_member(plus_admin) == AccountType.EXCLUSIVE
+    assert account_type_for_invited_member(org_admin) == AccountType.EXCLUSIVE
 
 
 def test_invited_member_account_type_system_admin_is_exclusive(db):

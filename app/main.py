@@ -201,7 +201,7 @@ OPENAPI_TAGS = [
         "name": "devices",
         "description": (
             "Device enrollment, presence heartbeat, and location updates. Device capacity is "
-            "enforced by account tier per owner: private/exclusive/enhanced=1, private_plus=10, "
+            "enforced by account tier per owner: private/enhanced=1, exclusive=0 (disabled), private_plus=10, "
             "enhanced_plus=unlimited. Administrators can manage linked users' device active state."
         ),
     },
