@@ -32,6 +32,10 @@ def create_owner(db: Session, owner: OwnerCreate, *, api_key: str | None = None)
     if db_owner.account_owner_id is None:
         db_owner.account_owner_id = db_owner.id
         db.flush()
+    # Individual accounts always receive a unique server-assigned Communal ID.
+    from app.services.communal_zone_service import assign_owner_communal_id
+
+    assign_owner_communal_id(db, db_owner)
     db.refresh(db_owner)
     return db_owner
 
@@ -99,16 +103,21 @@ def cascade_account_type_from_administrator(
     if administrator.role.value != "administrator":
         return
     from app.services.account_type_policy import account_type_for_invited_member
+    from app.services.communal_zone_service import assign_owner_communal_id
 
     member_type = account_type_for_invited_member(administrator)
     root_id = administrator.account_owner_id or administrator.id
-    db.query(Owner).filter(
-        Owner.account_owner_id == root_id,
-        Owner.id != administrator.id,
-    ).update(
-        {Owner.account_type: member_type},
-        synchronize_session=False,
+    members = (
+        db.query(Owner)
+        .filter(
+            Owner.account_owner_id == root_id,
+            Owner.id != administrator.id,
+        )
+        .all()
     )
+    for member in members:
+        member.account_type = member_type
+        assign_owner_communal_id(db, member)
 
 
 def update_owner(db: Session, owner_id: int, owner_update: OwnerUpdate) -> Optional[Owner]:
@@ -152,6 +161,9 @@ def update_owner(db: Session, owner_id: int, owner_update: OwnerUpdate) -> Optio
         )
         db_owner.account_type = AccountType(account_type_value)
         cascade_account_type_from_administrator(db, db_owner, db_owner.account_type)
+        from app.services.communal_zone_service import assign_owner_communal_id
+
+        assign_owner_communal_id(db, db_owner)
     
     db.flush()
     db.refresh(db_owner)

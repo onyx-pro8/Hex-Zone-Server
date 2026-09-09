@@ -140,6 +140,43 @@ def test_build_capabilities_member_depends_on_primary_count(policy_limits):
     assert with_two_primary.reason == "Maximum of 1 secondary zone for members reached."
 
 
+def test_build_capabilities_solo_individual_allows_three_secondary(policy_limits):
+    caps = build_capabilities(
+        "user",
+        total_zones=2,
+        admin_primary_count=0,
+        account_type="exclusive",
+        is_invited_member=False,
+    )
+    assert caps.max_total == 3
+    assert caps.can_create_zone is True
+    assert caps.remaining_total == 1
+
+
+def test_build_capabilities_invited_individual_uses_member_quota(policy_limits):
+    """Invited Individual members keep the prior member secondary workflow (up to 2)."""
+    caps = build_capabilities(
+        "user",
+        total_zones=0,
+        admin_primary_count=1,
+        account_type="exclusive",
+        is_invited_member=True,
+    )
+    assert caps.max_total == 2
+    assert caps.can_create_zone is True
+    assert caps.can_create_primary is False
+
+    at_limit = build_capabilities(
+        "user",
+        total_zones=2,
+        admin_primary_count=1,
+        account_type="exclusive",
+        is_invited_member=True,
+    )
+    assert at_limit.can_create_zone is False
+    assert "members" in (at_limit.reason or "").lower()
+
+
 def test_normalize_zone_name_trims_and_validates():
     assert normalize_zone_name("  Alpha Zone  ") == "Alpha Zone"
     with pytest.raises(Exception):

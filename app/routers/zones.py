@@ -16,11 +16,14 @@ from app.services.access_policy import visible_owner_ids, visible_zone_owner_ids
 from app.services.account_type_policy import is_system_administrator
 from app.services.communal_zone_service import (
     assign_communal_id,
+    assert_may_generate_communal_id,
+    assign_owner_communal_id,
     generate_communal_reference,
     is_valid_reference_format,
     list_public_defining_zones,
     normalize_reference_id,
     resolution_to_response_payload as communal_resolution_to_response_payload,
+    resolve_communal_id_for_owner,
     resolve_communal_reference,
 )
 from app.services.geospatial_service import (
@@ -780,8 +783,24 @@ async def create_zone(
     account_owner_ids = account_owner_ids_for_policy(db, owner)
 
     geometry = normalized.get("geometry", {})
-    config = normalized.get("config", {})
+    config = dict(normalized.get("config", {}) or {})
     zone_type = normalized["type"]
+
+    # Individuals always use their assigned Communal ID (cannot mint or pick another).
+    assign_owner_communal_id(db, owner)
+    from app.services.account_type_policy import is_individual_account_type
+
+    if is_individual_account_type(owner.account_type):
+        assigned = resolve_communal_id_for_owner(owner, config.get("communal_id"))
+        if zone_type in {"communal_id", "custom_1"}:
+            config["communal_id"] = assigned
+        elif config.get("communal_id") is not None or config.get("communalId") is not None:
+            config["communal_id"] = assigned
+            config.pop("communalId", None)
+        else:
+            # Defining zones for Individuals automatically carry their Communal ID.
+            config["communal_id"] = assigned
+
     normalized_name = normalize_zone_name(normalized["name"])
     ensure_unique_zone_name(db, account_owner_ids, normalized_name)
     _validate_zone_payload(zone_type, geometry, config)
@@ -1272,6 +1291,8 @@ async def generate_zone_reference(
             detail="Only communal_id generation is supported",
         )
 
+    assert_may_generate_communal_id(owner)
+
     owner_ids = account_owner_ids_for_policy(db, owner)
     resolution = generate_communal_reference(db, owner_ids)
     payload = communal_resolution_to_response_payload(resolution)
@@ -1322,7 +1343,9 @@ async def assign_communal_to_zones(
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
 
-    reference_id = normalize_reference_id(body.communal_id)
+    # Individuals may only assign their server-issued Communal ID.
+    assign_owner_communal_id(db, owner)
+    reference_id = resolve_communal_id_for_owner(owner, body.communal_id)
     if not is_valid_reference_format(reference_id):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1474,8 +1497,16 @@ async def update_zone(
         "name": normalized.get("name", target_zone.name),
         "type": normalized.get("type", current["type"]),
         "geometry": normalized.get("geometry", current["geometry"]),
-        "config": normalized.get("config", current["config"]),
+        "config": dict(normalized.get("config", current["config"]) or {}),
     }
+
+    assign_owner_communal_id(db, owner)
+    from app.services.account_type_policy import is_individual_account_type
+
+    if is_individual_account_type(owner.account_type):
+        assigned = resolve_communal_id_for_owner(owner, merged["config"].get("communal_id"))
+        merged["config"]["communal_id"] = assigned
+        merged["config"].pop("communalId", None)
 
     normalized_name = normalize_zone_name(merged["name"])
     zone_owner = owner_crud.get_owner(db, target_zone.owner_id)

@@ -45,6 +45,14 @@ class OwnerBase(BaseModel):
     address: str = Field(..., min_length=1, max_length=255)
     phone: Optional[str] = Field(None, max_length=20)
     avatar_url: Optional[str] = None
+    communal_id: Optional[str] = Field(
+        None,
+        max_length=32,
+        description=(
+            "Server-assigned Communal ID for Individual accounts. "
+            "Read-only for clients; issued on registration / invite join."
+        ),
+    )
 
 
 class OwnerCreate(BaseModel):

@@ -102,6 +102,12 @@ def patch_owner_location_columns() -> None:
         conn.execute(
             text("ALTER TABLE owners ADD COLUMN IF NOT EXISTS avatar_url TEXT;")
         )
+        conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS communal_id "
+                "VARCHAR(32);"
+            )
+        )
         # Migrate any data from the now-removed owner_settings table into the
         # canonical owners columns, then drop it. Idempotent: the table is gone
         # after the first successful run.

@@ -213,6 +213,13 @@ async def get_current_owner(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Owner not found",
         )
+    from app.services.communal_zone_service import assign_owner_communal_id
+
+    prior = getattr(owner, "communal_id", None)
+    assign_owner_communal_id(db, owner)
+    if getattr(owner, "communal_id", None) != prior:
+        db.commit()
+        db.refresh(owner)
     payload = OwnerDetailResponse.model_validate(_normalize_owner_name(owner)).model_dump()
     payload["avatar_url"] = client_avatar_url(
         str(request.base_url), owner.id, getattr(owner, "avatar_url", None)

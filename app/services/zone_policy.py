@@ -176,12 +176,17 @@ def build_capabilities(
     total_zones: int,
     admin_primary_count: int,
     account_type: str | None = None,
+    is_invited_member: bool = False,
 ) -> ZoneCapabilities:
     normalized = (role or "").strip().lower()
     account_key = str(account_type or "").strip().lower()
 
-    # Individual (exclusive): user-role only, up to 3 secondary zones, no primary.
-    if account_key == "exclusive":
+    # Solo Individual = self sign-up OR provisioned by system admin (Private QR):
+    # account root, up to 3 secondary zones, no primary.
+    # Invited Individual = invited by another account holder (Family/Organization):
+    # linked under that admin; secondary quota follows the prior member workflow
+    # (typically up to 2 when the admin has 1 primary).
+    if account_key == "exclusive" and not is_invited_member:
         max_total = INDIVIDUAL_SECONDARY_ZONE_LIMIT
         remaining_total = max(0, max_total - total_zones)
         reason = None
@@ -334,6 +339,15 @@ def account_owner_ids_for_policy(db: Session, owner: Owner) -> list[int]:
     return lock_account_for_zone_policy(db, root_id)
 
 
+def owner_is_invited_member(owner: Owner) -> bool:
+    """True for Invited Individuals (linked under another account holder).
+
+    False for Solo Individuals: self sign-up or system-admin (Private) provisioning,
+    where the owner is their own account root.
+    """
+    return int(account_root_id(owner)) != int(owner.id)
+
+
 def prepare_create_zone_policy(db: Session, owner: Owner) -> ZoneCapabilities:
     """Lock account + creator and evaluate whether this user may create another zone."""
     root_id = account_root_id(owner)
@@ -346,6 +360,7 @@ def prepare_create_zone_policy(db: Session, owner: Owner) -> ZoneCapabilities:
         total_zones=total,
         admin_primary_count=admin_primary,
         account_type=owner.account_type.value,
+        is_invited_member=owner_is_invited_member(owner),
     )
 
 
@@ -357,6 +372,7 @@ def capabilities_for_owner(db: Session, owner: Owner) -> ZoneCapabilities:
         total_zones=total,
         admin_primary_count=admin_primary,
         account_type=owner.account_type.value,
+        is_invited_member=owner_is_invited_member(owner),
     )
 
 
@@ -487,8 +503,10 @@ def prepare_zone_tier_on_create(
 
     account_key = str(owner.account_type.value or "").strip().lower()
     is_admin = (owner.role.value or "").strip().lower() == "administrator"
-    # Individual accounts (and all non-admins) are secondary-only.
-    if not is_admin or account_key == "exclusive":
+    invited = owner_is_invited_member(owner)
+    # Individual roots and all non-admins (including invited Individual members)
+    # are secondary-only.
+    if not is_admin or (account_key == "exclusive" and not invited):
         if requested_is_primary is True:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -496,7 +514,7 @@ def prepare_zone_tier_on_create(
                     "error_code": "ZONE_PRIMARY_FORBIDDEN",
                     "message": (
                         "Individual accounts can create secondary zones only."
-                        if account_key == "exclusive"
+                        if account_key == "exclusive" and not invited
                         else "Members can create secondary zones only."
                     ),
                 },

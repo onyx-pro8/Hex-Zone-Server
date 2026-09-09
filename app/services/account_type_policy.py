@@ -69,12 +69,13 @@ def is_system_administrator(owner: Owner) -> bool:
 
 
 def account_type_for_invited_member(administrator: Owner) -> AccountType:
-    """Account type assigned to a user invited by this administrator.
+    """Account type for users invited by a non–system-admin account holder.
 
-    Invited members always receive Individual (Exclusive) features, regardless
-    of the inviter's tier. They remain linked under the inviter via
-    ``account_owner_id`` (except system-admin QR invites that provision a new
-    solo Individual network).
+    Always Individual (Exclusive). These are *Invited Individuals* linked under
+    the inviter via ``account_owner_id`` (Family/Organization member flow).
+
+    System-admin (Private) QR invites are separate: they provision a *Solo*
+    Individual on a new network (own account root), not a linked member.
     """
     _ = administrator  # inviter used by callers for linkage / capacity checks
     return AccountType.EXCLUSIVE

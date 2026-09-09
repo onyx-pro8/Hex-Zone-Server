@@ -113,20 +113,76 @@ def is_zone_public(zone: Zone) -> bool:
     return bool(zone.active)
 
 
+def zone_communal_id_taken(db: Session, reference_id: str) -> bool:
+    """True when any active zone config already stores this Communal ID."""
+    normalized = normalize_reference_id(reference_id)
+    if not normalized or db is None:
+        return False
+    # Select only id + parameters to avoid PostGIS geometry (AsEWKB) on SQLite.
+    rows = (
+        db.query(Zone.id, Zone.parameters)
+        .filter(Zone.active.is_(True))
+        .all()
+    )
+    for _, parameters in rows:
+        params = parameters if isinstance(parameters, dict) else {}
+        config = params.get("config") if isinstance(params.get("config"), dict) else {}
+        stored = config.get("communal_id") or config.get("communalId")
+        if isinstance(stored, str) and normalize_reference_id(stored) == normalized:
+            return True
+    return False
+
+
 def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:
     normalized = normalize_reference_id(reference_id)
     if not normalized or db is None:
         return []
-    zones = db.query(Zone).filter(Zone.active.is_(True)).all()
-    matched: list[Zone] = []
-    for zone in zones:
-        if get_communal_id(zone) == normalized:
-            matched.append(zone)
-    return matched
+    rows = (
+        db.query(Zone.id, Zone.parameters)
+        .filter(Zone.active.is_(True))
+        .all()
+    )
+    matched_ids: list[int] = []
+    for zone_id, parameters in rows:
+        params = parameters if isinstance(parameters, dict) else {}
+        config = params.get("config") if isinstance(params.get("config"), dict) else {}
+        stored = config.get("communal_id") or config.get("communalId")
+        if isinstance(stored, str) and normalize_reference_id(stored) == normalized:
+            matched_ids.append(int(zone_id))
+    if not matched_ids:
+        return []
+    try:
+        return (
+            db.query(Zone)
+            .filter(Zone.id.in_(tuple(matched_ids)))
+            .all()
+        )
+    except Exception:
+        # SQLite / missing spatial functions: return lightweight stand-ins unused
+        # by uniqueness checks (callers that need geometry use Postgres).
+        return []
+
+
+def owner_communal_id_taken(db: Session, reference_id: str) -> bool:
+    """True when another owner already holds this assigned Communal ID."""
+    from app.models import Owner
+
+    normalized = normalize_reference_id(reference_id)
+    if not normalized or db is None:
+        return False
+    return (
+        db.query(Owner.id)
+        .filter(Owner.communal_id == normalized)
+        .first()
+        is not None
+    )
 
 
 def communal_id_exists(db: Session, reference_id: str) -> bool:
-    return bool(find_zones_by_communal_id(db, reference_id))
+    """True when the ID is already used on a zone or assigned to an owner."""
+    return zone_communal_id_taken(db, reference_id) or owner_communal_id_taken(
+        db, reference_id
+    )
 
 
 def list_public_defining_zones(
@@ -154,6 +210,84 @@ def generate_unique_communal_id(db: Session | None = None) -> str:
             continue
         return candidate
     return f"COMM-{secrets.token_hex(4).upper()}"
+
+
+def assign_owner_communal_id(db: Session, owner) -> str:
+    """Ensure an Individual (exclusive) owner has a unique assigned Communal ID.
+
+    Returns the owner's communal_id. Non-Individual owners are left unchanged
+    (returns empty string when none is set).
+    """
+    from app.services.account_type_policy import is_individual_account_type
+
+    existing = normalize_reference_id(getattr(owner, "communal_id", None) or "")
+    if existing:
+        return existing
+    if not is_individual_account_type(getattr(owner, "account_type", None)):
+        return ""
+
+    for _ in range(32):
+        candidate = generate_unique_communal_id(db)
+        # generate_unique_communal_id already checks zones+owners; still skip
+        # collisions against this owner's pending row if any.
+        if owner_communal_id_taken(db, candidate):
+            continue
+        owner.communal_id = candidate
+        db.flush()
+        return candidate
+
+    fallback = f"COMM-{secrets.token_hex(4).upper()}"
+    owner.communal_id = fallback
+    db.flush()
+    return fallback
+
+
+def assert_may_generate_communal_id(owner) -> None:
+    """Individuals cannot mint new Communal IDs — only admins of other tiers."""
+    from fastapi import HTTPException, status
+
+    from app.services.account_type_policy import is_individual_account_type
+
+    if is_individual_account_type(getattr(owner, "account_type", None)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Individual accounts cannot generate Communal IDs. "
+                "Use the Communal ID assigned to your account."
+            ),
+        )
+
+
+def resolve_communal_id_for_owner(owner, requested: str | None) -> str:
+    """Return the Communal ID an owner may apply to zones.
+
+    Individuals are locked to their assigned ID. Other tiers may use the
+    requested value (validated by the caller).
+    """
+    from fastapi import HTTPException, status
+
+    from app.services.account_type_policy import is_individual_account_type
+
+    assigned = normalize_reference_id(getattr(owner, "communal_id", None) or "")
+    requested_norm = normalize_reference_id(requested or "")
+
+    if is_individual_account_type(getattr(owner, "account_type", None)):
+        if not assigned:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Individual account is missing an assigned Communal ID.",
+            )
+        if requested_norm and requested_norm != assigned:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Individual accounts can only use their assigned Communal ID "
+                    f"({assigned})."
+                ),
+            )
+        return assigned
+
+    return requested_norm
 
 
 def assign_communal_id(
