@@ -1,11 +1,14 @@
 """Router for utility endpoints."""
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.schemas import (
     H3ConversionRequest,
     H3ConversionResponse,
+    QRInviteExportRequest,
+    QRInviteExportResponse,
     QRRegistrationCreate,
     QRRegistrationPreview,
     QRRegistrationResponse,
@@ -34,6 +37,14 @@ from app.services.system_admin_seed import (
     SYSTEM_ADMIN_EMAIL,
     SYSTEM_ADMIN_ZONE_ID,
     ensure_system_admin,
+)
+from app.services.guest_access_qr import guest_access_web_base
+from app.services.member_invite_excel_service import (
+    InviteExportRow,
+    build_member_invite_xlsx_bytes,
+    member_invite_join_url,
+    store_invite_export,
+    take_invite_export,
 )
 
 router = APIRouter(prefix="/utils", tags=["utilities"])
@@ -275,6 +286,117 @@ async def generate_qr_registration(
     db.commit()
 
     return QRRegistrationResponse.model_validate(qr)
+
+
+@router.post(
+    "/qr/export-xlsx",
+    response_model=QRInviteExportResponse,
+    summary="Export invite tokens as Excel with QR images",
+    description=(
+        "Build an `.xlsx` workbook for the given invite tokens (owned by the caller). "
+        "Each row includes token metadata and an embedded QR code image for the join URL. "
+        "Returns a short-lived **download_url** the mobile app can open."
+    ),
+)
+async def export_qr_invites_xlsx(
+    body: QRInviteExportRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Owner not found",
+        )
+    if owner.role.value != "administrator":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only administrators can export invite QR workbooks",
+        )
+
+    web_base = (
+        (body.join_base_url or "").strip()
+        or guest_access_web_base()
+        or str(request.base_url).rstrip("/")
+    )
+
+    rows: list[InviteExportRow] = []
+    seen: set[str] = set()
+    for raw in body.tokens:
+        token = (raw or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        qr = qr_crud.get_qr_registration(db, token)
+        if not qr or int(qr.owner_id) != int(owner.id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Invite token not found: {token[:12]}…",
+            )
+        expires = (
+            qr.expires_at.isoformat()
+            if getattr(qr, "expires_at", None) is not None
+            else None
+        )
+        rows.append(
+            InviteExportRow(
+                index=len(rows) + 1,
+                token=qr.token,
+                url=member_invite_join_url(qr.token, web_base=web_base),
+                expires_at=expires,
+            )
+        )
+
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No valid invite tokens to export.",
+        )
+
+    content = build_member_invite_xlsx_bytes(rows)
+    file_name = f"member-invites-{len(rows)}.xlsx"
+    export_id = store_invite_export(
+        owner_id=int(owner.id),
+        content=content,
+        file_name=file_name,
+    )
+    download_url = str(request.url_for("download_qr_invite_export", export_id=export_id))
+    return QRInviteExportResponse(
+        download_url=download_url,
+        file_name=file_name,
+        expires_in_seconds=3600,
+    )
+
+
+@router.get(
+    "/qr/exports/{export_id}",
+    name="download_qr_invite_export",
+    summary="Download exported invite Excel workbook",
+    description=(
+        "Public short-lived download for a workbook created by "
+        "**POST /utils/qr/export-xlsx**. The export id is an unguessable secret."
+    ),
+    responses={
+        status.HTTP_404_NOT_FOUND: {"description": "Export missing or expired."},
+    },
+)
+async def download_qr_invite_export(export_id: str):
+    found = take_invite_export(export_id)
+    if not found:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Export not found or expired.",
+        )
+    path, file_name = found
+    return FileResponse(
+        path=str(path),
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        filename=file_name,
+    )
 
 
 def _load_valid_qr_and_inviter(db: Session, token: str):

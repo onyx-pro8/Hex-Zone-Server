@@ -401,6 +401,30 @@ class QRRegistrationCreate(BaseModel):
     )
 
 
+class QRInviteExportRequest(BaseModel):
+    """Export already-minted invite tokens as an Excel workbook with QR images."""
+
+    tokens: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="Invite tokens owned by the authenticated administrator.",
+    )
+    join_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional HTTPS origin used to build join links in the sheet "
+            "(defaults to the public web app URL or this API host)."
+        ),
+    )
+
+
+class QRInviteExportResponse(BaseModel):
+    download_url: str
+    file_name: str
+    expires_in_seconds: int = 3600
+
+
 class QRRegistrationResponse(BaseModel):
     """QR registration response schema."""
     id: int
