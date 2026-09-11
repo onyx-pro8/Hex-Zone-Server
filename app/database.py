@@ -108,6 +108,11 @@ def patch_owner_location_columns() -> None:
                 "VARCHAR(32);"
             )
         )
+        conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS tier_level INTEGER;"
+            )
+        )
         # Migrate any data from the now-removed owner_settings table into the
         # canonical owners columns, then drop it. Idempotent: the table is gone
         # after the first successful run.
@@ -209,6 +214,30 @@ def patch_qr_registration_expires_nullable() -> None:
     logger.info("qr_registrations.expires_at nullable patch applied")
 
 
+def patch_qr_registration_communal_id_column() -> None:
+    """Add pre-issued Communal ID column on member-invite QR tokens."""
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
+        conn.execute(text("SET LOCAL statement_timeout = '8s';"))
+        if conn.execute(text("SELECT to_regclass('public.qr_registrations')")).scalar() is None:
+            return
+        conn.execute(
+            text(
+                "ALTER TABLE qr_registrations ADD COLUMN IF NOT EXISTS communal_id "
+                "VARCHAR(32);"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_qr_registrations_communal_id "
+                "ON qr_registrations (communal_id);"
+            )
+        )
+    logger.info("qr_registrations.communal_id column patch applied")
+
+
 def init_db():
     """Initialize database tables."""
     import app.models  # noqa: F401
@@ -223,6 +252,10 @@ def init_db():
         patch_qr_registration_expires_nullable()
     except Exception as exc:
         logger.exception("QR registration expires_at nullable patch failed: %s", exc)
+    try:
+        patch_qr_registration_communal_id_column()
+    except Exception as exc:
+        logger.exception("QR registration communal_id column patch failed: %s", exc)
 
     if engine.dialect.name == "postgresql":
         # Quick-alert templates live in `messages` flagged with is_template.

@@ -32,22 +32,25 @@ def is_smart_home_hid(hid: str | None) -> bool:
     return bool(normalized) and not is_client_session_hid(normalized)
 
 
-# Max number of *user-role* members an administrator may invite under a given
-# account type. ``None`` means unlimited; ``0`` means the tier does not support
-# user members at all.
+# Max *total* active users (administrator + invited members) per account.
+# ``None`` means unlimited; ``1`` means solo (no invited members).
+# Organization (enhanced_plus) uses ENHANCED_PLUS_LEVELS via tier_level instead.
 USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE: dict[str, int | None] = {
     "private": None,
-    "exclusive": 0,
-    "private_plus": None,
-    "enhanced": 0,
-    "enhanced_plus": None,
+    "exclusive": 1,
+    "private_plus": 10,  # Family
+    "enhanced": 1,
+    "enhanced_plus": None,  # resolved from owner.tier_level
 }
 
 
 def account_type_supports_member_invite(account_type: str) -> bool:
     """Whether administrators of this tier may use member-invite QR."""
-    limit = max_user_members_for_account_type(account_type)
-    return limit != 0
+    key = str(account_type).strip().lower()
+    if key == "enhanced_plus":
+        return True
+    limit = USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE.get(key)
+    return limit is None or limit > 1
 
 
 def max_devices_for_account_type(account_type: str) -> int | None:
@@ -55,9 +58,35 @@ def max_devices_for_account_type(account_type: str) -> int | None:
     return DEVICE_LIMITS_BY_ACCOUNT_TYPE.get(str(account_type).strip().lower())
 
 
-def max_user_members_for_account_type(account_type: str) -> int | None:
-    """Return max invited user-members allowed for an admin of this tier."""
-    return USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE.get(str(account_type).strip().lower())
+def max_user_members_for_account_type(
+    account_type: str,
+    *,
+    tier_level: int | None = None,
+) -> int | None:
+    """Return max total active users for an admin of this tier.
+
+    Includes the administrator seat. ``None`` means unlimited.
+    """
+    key = str(account_type).strip().lower()
+    if key == "enhanced_plus":
+        from app.services.registration_code_service import ENHANCED_PLUS_LEVELS
+
+        try:
+            level = int(tier_level) if tier_level is not None else 1
+        except (TypeError, ValueError):
+            level = 1
+        if level not in ENHANCED_PLUS_LEVELS:
+            level = 1
+        return ENHANCED_PLUS_LEVELS[level]
+    return USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE.get(key)
+
+
+def max_total_users_for_owner(owner: Owner) -> int | None:
+    """Resolve total-user cap for this account holder (None = unlimited)."""
+    return max_user_members_for_account_type(
+        owner.account_type.value,
+        tier_level=getattr(owner, "tier_level", None),
+    )
 
 
 ACCOUNT_IN_USE_DETAIL = (
@@ -204,8 +233,7 @@ def assert_owner_device_capacity(owner: Owner, current_device_count: int) -> Non
 
 def assert_account_allows_user_members(account_type: str) -> None:
     """Ensure account tier supports user-member registrations at all."""
-    limit = max_user_members_for_account_type(account_type)
-    if limit == 0:
+    if not account_type_supports_member_invite(account_type):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Account type '{account_type}' does not allow user members",
@@ -220,6 +248,7 @@ def _count_active_user_members(db: Session, admin_owner_id: int) -> int:
         db.query(Owner.id)
         .filter(
             Owner.account_owner_id == admin_owner_id,
+            Owner.id != admin_owner_id,
             Owner.role == OwnerRole.USER,
             Owner.active.is_(True),
         )
@@ -227,23 +256,29 @@ def _count_active_user_members(db: Session, admin_owner_id: int) -> int:
     )
 
 
+def _count_active_account_users(db: Session, admin_owner: Owner) -> int:
+    """Count active seats on this network (admin + invited members)."""
+    admin_active = 1 if bool(admin_owner.active) else 0
+    return admin_active + _count_active_user_members(db, admin_owner.id)
+
+
 def assert_admin_user_member_capacity(db: Session, admin_owner: Owner) -> None:
     """Ensure the administrator has capacity to add another user member."""
     account_type = admin_owner.account_type.value
-    limit = max_user_members_for_account_type(account_type)
+    limit = max_total_users_for_owner(admin_owner)
     if limit is None:
         return
-    if limit == 0:
+    if not account_type_supports_member_invite(account_type):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Account type '{account_type}' does not allow user members",
         )
-    current = _count_active_user_members(db, admin_owner.id)
+    current = _count_active_account_users(db, admin_owner)
     if current >= limit:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                f"Account type '{account_type}' allows at most {limit} invited "
-                f"user(s) per administrator"
+                f"Account type '{account_type}' allows at most {limit} user(s) "
+                f"on this account"
             ),
         )

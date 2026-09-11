@@ -320,6 +320,8 @@ class OwnerContractResponse(BaseModel):
     updated_at: datetime
     api_key: str
     communal_id: str | None = None
+    tier_level: int | None = None
+    tierLevel: int | None = None
 
 
 class ContractSuccessOwnerMeResponse(BaseModel):
@@ -337,6 +339,8 @@ class ContractLoginUserResponse(BaseModel):
     mapCenter: MemberLocationResponse | None = None
     communalId: str | None = None
     communal_id: str | None = None
+    tierLevel: int | None = None
+    tier_level: int | None = None
 
 
 class ContractLoginDataResponse(BaseModel):
@@ -357,6 +361,7 @@ class ContractRegisterDataResponse(BaseModel):
     first_name: str
     last_name: str
     account_type: Literal["private", "private_plus", "exclusive", "enhanced", "enhanced_plus"]
+    tier_level: int | None = None
     role: Literal["administrator", "user"]
     account_owner_id: int
     address: str
@@ -509,6 +514,8 @@ async def get_me(
         updated_at=owner.updated_at,
         api_key=owner.api_key,
         communal_id=getattr(owner, "communal_id", None),
+        tier_level=getattr(owner, "tier_level", None),
+        tierLevel=getattr(owner, "tier_level", None),
     )
     return success_response(data.model_dump())
 

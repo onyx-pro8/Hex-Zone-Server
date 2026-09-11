@@ -108,12 +108,19 @@ async def register_owner(
 
     preallocated_api_key: str | None = None
     if owner.role == OwnerRoleEnum.ADMINISTRATOR:
-        preallocated_api_key = require_and_consume_admin_registration_code(
+        consumed = require_and_consume_admin_registration_code(
             db,
             owner.registration_code,
             registration_email=owner.email,
             account_type=owner.account_type.value,
         )
+        preallocated_api_key = consumed.api_key
+        if owner.account_type == AccountTypeEnum.ENHANCED_PLUS:
+            owner.tier_level = (
+                int(consumed.tier_level) if consumed.tier_level is not None else 1
+            )
+        else:
+            owner.tier_level = None
 
     db_owner = owner_crud.create_owner(db, owner, api_key=preallocated_api_key)
     db.commit()

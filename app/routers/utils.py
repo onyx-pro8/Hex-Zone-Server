@@ -230,6 +230,8 @@ async def convert_to_h3(
         "**Private+ / Enhanced+:** invites an **Individual (Exclusive)** user member onto "
         "the inviter's existing network. "
         "**Exclusive** and **Enhanced** (solo) accounts cannot generate these invites. "
+        "Each invite mints a unique Communal ID for the invitee (Individuals cannot "
+        "generate one themselves). "
         "Send **`expires_in_hours`: 0** (or **null**) for a never-expiring "
         "**single-use** token. All invite tokens are single-use."
     ),
@@ -294,8 +296,9 @@ async def generate_qr_registration(
     summary="Export invite tokens as Excel with QR images",
     description=(
         "Build an `.xlsx` workbook for the given invite tokens (owned by the caller). "
-        "Each row includes token metadata and an embedded QR code image for the join URL. "
-        "Returns a short-lived **download_url** the mobile app can open."
+        "Each row includes the invite's pre-issued Communal ID, token metadata, and an "
+        "embedded QR code image for the join URL. Returns a short-lived **download_url** "
+        "the mobile app can open."
     ),
 )
 async def export_qr_invites_xlsx(
@@ -340,12 +343,15 @@ async def export_qr_invites_xlsx(
             if getattr(qr, "expires_at", None) is not None
             else None
         )
+        # Per-invite Communal ID minted for the future Individual member.
+        invite_communal_id = qr_crud.ensure_qr_communal_id(db, qr)
         rows.append(
             InviteExportRow(
                 index=len(rows) + 1,
                 token=qr.token,
                 url=member_invite_join_url(qr.token, web_base=web_base),
                 expires_at=expires,
+                communal_id=invite_communal_id,
             )
         )
 
@@ -355,6 +361,7 @@ async def export_qr_invites_xlsx(
             detail="No valid invite tokens to export.",
         )
 
+    db.commit()
     content = build_member_invite_xlsx_bytes(rows)
     file_name = f"member-invites-{len(rows)}.xlsx"
     export_id = store_invite_export(
@@ -557,7 +564,11 @@ async def join_with_qr(
             address=qr_data.address,
             phone=qr_data.phone,
         )
-        new_owner = owner_crud.create_owner(db, new_owner_data)
+        new_owner = owner_crud.create_owner(
+            db,
+            new_owner_data,
+            communal_id=qr_crud.ensure_qr_communal_id(db, qr),
+        )
 
         if not qr.is_reusable():
             qr_crud.mark_qr_registration_used(db, qr.token)
@@ -582,7 +593,11 @@ async def join_with_qr(
         phone=qr_data.phone,
     )
 
-    new_owner = owner_crud.create_owner(db, new_owner_data)
+    new_owner = owner_crud.create_owner(
+        db,
+        new_owner_data,
+        communal_id=qr_crud.ensure_qr_communal_id(db, qr),
+    )
 
     if not qr.is_reusable():
         qr_crud.mark_qr_registration_used(db, qr.token)

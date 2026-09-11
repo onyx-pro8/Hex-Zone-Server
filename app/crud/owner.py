@@ -10,21 +10,46 @@ from app.crud.zone import apply_zone_geo_fence_geojson
 from typing import Optional
 
 
-def create_owner(db: Session, owner: OwnerCreate, *, api_key: str | None = None) -> Owner:
-    """Create a new owner."""
+def create_owner(
+    db: Session,
+    owner: OwnerCreate,
+    *,
+    api_key: str | None = None,
+    communal_id: str | None = None,
+) -> Owner:
+    """Create a new owner.
+
+    ``communal_id`` may be a pre-issued ID from a member-invite QR. When set,
+    Individual accounts keep that value instead of minting a new one.
+    """
     api_key = api_key or generate_api_key()
+    tier_level = getattr(owner, "tier_level", None)
+    account_key = (
+        owner.account_type.value
+        if hasattr(owner.account_type, "value")
+        else str(owner.account_type)
+    ).strip().lower()
+    if account_key == "enhanced_plus":
+        tier_level = int(tier_level) if tier_level is not None else 1
+    else:
+        tier_level = None
+    from app.services.communal_zone_service import normalize_reference_id
+
+    reserved = normalize_reference_id(communal_id or "") or None
     db_owner = Owner(
         email=owner.email,
         zone_id=owner.zone_id,
         first_name=owner.first_name,
         last_name=owner.last_name,
         account_type=owner.account_type,
+        tier_level=tier_level,
         role=owner.role,
         account_owner_id=owner.account_owner_id,
         hashed_password=get_password_hash(owner.password),
         api_key=api_key,
         phone=owner.phone,
         address=owner.address,
+        communal_id=reserved,
     )
     db.add(db_owner)
     db.flush()
@@ -128,6 +153,7 @@ def update_owner(db: Session, owner_id: int, owner_update: OwnerUpdate) -> Optio
     
     update_data = owner_update.model_dump(exclude_unset=True)
     new_account_type = update_data.pop("account_type", None)
+    new_tier_level = update_data.pop("tier_level", None)
     new_role = update_data.pop("role", None)
     if "email" in update_data and isinstance(update_data["email"], str):
         update_data["email"] = update_data["email"].strip().lower()
@@ -164,6 +190,16 @@ def update_owner(db: Session, owner_id: int, owner_update: OwnerUpdate) -> Optio
         from app.services.communal_zone_service import assign_owner_communal_id
 
         assign_owner_communal_id(db, db_owner)
+
+    # Keep Organization capacity level in sync with account type.
+    effective_type = str(db_owner.account_type.value).strip().lower()
+    if effective_type == "enhanced_plus":
+        if new_tier_level is not None:
+            db_owner.tier_level = int(new_tier_level)
+        elif getattr(db_owner, "tier_level", None) is None:
+            db_owner.tier_level = 1
+    elif new_account_type is not None or new_tier_level is not None:
+        db_owner.tier_level = None
     
     db.flush()
     db.refresh(db_owner)

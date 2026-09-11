@@ -51,7 +51,7 @@ PRICING_TIER_LABELS: dict[str, str] = {
     PRICING_TIER_PRIVATE_PLUS: "Private Plus [+] — max 10 users (family)",
     PRICING_TIER_EXCLUSIVE: "Individual — 1 user, up to 3 secondary zones, no smart-home (FREE)",
     PRICING_TIER_ENHANCED: "Enhanced — 1 user, up to 2 primary zones, 1 device",
-    PRICING_TIER_ENHANCED_PLUS: "Enhanced Plus [+] — tiered user capacity",
+    PRICING_TIER_ENHANCED_PLUS: "Enhanced Plus [+] — tiered user capacity (levels 1–5: 20/50/100/500/2500)",
 }
 
 logger = logging.getLogger(__name__)
@@ -420,17 +420,24 @@ def _assert_account_type_matches_issuance(
         )
 
 
+@dataclass(frozen=True)
+class ConsumedRegistrationCode:
+    api_key: str | None
+    tier_level: int | None = None
+
+
 def require_and_consume_admin_registration_code(
     db: Session,
     code: str | None,
     *,
     registration_email: str | None = None,
     account_type: str | None = None,
-) -> str | None:
+) -> ConsumedRegistrationCode:
     """
     Administrators self-registering must provide a valid code.
 
-    Returns the pre-allocated api_key from the issuance row when present.
+    Returns the pre-allocated api_key (when present) and pricing tier_level
+    for Organization (enhanced_plus) codes.
     """
     if code is None or not str(code).strip():
         raise HTTPException(
@@ -444,7 +451,7 @@ def require_and_consume_admin_registration_code(
     normalized = normalize_registration_code(str(code))
 
     if normalized in STATIC_ADMIN_REGISTRATION_TIERS:
-        return None
+        return ConsumedRegistrationCode(api_key=None, tier_level=None)
 
     if _REG_CODE_FORMAT.match(normalized):
         row = registration_code_crud.get_registration_code(db, normalized)
@@ -453,7 +460,10 @@ def require_and_consume_admin_registration_code(
             if _try_consume_hmac_registration_row(
                 db, normalized, registration_email=registration_email
             ):
-                return row.api_key
+                return ConsumedRegistrationCode(
+                    api_key=row.api_key,
+                    tier_level=getattr(row, "tier_level", None),
+                )
         if registration_email:
             for spec_key in _candidate_price_tier_keys_for_email(db, registration_email):
                 secret = _hmac_secret_bytes()
@@ -466,11 +476,17 @@ def require_and_consume_admin_registration_code(
                         db, normalized, registration_email=registration_email
                     ):
                         row_after = registration_code_crud.get_registration_code(db, normalized)
-                        return row_after.api_key if row_after else None
+                        return ConsumedRegistrationCode(
+                            api_key=row_after.api_key if row_after else None,
+                            tier_level=getattr(row_after, "tier_level", None) if row_after else None,
+                        )
 
     if registration_code_crud.try_consume_registration_code(db, normalized):
         row = registration_code_crud.get_registration_code(db, normalized)
-        return row.api_key if row and row.api_key else None
+        return ConsumedRegistrationCode(
+            api_key=row.api_key if row and row.api_key else None,
+            tier_level=getattr(row, "tier_level", None) if row else None,
+        )
 
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,

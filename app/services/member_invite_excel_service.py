@@ -37,6 +37,7 @@ class InviteExportRow:
     token: str
     url: str
     expires_at: str | None
+    communal_id: str | None = None
 
 
 def _purge_expired_locked(now: float | None = None) -> None:
@@ -61,18 +62,27 @@ def build_member_invite_xlsx_bytes(rows: Sequence[InviteExportRow]) -> bytes:
     ws = wb.active
     ws.title = "Member invites"
 
-    headers = ["#", "Token", "Invite URL", "Expires at", "Use policy", "QR code"]
+    headers = [
+        "#",
+        "Communal ID",
+        "Token",
+        "Invite URL",
+        "Expires at",
+        "Use policy",
+        "QR code",
+    ]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     ws.column_dimensions["A"].width = 6
-    ws.column_dimensions["B"].width = 28
-    ws.column_dimensions["C"].width = 56
-    ws.column_dimensions["D"].width = 28
-    ws.column_dimensions["E"].width = 14
-    ws.column_dimensions["F"].width = 18
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["C"].width = 28
+    ws.column_dimensions["D"].width = 56
+    ws.column_dimensions["E"].width = 28
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 18
 
     # Keep image buffers alive until workbook is saved.
     image_buffers: list[io.BytesIO] = []
@@ -80,9 +90,11 @@ def build_member_invite_xlsx_bytes(rows: Sequence[InviteExportRow]) -> bytes:
     for row in rows:
         excel_row = row.index + 1  # header is row 1
         expires_label = row.expires_at or "Does not expire"
+        communal_label = (row.communal_id or "").strip() or "—"
         ws.append(
             [
                 row.index,
+                communal_label,
                 row.token,
                 row.url,
                 expires_label,
@@ -91,7 +103,7 @@ def build_member_invite_xlsx_bytes(rows: Sequence[InviteExportRow]) -> bytes:
             ]
         )
         ws.row_dimensions[excel_row].height = 90
-        for col in range(1, 6):
+        for col in range(1, 7):
             ws.cell(row=excel_row, column=col).alignment = Alignment(
                 vertical="center",
                 wrap_text=True,
@@ -103,8 +115,8 @@ def build_member_invite_xlsx_bytes(rows: Sequence[InviteExportRow]) -> bytes:
         img = XLImage(buf)
         img.width = 96
         img.height = 96
-        # Anchor in QR column (F)
-        img.anchor = f"F{excel_row}"
+        # Anchor in QR column (G)
+        img.anchor = f"G{excel_row}"
         ws.add_image(img)
 
     out = io.BytesIO()

@@ -101,6 +101,39 @@ async def test_qr_generate_never_expires(test_db, override_get_db):
         body = generate.json()
         assert body["expires_at"] is None
         assert body["token"]
+        assert body["communal_id"]
+        assert str(body["communal_id"]).startswith("COMM-")
+
+
+@pytest.mark.asyncio
+async def test_qr_join_uses_preissued_communal_id(test_db, override_get_db):
+    """Invite mint reserves Communal ID; join assigns that same ID to the member."""
+    admin, token = _admin(
+        test_db,
+        email="plus-admin@example.com",
+        zone_id="plus-zone",
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 0},
+        )
+        assert generate.status_code == 200, generate.text
+        invite = generate.json()
+        reserved = invite["communal_id"]
+        assert reserved
+
+        join = await _join(client, invite["token"], "joined@example.com")
+        assert join.status_code == 200, join.text
+        joined = join.json()
+        assert joined["zone_id"] == admin.zone_id
+        assert joined["account_type"] == "exclusive"
+        assert joined["role"] == "user"
+        assert joined["communal_id"] == reserved
+        # Admin must not share the invitee's pre-issued Communal ID.
+        assert getattr(admin, "communal_id", None) != reserved
 
 
 @pytest.mark.asyncio
@@ -124,6 +157,8 @@ async def test_qr_join_never_expiring_token(test_db, override_get_db):
         assert joined["zone_id"] == admin.zone_id
         assert joined["account_type"] == "exclusive"
         assert joined["role"] == "user"
+        assert joined["communal_id"]
+        assert joined["communal_id"] == generate.json()["communal_id"]
 
 
 @pytest.mark.asyncio
@@ -214,8 +249,11 @@ async def test_qr_join_system_admin_provisions_individual_user(test_db, override
             json={"expires_in_hours": 0},
         )
         assert generate.status_code == 200, generate.text
-        assert generate.json()["expires_at"] is None
-        invite = generate.json()["token"]
+        invite_body = generate.json()
+        assert invite_body["expires_at"] is None
+        invite = invite_body["token"]
+        reserved = invite_body["communal_id"]
+        assert reserved
 
         preview = await client.get("/utils/qr/preview", params={"token": invite})
         assert preview.status_code == 200, preview.text
@@ -239,6 +277,7 @@ async def test_qr_join_system_admin_provisions_individual_user(test_db, override
         assert joined["zone_id"] == "NEW-NETWORK-42"
         assert joined["zone_id"] != admin.zone_id
         assert joined["account_owner_id"] == joined["id"]
+        assert joined["communal_id"] == reserved
 
 
 @pytest.mark.asyncio

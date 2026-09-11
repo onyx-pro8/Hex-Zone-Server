@@ -92,13 +92,16 @@ def register_user(db: Session, payload: dict) -> dict:
         _to_owner_role(payload.get("registrationType")),
     )
     preallocated_api_key: str | None = None
+    registration_tier_level: int | None = None
     if role_value == OwnerRole.ADMINISTRATOR:
-        preallocated_api_key = require_and_consume_admin_registration_code(
+        consumed = require_and_consume_admin_registration_code(
             db,
             payload.get("registrationCode"),
             registration_email=payload.get("email"),
             account_type=account_type_value,
         )
+        preallocated_api_key = consumed.api_key
+        registration_tier_level = consumed.tier_level
     account_owner_id = resolve_account_owner_id(
         db,
         role=role_value.value,
@@ -106,12 +109,20 @@ def register_user(db: Session, payload: dict) -> dict:
         zone_id=payload.get("zoneId") or f"user-{payload['email']}",
         account_type=account_type_value,
     )
+    owner_tier_level: int | None = None
+    if account_type_value == "enhanced_plus":
+        owner_tier_level = (
+            int(registration_tier_level)
+            if registration_tier_level is not None
+            else 1
+        )
     owner = Owner(
         email=payload["email"],
         zone_id=payload.get("zoneId") or f"user-{payload['email']}",
         first_name=first_name,
         last_name=last_name,
         account_type=account_type_value,
+        tier_level=owner_tier_level,
         role=role_value,
         account_owner_id=account_owner_id,
         hashed_password=get_password_hash(payload["password"]),
@@ -136,6 +147,7 @@ def register_user(db: Session, payload: dict) -> dict:
         "first_name": owner.first_name,
         "last_name": owner.last_name,
         "account_type": owner.account_type.value,
+        "tier_level": getattr(owner, "tier_level", None),
         "role": owner.role.value,
         "account_owner_id": owner.account_owner_id or owner.id,
         "address": owner.address,
@@ -172,6 +184,7 @@ def login_user(db: Session, email: str, password: str) -> dict:
 
     token = create_access_token({"sub": str(owner.id)})
     communal_id = getattr(owner, "communal_id", None)
+    tier_level = getattr(owner, "tier_level", None)
     return {
         "token": token,
         "user": {
@@ -183,5 +196,7 @@ def login_user(db: Session, email: str, password: str) -> dict:
             "mapCenter": _get_map_center(db, owner.id),
             "communalId": communal_id,
             "communal_id": communal_id,
+            "tierLevel": tier_level,
+            "tier_level": tier_level,
         },
     }

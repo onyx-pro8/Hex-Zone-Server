@@ -50,7 +50,17 @@ class OwnerBase(BaseModel):
         max_length=32,
         description=(
             "Server-assigned Communal ID for Individual accounts. "
-            "Read-only for clients; issued on registration / invite join."
+            "Read-only for clients; issued on registration, or pre-issued on "
+            "member-invite QR generate and applied at join."
+        ),
+    )
+    tier_level: Optional[int] = Field(
+        None,
+        ge=1,
+        le=5,
+        description=(
+            "Organization (enhanced_plus) capacity level 1–5. "
+            "Null for other account types."
         ),
     )
 
@@ -68,6 +78,12 @@ class OwnerCreate(BaseModel):
     last_name: Optional[str] = Field(None, min_length=1, max_length=100)
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     account_type: AccountTypeEnum = AccountTypeEnum.PRIVATE
+    tier_level: Optional[int] = Field(
+        None,
+        ge=1,
+        le=5,
+        description="Required capacity level when account_type is enhanced_plus (Organization).",
+    )
     role: OwnerRoleEnum = OwnerRoleEnum.ADMINISTRATOR
     account_owner_id: Optional[int] = Field(
         None,
@@ -152,6 +168,15 @@ class OwnerUpdate(BaseModel):
     account_type: Optional[AccountTypeEnum] = Field(
         None,
         description="Pricing tier. Only system administrators may change this field.",
+    )
+    tier_level: Optional[int] = Field(
+        None,
+        ge=1,
+        le=5,
+        description=(
+            "Organization (enhanced_plus) capacity level 1–5. "
+            "Cleared automatically when account_type is not enhanced_plus."
+        ),
     )
 
 
@@ -432,6 +457,13 @@ class QRRegistrationResponse(BaseModel):
     owner_id: int
     used: bool
     expires_at: datetime | None = None
+    communal_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Pre-issued Communal ID for the invited Individual member. "
+            "Assigned when the QR is generated; applied to the member on join."
+        ),
+    )
     created_at: datetime
 
     class Config:

@@ -178,11 +178,40 @@ def owner_communal_id_taken(db: Session, reference_id: str) -> bool:
     )
 
 
-def communal_id_exists(db: Session, reference_id: str) -> bool:
-    """True when the ID is already used on a zone or assigned to an owner."""
-    return zone_communal_id_taken(db, reference_id) or owner_communal_id_taken(
-        db, reference_id
+def qr_invite_communal_id_taken(db: Session, reference_id: str) -> bool:
+    """True when a member-invite QR already reserved this Communal ID."""
+    from app.models import QRRegistration
+
+    normalized = normalize_reference_id(reference_id)
+    if not normalized or db is None:
+        return False
+    return (
+        db.query(QRRegistration.id)
+        .filter(QRRegistration.communal_id == normalized)
+        .first()
+        is not None
     )
+
+
+def communal_id_exists(db: Session, reference_id: str) -> bool:
+    """True when the ID is used on a zone, owner, or pending/used QR invite."""
+    return (
+        zone_communal_id_taken(db, reference_id)
+        or owner_communal_id_taken(db, reference_id)
+        or qr_invite_communal_id_taken(db, reference_id)
+    )
+
+
+def mint_invite_communal_id(db: Session) -> str:
+    """Mint a unique Communal ID reserved for a member-invite QR."""
+    for _ in range(32):
+        candidate = generate_unique_communal_id(db)
+        if qr_invite_communal_id_taken(db, candidate):
+            continue
+        if owner_communal_id_taken(db, candidate):
+            continue
+        return candidate
+    return f"COMM-{secrets.token_hex(4).upper()}"
 
 
 def list_public_defining_zones(

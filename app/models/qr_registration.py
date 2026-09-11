@@ -19,6 +19,9 @@ class QRRegistration(Base):
     used = Column(Boolean, default=False, nullable=False)
     # Null means the invite never expires (printed / outdoor QR).
     expires_at = Column(DateTime, nullable=True)
+    # Pre-issued Communal ID for the invited Individual member. Minted when the
+    # QR is generated so the invitee does not need to create one (they cannot).
+    communal_id = Column(String(32), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
