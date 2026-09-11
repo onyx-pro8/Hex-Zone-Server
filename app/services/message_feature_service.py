@@ -868,6 +868,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
             metadata=metadata,
             zone_meta=fanout_meta,
             delivered_owner_ids=delivered_owner_ids,
+            sender_network_id=(sender.zone_id or "").strip() or None,
         )
 
     event = ZoneMessageEvent(
@@ -1062,6 +1063,7 @@ def create_network_guest_geo_propagated_message(
             metadata=metadata,
             zone_meta=fanout_meta,
             delivered_owner_ids=delivered_owner_ids,
+            sender_network_id=network_id,
         )
 
     event = ZoneMessageEvent(

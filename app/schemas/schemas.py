@@ -753,15 +753,24 @@ class ZoneMessageResponse(BaseModel):
     )
     relevant_zone_name: Optional[str] = Field(
         default=None,
-        description="Acceptable zone name explaining why this viewer received the geo message.",
+        description=(
+            "Delivery/acceptable zone name for this viewer. For a multi-zone sender view this may be "
+            "`My zone`."
+        ),
     )
     relevant_zone_network_id: Optional[str] = Field(
         default=None,
-        description="Network id (`zones.zone_id`) for the relevant acceptable zone.",
+        description=(
+            "Sender's home/account network id (`owners.zone_id`), not necessarily the network that owns "
+            "the delivery zone geometry."
+        ),
     )
     relevant_zone_label: Optional[str] = Field(
         default=None,
-        description="Display label: zone name plus network id, e.g. `Home District (DISTRICT-11)`.",
+        description=(
+            "Inbox heading: `{delivery zone name} ({sender network id})`, or for a multi-zone sender "
+            "`My zone and N more zones`."
+        ),
     )
     images: Optional[list[str]] = Field(
         default=None,
