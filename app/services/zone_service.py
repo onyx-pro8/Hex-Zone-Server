@@ -166,16 +166,8 @@ def list_zones(db: Session, owner: Owner) -> list[dict]:
         query = query.filter(visibility)
     zones = query.all()
 
-    # Public defining zones are visible to every authenticated user.
-    from app.services.communal_zone_service import list_public_defining_zones
-
-    seen = {int(zone.id) for zone in zones}
-    for public_zone in list_public_defining_zones(db, skip=0, limit=500):
-        record_id = int(public_zone.id)
-        if record_id in seen:
-            continue
-        zones.append(public_zone)
-        seen.add(record_id)
+    # Network-scoped only (system admin sees all via visible_zone_owner_ids).
+    # Cross-account public defining zones remain on GET /zones/public.
 
     lookup_ids: set[int] = set()
     for zone in zones:

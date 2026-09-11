@@ -861,7 +861,11 @@ async def create_zone(
     "/",
     response_model=list[ZoneContractResponse],
     summary="List zones",
-    description="List caller-visible zones in canonical shape.",
+    description=(
+        "List caller-visible zones in canonical shape. Network admins and members "
+        "only receive zones in their own account (primary + own secondary). "
+        "System administrators receive all zones."
+    ),
     responses={
         403: {
             "description": "Forbidden access for requested owner_id.",
@@ -944,15 +948,8 @@ async def list_zones(
             if zone_is_primary(zone) or int(zone.creator_id) == int(caller.id)
         ]
 
-    # Public defining zones are visible to every authenticated user.
-    if owner_id is None and zone_id is None:
-        seen = {int(zone.id) for zone in zones}
-        for public_zone in list_public_defining_zones(db, skip=0, limit=500):
-            record_id = int(public_zone.id)
-            if record_id in seen:
-                continue
-            zones.append(public_zone)
-            seen.add(record_id)
+    # Map/list stay network-scoped (system admin already sees all accounts).
+    # Cross-account public defining zones are only via GET /zones/public (communal).
 
     return [
         ZoneContractResponse.model_validate(row)
@@ -1316,8 +1313,9 @@ async def generate_zone_reference(
     response_model=list[ZoneContractResponse],
     summary="List public defining zones",
     description=(
-        "List active public defining zones created by the caller and other users. "
-        "Communal mode uses this catalog for selection; geometry is not defined here."
+        "List active public defining zones for Communal ID selection only. "
+        "These are not merged into GET /zones map/list — network users only see "
+        "zones in their own account (system admin sees all)."
     ),
 )
 async def list_public_zones(
