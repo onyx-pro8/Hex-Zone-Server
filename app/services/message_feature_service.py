@@ -19,7 +19,7 @@ from app.domain.message_types import (
     type_priority,
     type_scope,
 )
-from app.models import EmergencyEvent, GuestAccessSession, Owner, ZoneMessageEvent
+from app.models import EmergencyEvent, GuestAccessSession, MemberLocation, Owner, ZoneMessageEvent
 from app.schemas.message_feature import MessageFeatureType, PropagationMessageCreate
 from app.services import message_block_service
 from app.services.geospatial_service import (
@@ -32,6 +32,7 @@ from app.domain.service_pa_topics import (
 )
 from app.services.unknown_fanout_service import (
     UNKNOWN_RATE_LIMIT_SECONDS,
+    haversine_meters,
     resolve_nearest_owner_ids,
     unknown_fanout_limit,
 )
@@ -358,6 +359,17 @@ def _resolve_private_location_status(
     return "inside_zone"
 
 
+def _format_distance_away(meters: float | None) -> str:
+    if meters is None or meters < 0:
+        return ""
+    if meters < 1000:
+        return f"{int(round(meters))} m away"
+    km = meters / 1000.0
+    if km < 10:
+        return f"{km:.1f} km away"
+    return f"{int(round(km))} km away"
+
+
 def _private_search_members(
     db: Session,
     candidate_ids: list[int],
@@ -365,6 +377,8 @@ def _private_search_members(
     *,
     limit: int = PRIVATE_SEARCH_MAX_RESULTS,
     max_cap: int = PRIVATE_SEARCH_MAX_RESULTS,
+    origin_lat: float | None = None,
+    origin_lon: float | None = None,
 ) -> list[dict]:
     q = (query or "").strip()
     if not candidate_ids:
@@ -397,19 +411,50 @@ def _private_search_members(
         return []
     rows = query_builder.limit(cap).all()
 
-    return [
-        {
-            "id": int(row.id),
-            "display_name": row.message_display_name,
-            "broadcast_name": (row.broadcast_name or "").strip() or None,
-            "first_name": row.first_name,
-            "last_name": row.last_name,
-            "email": row.email,
-            "zone_id": row.zone_id,
-            "subtitle": row.email,
-        }
-        for row in rows
-    ]
+    distance_by_id: dict[int, float] = {}
+    if origin_lat is not None and origin_lon is not None and rows:
+        locs = (
+            db.query(MemberLocation)
+            .filter(MemberLocation.owner_id.in_([int(r.id) for r in rows]))
+            .all()
+        )
+        for loc in locs:
+            if loc.latitude is None or loc.longitude is None:
+                continue
+            distance_by_id[int(loc.owner_id)] = haversine_meters(
+                float(origin_lat),
+                float(origin_lon),
+                float(loc.latitude),
+                float(loc.longitude),
+            )
+
+    members: list[dict] = []
+    for row in rows:
+        broadcast = (row.broadcast_name or "").strip() or None
+        distance_m = distance_by_id.get(int(row.id))
+        distance_label = _format_distance_away(distance_m)
+        members.append(
+            {
+                "id": int(row.id),
+                "display_name": broadcast or row.message_display_name,
+                "broadcast_name": broadcast,
+                "first_name": row.first_name,
+                "last_name": row.last_name,
+                "email": row.email,
+                "zone_id": row.zone_id,
+                "distance_meters": round(distance_m, 1) if distance_m is not None else None,
+                "subtitle": distance_label,
+            }
+        )
+    if origin_lat is not None and origin_lon is not None:
+        members.sort(
+            key=lambda m: (
+                m["distance_meters"] is None,
+                m["distance_meters"] if m["distance_meters"] is not None else 0.0,
+                (m["display_name"] or "").lower(),
+            )
+        )
+    return members
 
 
 def search_private_message_recipients(
@@ -455,7 +500,14 @@ def search_private_message_recipients(
                 )
             )
         )
-    members = _private_search_members(db, candidate_ids, query, limit=limit)
+    members = _private_search_members(
+        db,
+        candidate_ids,
+        query,
+        limit=limit,
+        origin_lat=float(lat) if lat is not None else None,
+        origin_lon=float(lon) if lon is not None else None,
+    )
     return {"zone_ids": zone_ids, "members": members, "location_status": "inside_zone"}
 
 
@@ -492,7 +544,14 @@ def search_network_guest_private_message_recipients(
         sender=admin,
         network_zone_id=network_id,
     )
-    members = _private_search_members(db, candidate_ids, query, limit=limit)
+    members = _private_search_members(
+        db,
+        candidate_ids,
+        query,
+        limit=limit,
+        origin_lat=float(latitude) if latitude is not None else None,
+        origin_lon=float(longitude) if longitude is not None else None,
+    )
     return {"zone_ids": zone_ids, "members": members, "location_status": "inside_zone"}
 
 
@@ -700,6 +759,8 @@ def preview_compose_recipients(
         query,
         limit=COMPOSE_RECIPIENT_PREVIEW_MAX,
         max_cap=COMPOSE_RECIPIENT_PREVIEW_MAX,
+        origin_lat=float(lat),
+        origin_lon=float(lon),
     )
     return {
         "zone_ids": zone_ids,
