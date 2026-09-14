@@ -23,8 +23,9 @@ from app.domain.message_types import CanonicalMessageType, MessageScope, normali
 from app.services import guest_api_service
 from app.services.access_policy import can_message_owner
 from app.services import message_block_service
-from app.services.account_type_policy import assert_owner_may_edit_network_id
+from app.services.device_entitlements import is_smart_home_hid
 from app.services.owner_home_service import apply_owner_home_geocode, sync_owner_home_from_address
+
 from app.services.avatar_upload_service import (
     client_avatar_url,
     upload_avatar_image,
@@ -1128,6 +1129,16 @@ class SharedNotificationSettingsModel(BaseModel):
     periodical_check_sec: str = Field(default="86400", validation_alias=AliasChoices("periodicalCheckSec", "periodical_check_sec"), serialization_alias="periodicalCheckSec")
 
 
+class SmartHomeDeviceOptionModel(BaseModel):
+    """Selectable smart-home hub for the Settings HID field."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    hid: str
+    name: str = ""
+    active: bool = True
+
+
 class AppSettingsModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -1137,6 +1148,12 @@ class AppSettingsModel(BaseModel):
         default_factory=SharedNotificationSettingsModel,
         validation_alias=AliasChoices("sharedNotification", "shared_notification"),
         serialization_alias="sharedNotification",
+    )
+    smart_home_devices: list[SmartHomeDeviceOptionModel] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("smartHomeDevices", "smart_home_devices"),
+        serialization_alias="smartHomeDevices",
+        description="Owner's registered smart-home hubs available for HID selection.",
     )
     quick_messages: dict[str, str] = Field(
         default_factory=dict,
@@ -1193,45 +1210,78 @@ def _address_dict_to_single_line(addr: dict) -> str:
     return ", ".join(parts)
 
 
-def _smart_home_device_for_owner(db: Session, owner_id: int) -> Device | None:
-    """Prefer a dedicated smart-home hardware id over mobile/browser clients."""
+def _smart_home_devices_for_owner(db: Session, owner_id: int) -> list[Device]:
+    """Return the owner's smart-home hubs (never phone/web login sessions).
+
+    Active hubs are listed first (oldest first within each group).
+    """
     devices = (
         db.query(Device)
-        .filter(Device.owner_id == owner_id, Device.active.is_(True))
+        .filter(Device.owner_id == owner_id)
         .order_by(Device.created_at.asc())
         .all()
     )
-    for device in devices:
-        hid = (device.hid or "").strip().upper()
-        if hid and not hid.startswith(("MOB-", "WEB-")):
-            return device
-    return devices[0] if devices else None
+    hubs = [device for device in devices if is_smart_home_hid(device.hid)]
+    active = [device for device in hubs if device.active]
+    inactive = [device for device in hubs if not device.active]
+    return active + inactive
+
+
+def _smart_home_device_for_owner(db: Session, owner_id: int) -> Device | None:
+    """Return the preferred smart-home hub for an owner, if any."""
+    hubs = _smart_home_devices_for_owner(db, owner_id)
+    return hubs[0] if hubs else None
+
+
+def _resolve_selected_smart_home_hid(
+    owner: Owner,
+    hubs: list[Device],
+) -> str:
+    """Pick the selected integration HID from saved preference or first hub."""
+    preferred = str(getattr(owner, "sn_hid", "") or "").strip()
+    if preferred:
+        for device in hubs:
+            if str(device.hid or "").strip().upper() == preferred.upper():
+                return str(device.hid or "").strip()
+    if hubs:
+        return str(hubs[0].hid or "").strip()
+    return ""
 
 
 def _seed_empty_shared_fields(
     sn: SharedNotificationSettingsModel,
     owner: Owner,
     db: Session,
+    *,
+    hubs: list[Device] | None = None,
 ) -> None:
-    """Fall back to the owner's live account data for any blank integration field.
+    """Fill API key / HID / network id for the Settings payload.
 
-    Smart-home integration values shown on the Settings page:
-
-    - API Key        -> ``owners.api_key`` (authenticates the device to Hex Zone)
-    - HID            -> smart-home device hardware id (``devices.hid``)
-    - Network ID     -> the owner's zone id (``owners.zone_id``)
-
-    Any value the operator has saved (non-empty) always takes precedence.
+    - API Key        -> ``owners.api_key``
+    - HID            -> ``owners.sn_hid`` when it matches a registered hub,
+      otherwise the first smart-home hub (never MOB-/WEB-)
+    - Network ID     -> ``owners.zone_id``
     """
     if not sn.api_key:
         sn.api_key = owner.api_key or ""
 
-    if not sn.hid:
-        device = _smart_home_device_for_owner(db, owner.id)
-        sn.hid = (device.hid if device else "") or ""
+    hub_list = hubs if hubs is not None else _smart_home_devices_for_owner(db, owner.id)
+    sn.hid = _resolve_selected_smart_home_hid(owner, hub_list)
 
     if not sn.network_id:
         sn.network_id = (owner.zone_id or "").strip()
+
+
+def _smart_home_device_options(hubs: list[Device]) -> list[SmartHomeDeviceOptionModel]:
+    return [
+        SmartHomeDeviceOptionModel(
+            hid=str(device.hid or "").strip(),
+            name=(device.name or "").strip() or str(device.hid or "").strip(),
+            active=bool(device.active),
+        )
+        for device in hubs
+        if str(device.hid or "").strip()
+    ]
 
 
 def _load_quick_messages(db: Session, owner_id: int) -> dict[str, str]:
@@ -1283,10 +1333,12 @@ def _save_quick_messages(db: Session, owner_id: int, quick_messages: dict[str, s
 def _owner_to_settings_model(owner: Owner, db: Session) -> AppSettingsModel:
     """Build the Settings-page payload from the owner profile + live sources.
 
-    - broadcast name / address / webhook / periodical check -> `owners`
-    - HID / network id / api key -> derived from smart-home device / zone_id / api_key
+    - broadcast name / address / webhook / periodical check / selected HID -> `owners`
+    - network id / api key -> zone_id / api_key
+    - smart_home_devices -> owner's registered hubs for HID selection
     - quick messages -> `messages` template rows
     """
+    hubs = _smart_home_devices_for_owner(db, owner.id)
     model = AppSettingsModel(
         broadcast_name=(owner.broadcast_name or "").strip(),
         address=(owner.address or "").strip(),
@@ -1294,10 +1346,46 @@ def _owner_to_settings_model(owner: Owner, db: Session) -> AppSettingsModel:
             webhook=(owner.sn_webhook or "").strip(),
             periodical_check_sec=owner.sn_periodical_check_sec or "86400",
         ),
+        smart_home_devices=_smart_home_device_options(hubs),
         quick_messages=_load_quick_messages(db, owner.id),
     )
-    _seed_empty_shared_fields(model.shared_notification, owner, db)
+    _seed_empty_shared_fields(model.shared_notification, owner, db, hubs=hubs)
     return model
+
+
+def _apply_selected_smart_home_hid(owner: Owner, db: Session, requested_hid: str) -> None:
+    """Persist the chosen smart-home HID, or clear when empty / invalid."""
+    hubs = _smart_home_devices_for_owner(db, owner.id)
+    raw = (requested_hid or "").strip()
+    if not raw:
+        # Keep a valid existing preference; otherwise default to first hub.
+        owner.sn_hid = _resolve_selected_smart_home_hid(owner, hubs)
+        return
+    if not is_smart_home_hid(raw):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_SMART_HOME_HID",
+                "message": "HID must be a smart-home device (not a phone or browser session).",
+            },
+        )
+    match = next(
+        (
+            device
+            for device in hubs
+            if str(device.hid or "").strip().upper() == raw.upper()
+        ),
+        None,
+    )
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "SMART_HOME_HID_NOT_FOUND",
+                "message": "Selected HID is not one of your registered smart-home devices.",
+            },
+        )
+    owner.sn_hid = str(match.hid or "").strip()
 
 
 @router.get(
@@ -1306,10 +1394,10 @@ def _owner_to_settings_model(owner: Owner, db: Session) -> AppSettingsModel:
     description=(
         "Return the authenticated owner's broadcast identity, structured home "
         "address, smart-home integration, and quick-alert messages. "
-        "Broadcast name + address + webhook/periodical check come from the "
-        "`owners` row; HID/network id/api key are derived from the owner's "
-        "smart-home device, zone id and account api key; quick messages come from the "
-        "`messages` table (template rows)."
+        "Broadcast name + address + webhook/periodical check + selected HID come "
+        "from the `owners` row; network id/api key are derived from zone id and "
+        "account api key; `smartHomeDevices` lists hubs for HID selection; quick "
+        "messages come from the `messages` table (template rows)."
     ),
 )
 async def get_my_settings(
@@ -1325,10 +1413,9 @@ async def get_my_settings(
     summary="Update owner application settings",
     description=(
         "Persist the authenticated owner's editable settings. Broadcast name, "
-        "address and the webhook / periodical-check values are stored on the "
-        "`owners` row; quick messages are stored as `messages` template rows. "
-        "HID and API key are derived and ignored on save. Network ID is saved "
-        "to `owners.zone_id` only for Private (system administrator) accounts."
+        "address, webhook / periodical-check, and selected smart-home HID are "
+        "stored on the `owners` row; quick messages are stored as `messages` "
+        "template rows. API key and Network ID are derived and ignored on save."
     ),
 )
 async def put_my_settings(
@@ -1354,11 +1441,11 @@ async def put_my_settings(
     owner.sn_periodical_check_sec = (
         (payload.shared_notification.periodical_check_sec or "86400").strip() or "86400"
     )
+    _apply_selected_smart_home_hid(
+        owner, db, payload.shared_notification.hid or ""
+    )
 
-    requested_network_id = (payload.shared_notification.network_id or "").strip()
-    if requested_network_id and requested_network_id != (owner.zone_id or "").strip():
-        assert_owner_may_edit_network_id(owner)
-        owner.zone_id = requested_network_id
+    # Network ID is read-only on the settings page; ignore client attempts to change it.
 
     _save_quick_messages(db, owner.id, payload.quick_messages)
 

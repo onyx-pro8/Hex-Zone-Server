@@ -100,6 +100,12 @@ def patch_owner_location_columns() -> None:
             )
         )
         conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS sn_hid "
+                "VARCHAR(255) NOT NULL DEFAULT '';"
+            )
+        )
+        conn.execute(
             text("ALTER TABLE owners ADD COLUMN IF NOT EXISTS avatar_url TEXT;")
         )
         conn.execute(

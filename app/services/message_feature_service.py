@@ -922,6 +922,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
         "fanout": fanout_meta,
         "priority": priority.value,
         "response_tracking_enabled": response_tracking,
+        "sender_network_id": (sender.zone_id or "").strip() or None,
     }
     if fanout_meta.get("sender_zone_record_ids") or fanout_meta.get("recipient_zone_record_ids"):
         attach_relevant_zone_metadata(
@@ -1117,6 +1118,7 @@ def create_network_guest_geo_propagated_message(
         "guest_id": guest_id,
         "guest_name": guest_session.guest_name,
         "network_zone_id": network_id,
+        "sender_network_id": network_id or None,
     }
     if fanout_meta.get("sender_zone_record_ids") or fanout_meta.get("recipient_zone_record_ids"):
         attach_relevant_zone_metadata(

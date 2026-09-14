@@ -35,11 +35,12 @@ class Owner(Base):
     # account identity fields — never auto-filled from them.
     broadcast_name = Column(String(255), nullable=False, default="")
     # Smart-home integration settings that are owner-scoped and editable.
-    # The other integration fields shown on the Settings page (HID / network id /
-    # api key) are derived live from the owner's smart-home device / zone_id /
-    # api_key and are not stored here.
+    # HID shown on Settings is selected among the owner's smart-home hubs and
+    # stored in ``sn_hid``. API key / network id remain derived from
+    # ``api_key`` / ``zone_id``.
     sn_webhook = Column(String(255), nullable=False, default="")
     sn_periodical_check_sec = Column(String(32), nullable=False, default="86400")
+    sn_hid = Column(String(255), nullable=False, default="")
     account_type = Column(Enum(AccountType), nullable=False, default=AccountType.PRIVATE)
     # Organization (enhanced_plus) capacity band 1–5; null for other tiers.
     tier_level = Column(Integer, nullable=True)
