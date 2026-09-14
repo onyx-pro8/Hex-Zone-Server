@@ -16,6 +16,7 @@ from app.middleware.auth import require_auth
 from app.core.config import settings
 from app.models import Device, Message, Owner, PushToken, ZoneMessageEvent
 from app.models.message import MessageVisibility
+from app.models.owner import OwnerRole
 from app.schemas.schemas import MessageVisibilityEnum, ZoneMessageCreate, ZoneMessageResponse
 from app.utils.api_response import success_response
 from app.websocket.manager import ws_manager
@@ -1164,6 +1165,16 @@ class AppSettingsModel(BaseModel):
         validation_alias=AliasChoices("quickMessages", "quick_messages"),
         serialization_alias="quickMessages",
     )
+    member_join_welcome: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("memberJoinWelcome", "member_join_welcome"),
+        serialization_alias="memberJoinWelcome",
+        description=(
+            "Admin template for the SERVICE welcome when a member joins. "
+            "Placeholders: {member_name}, {network_name}, {first_name}, {last_name}. "
+            "Omit on PUT to leave unchanged; send empty string to reset to the server default."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -1352,6 +1363,7 @@ def _owner_to_settings_model(owner: Owner, db: Session) -> AppSettingsModel:
         ),
         smart_home_devices=_smart_home_device_options(hubs),
         quick_messages=_load_quick_messages(db, owner.id),
+        member_join_welcome=(getattr(owner, "member_join_welcome", None) or "").strip(),
     )
     _seed_empty_shared_fields(model.shared_notification, owner, db, hubs=hubs)
     return model
@@ -1465,6 +1477,14 @@ async def put_my_settings(
     # Network ID is read-only on the settings page; ignore client attempts to change it.
 
     _save_quick_messages(db, owner.id, payload.quick_messages)
+
+    # Only administrators control the member-join welcome template for their network.
+    # Omit the field on PUT to leave the stored template unchanged (older clients).
+    if (
+        owner.role == OwnerRole.ADMINISTRATOR
+        and "member_join_welcome" in payload.model_fields_set
+    ):
+        owner.member_join_welcome = (payload.member_join_welcome or "").strip()
 
     db.commit()
     db.refresh(owner)

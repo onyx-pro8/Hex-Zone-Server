@@ -14,6 +14,7 @@ from app.schemas.schemas import (
     QRRegistrationResponse,
     QRRegistrationUse,
     OwnerResponse,
+    QRJoinOwnerResponse,
 )
 from app.core.h3_utils import lat_lng_to_h3_cell
 from app.core.security import get_current_user
@@ -491,7 +492,7 @@ async def preview_qr_registration(
 
 @router.post(
     "/qr/join",
-    response_model=OwnerResponse,
+    response_model=QRJoinOwnerResponse,
     summary="Join account with QR token",
     description=(
         "Complete registration by consuming an invite token from the QR flow. "
@@ -582,7 +583,10 @@ async def join_with_qr(
             qr_crud.mark_qr_registration_used(db, qr.token)
         db.commit()
 
-        return OwnerResponse.model_validate(new_owner)
+        return QRJoinOwnerResponse(
+            **OwnerResponse.model_validate(new_owner).model_dump(),
+            join_welcome_message=None,
+        )
 
     # Network-admin member invite: inherit inviter zone; Individual account type.
     assert_admin_user_member_capacity(db, owner)
@@ -611,6 +615,8 @@ async def join_with_qr(
         qr_crud.mark_qr_registration_used(db, qr.token)
     db.commit()
 
-    await notify_members_of_new_join(db, new_owner)
-
-    return OwnerResponse.model_validate(new_owner)
+    welcome = await notify_members_of_new_join(db, new_owner)
+    return QRJoinOwnerResponse(
+        **OwnerResponse.model_validate(new_owner).model_dump(),
+        join_welcome_message=welcome,
+    )

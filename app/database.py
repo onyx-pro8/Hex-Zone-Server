@@ -119,6 +119,12 @@ def patch_owner_location_columns() -> None:
                 "ALTER TABLE owners ADD COLUMN IF NOT EXISTS tier_level INTEGER;"
             )
         )
+        conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS member_join_welcome "
+                "TEXT NOT NULL DEFAULT '';"
+            )
+        )
         # Migrate any data from the now-removed owner_settings table into the
         # canonical owners columns, then drop it. Idempotent: the table is gone
         # after the first successful run.

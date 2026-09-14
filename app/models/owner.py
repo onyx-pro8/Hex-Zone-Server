@@ -41,6 +41,10 @@ class Owner(Base):
     sn_webhook = Column(String(255), nullable=False, default="")
     sn_periodical_check_sec = Column(String(32), nullable=False, default="86400")
     sn_hid = Column(String(255), nullable=False, default="")
+    # Optional template for the SERVICE welcome posted when a member joins.
+    # Placeholders: {member_name}/{member name}, {network_name}/{network name},
+    # {first_name}, {last_name}. Blank → server default.
+    member_join_welcome = Column(Text, nullable=False, default="")
     account_type = Column(Enum(AccountType), nullable=False, default=AccountType.PRIVATE)
     # Organization (enhanced_plus) capacity band 1–5; null for other tiers.
     tier_level = Column(Integer, nullable=True)

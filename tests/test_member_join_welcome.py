@@ -8,7 +8,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.database import Base, get_db
 from app.main import app
-from app.services.member_join_welcome_service import DEFAULT_MEMBER_JOIN_WELCOME, render_member_join_welcome
+from app.services.member_join_welcome_service import render_member_join_welcome
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -91,7 +91,7 @@ async def test_qr_join_notifies_existing_members(test_db, override_get_db):
             headers={"Authorization": f"Bearer {admin_token}"},
         )
         assert admin_messages.status_code == 200
-        expected = "Welcome! New Member has joined the zone."
+        expected = f"Welcome! New Member has joined the {zone_id}."
         admin_texts = [row["message"] for row in admin_messages.json()]
         assert expected in admin_texts
         assert any(row.get("type") == "SERVICE" for row in admin_messages.json())
@@ -109,7 +109,8 @@ async def test_qr_join_notifies_existing_members(test_db, override_get_db):
         )
         assert joined_messages.status_code == 200
         joined_texts = [row["message"] for row in joined_messages.json()]
-        assert expected not in joined_texts
+        assert expected in joined_texts
+        assert join.json().get("joinWelcomeMessage") == expected
 
 
 @pytest.mark.asyncio
@@ -140,7 +141,7 @@ async def test_user_register_notifies_admin(test_db, override_get_db):
             headers={"Authorization": f"Bearer {admin_token}"},
         )
         assert admin_messages.status_code == 200
-        expected = "Welcome! Registered User has joined the zone."
+        expected = f"Welcome! Registered User has joined the {zone_id}."
         assert expected in [row["message"] for row in admin_messages.json()]
 
 
@@ -148,7 +149,13 @@ def test_render_member_join_welcome_default():
     class Stub:
         first_name = "Ada"
         last_name = "Lovelace"
+        zone_id = "NET-1"
 
-    assert render_member_join_welcome(Stub()) == DEFAULT_MEMBER_JOIN_WELCOME.replace(
-        "{member_name}", "Ada Lovelace"
+    assert render_member_join_welcome(Stub(), network_name="NET-1") == (
+        "Welcome! Ada Lovelace has joined the NET-1."
     )
+    assert render_member_join_welcome(
+        Stub(),
+        network_name="Family Net",
+        template="Welcome! {member name} has joined the {network name}",
+    ) == "Welcome! Ada Lovelace has joined the Family Net"

@@ -193,6 +193,20 @@ class OwnerResponse(OwnerBase):
         from_attributes = True
 
 
+class QRJoinOwnerResponse(OwnerResponse):
+    """Owner created via QR invite join, with optional welcome toast text."""
+
+    join_welcome_message: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("joinWelcomeMessage", "join_welcome_message"),
+        serialization_alias="joinWelcomeMessage",
+        description=(
+            "Rendered member-join welcome when this was a network-admin member invite. "
+            "Clients may show this as a toast after login."
+        ),
+    )
+
+
 class OwnerListResponse(BaseModel):
     """Safe owner list schema for receiver discovery."""
     id: int
