@@ -86,6 +86,36 @@ async def _finalize_geo_propagation(db: Session, result: dict) -> dict:
         await ws_manager.broadcast_to_users(ws_recipients, "NEW_GEO_MESSAGE", client_result)
 
     if is_pushable_geo_type(str(result.get("type") or "")):
+        # Prefer unredacted routing fields for hub targeting; keep client_result
+        # text for the POST body where possible.
+        webhook_payload = dict(client_result)
+        webhook_payload["delivered_owner_ids"] = list(delivered)
+        if isinstance(result.get("fanout"), dict):
+            webhook_payload["fanout"] = result["fanout"]
+        if result.get("zone_id") is not None:
+            webhook_payload["zone_id"] = result.get("zone_id")
+        if isinstance(result.get("zone_ids"), list):
+            webhook_payload["zone_ids"] = result.get("zone_ids")
+        result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        wh_meta = (
+            dict(webhook_payload["metadata"])
+            if isinstance(webhook_payload.get("metadata"), dict)
+            else {}
+        )
+        if result_meta.get("sender_network_id"):
+            wh_meta["sender_network_id"] = result_meta.get("sender_network_id")
+        if isinstance(result_meta.get("fanout"), dict):
+            wh_meta["fanout"] = result_meta["fanout"]
+        webhook_payload["metadata"] = wh_meta
+
+        # Webhooks first so hub delivery is not delayed/obscured by push retries.
+        webhook_stats = await smart_home_webhook_service.send_smart_home_webhooks(
+            db,
+            ws_recipients,
+            webhook_payload,
+        )
+        client_result.update(webhook_stats)
+
         push_stats = await push_notification_service.send_alarm_push_to_owners(
             db, delivered, client_result
         )
@@ -93,13 +123,6 @@ async def _finalize_geo_propagation(db: Session, result: dict) -> dict:
         push_notification_service.schedule_panic_retries_if_needed(
             delivered, client_result, push_stats
         )
-        # Deliver to each recipient/sender hub that configured sn_webhook.
-        webhook_stats = await smart_home_webhook_service.send_smart_home_webhooks(
-            db,
-            ws_recipients,
-            client_result,
-        )
-        client_result.update(webhook_stats)
 
     # Keep delivery diagnostics on the HTTP response for the sender; identity/GPS
     # stay redacted. Recipients already received the fully redacted WS/push payload.

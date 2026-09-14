@@ -10,8 +10,10 @@ from app.services.smart_home_webhook_service import (
     build_smart_home_webhook_payload,
     is_valid_webhook_url,
     message_origin_network_id,
+    message_related_network_ids,
     normalize_webhook_url,
     owner_matches_message_network,
+    owner_should_receive_webhook,
     send_smart_home_webhooks,
 )
 
@@ -38,37 +40,46 @@ def test_is_valid_webhook_url():
     assert is_valid_webhook_url("://missing-host") is False
 
 
-def test_message_origin_network_id_prefers_sender_network():
-    assert (
-        message_origin_network_id(
-            {
-                "metadata": {
-                    "sender_network_id": "YUSIF",
-                    "fanout": {"network_zone_id": "OTHER"},
-                }
+def test_message_related_networks_include_fanout_not_only_sender():
+    related = message_related_network_ids(
+        {
+            "zone_id": "DISTRICT-11",
+            "metadata": {
+                "sender_network_id": "INDIVIDUAL-SOLO",
+                "fanout": {
+                    "network_zone_id": "DISTRICT-11",
+                    "matched_network_zone_ids": ["DISTRICT-11"],
+                },
+            },
+        }
+    )
+    assert "DISTRICT-11" in related
+    assert "INDIVIDUAL-SOLO" in related
+    assert message_origin_network_id(
+        {
+            "metadata": {
+                "sender_network_id": "INDIVIDUAL-SOLO",
+                "fanout": {"network_zone_id": "DISTRICT-11"},
             }
-        )
-        == "YUSIF"
-    )
+        }
+    ) == "DISTRICT-11"
+
+
+def test_owner_matches_fanout_network_even_if_sender_differs():
+    owner = SimpleNamespace(zone_id="DISTRICT-11")
+    payload = {
+        "metadata": {
+            "sender_network_id": "INDIVIDUAL-SOLO",
+            "fanout": {
+                "network_zone_id": "DISTRICT-11",
+                "matched_network_zone_ids": ["DISTRICT-11"],
+            },
+        }
+    }
+    assert owner_matches_message_network(owner, payload) is True
     assert (
-        message_origin_network_id(
-            {"fanout": {"network_zone_id": "ZONE-ABC"}, "metadata": {}}
-        )
-        == "ZONE-ABC"
-    )
-
-
-def test_owner_matches_message_network():
-    owner = SimpleNamespace(zone_id="YUSIF")
-    assert owner_matches_message_network(
-        owner, {"metadata": {"sender_network_id": "YUSIF"}}
-    )
-    assert not owner_matches_message_network(
-        owner, {"metadata": {"sender_network_id": "OTHER"}}
-    )
-    assert not owner_matches_message_network(
-        SimpleNamespace(zone_id=""),
-        {"metadata": {"sender_network_id": "YUSIF"}},
+        owner_matches_message_network(SimpleNamespace(zone_id="OTHER-NET"), payload)
+        is False
     )
 
 
@@ -154,7 +165,70 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
 
 
 @pytest.mark.asyncio
+async def test_send_webhook_when_delivered_on_admin_network_from_other_sender():
+    """Individual sender + DISTRICT-11 delivery must notify admin hub."""
+    owner = SimpleNamespace(
+        id=1,
+        active=True,
+        sn_webhook="https://webhook.site/test-id",
+        zone_id="DISTRICT-11",
+    )
+    db = MagicMock()
+    query = db.query.return_value
+    query.filter.return_value.all.return_value = [owner]
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "app.services.smart_home_webhook_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        stats = await send_smart_home_webhooks(
+            db,
+            [1, 3, 7],
+            {
+                "type": "PANIC",
+                "text": "Help",
+                "zone_id": "DISTRICT-11",
+                "delivered_owner_ids": [1, 3, 7],
+                "metadata": {
+                    "sender_network_id": "INDIVIDUAL-SOLO",
+                    "fanout": {
+                        "network_zone_id": "DISTRICT-11",
+                        "matched_network_zone_ids": ["DISTRICT-11"],
+                    },
+                },
+            },
+        )
+
+    assert stats["webhook_sent"] == 1
+    args, _kwargs = mock_client.post.await_args
+    assert args[0] == "https://webhook.site/test-id"
+
+
+def test_delivered_owner_always_gets_webhook_even_if_sender_network_differs():
+    owner = SimpleNamespace(id=1, zone_id="DISTRICT-11")
+    payload = {
+        "delivered_owner_ids": [1, 3],
+        "metadata": {
+            "sender_network_id": "INDIVIDUAL-SOLO",
+            "fanout": {
+                "network_zone_id": "INDIVIDUAL-SOLO",
+                "matched_network_zone_ids": ["INDIVIDUAL-SOLO"],
+            },
+        },
+    }
+    assert owner_should_receive_webhook(owner, payload) is True
+
+
+@pytest.mark.asyncio
 async def test_send_smart_home_webhooks_skips_other_networks():
+    """Sender-only echo (not in delivered) is skipped when networks differ."""
     owner = SimpleNamespace(
         id=9,
         active=True,
@@ -171,7 +245,14 @@ async def test_send_smart_home_webhooks_skips_other_networks():
         {
             "type": "PANIC",
             "text": "Help",
-            "metadata": {"sender_network_id": "OTHER-NET"},
+            "delivered_owner_ids": [42],
+            "metadata": {
+                "sender_network_id": "OTHER-NET",
+                "fanout": {
+                    "network_zone_id": "OTHER-NET",
+                    "matched_network_zone_ids": ["OTHER-NET"],
+                },
+            },
         },
     )
     assert stats["webhook_sent"] == 0

@@ -3,9 +3,9 @@
 When an owner configures ``owners.sn_webhook``, Hex Zone POSTs each delivered
 geo message to that URL so a hub can sound/show the alarm without polling.
 
-Hubs only receive alarms that originated on the hub owner's network
-(``owners.zone_id`` must match the message's sender network). Failures never
-fail the originating request.
+Hubs are notified for owners in the delivery set whose account network appears
+in the message's routing networks (fanout matched networks and/or sender
+network). Failures never fail the originating request.
 """
 from __future__ import annotations
 
@@ -59,34 +59,102 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def message_origin_network_id(alarm_payload: dict[str, Any]) -> str:
-    """Network id the geo message was made on (sender's account network)."""
+def _add_network(bucket: set[str], value: Any) -> None:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            bucket.add(cleaned)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            _add_network(bucket, item)
+
+
+def message_related_network_ids(alarm_payload: dict[str, Any]) -> set[str]:
+    """Networks this geo message was routed on (fanout + sender)."""
+    networks: set[str] = set()
     metadata = _as_dict(alarm_payload.get("metadata"))
-    sender_net = str(metadata.get("sender_network_id") or "").strip()
-    if sender_net:
-        return sender_net
-
-    meta_network = str(metadata.get("network_zone_id") or "").strip()
-    if meta_network:
-        return meta_network
-
     fanout = _as_dict(metadata.get("fanout")) or _as_dict(alarm_payload.get("fanout"))
-    network_zone = str(fanout.get("network_zone_id") or "").strip()
-    if network_zone:
-        return network_zone
 
+    _add_network(networks, metadata.get("sender_network_id"))
+    _add_network(networks, metadata.get("network_zone_id"))
+    _add_network(networks, fanout.get("network_zone_id"))
+    _add_network(networks, fanout.get("matched_network_zone_ids"))
+    _add_network(networks, alarm_payload.get("zone_ids"))
+    # Single zone_id on the event is often the primary matched network id.
+    _add_network(networks, alarm_payload.get("zone_id"))
+    return networks
+
+
+def message_origin_network_id(alarm_payload: dict[str, Any]) -> str:
+    """Primary network id for diagnostics / payload display."""
+    metadata = _as_dict(alarm_payload.get("metadata"))
+    fanout = _as_dict(metadata.get("fanout")) or _as_dict(alarm_payload.get("fanout"))
+
+    for candidate in (
+        fanout.get("network_zone_id"),
+        metadata.get("network_zone_id"),
+        metadata.get("sender_network_id"),
+        alarm_payload.get("zone_id"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    matched = fanout.get("matched_network_zone_ids")
+    if isinstance(matched, list):
+        for item in matched:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
     return ""
 
 
 def owner_matches_message_network(owner: Owner, alarm_payload: dict[str, Any]) -> bool:
-    """True when the hub owner's network is the message's origin network."""
+    """True when the hub owner's network is one of the message routing networks.
+
+    If routing networks cannot be determined, allow the owner (geo delivery
+    already decided they should receive the alarm).
+    """
     owner_net = str(getattr(owner, "zone_id", "") or "").strip()
     if not owner_net:
         return False
-    origin = message_origin_network_id(alarm_payload)
-    if not origin:
+    related = message_related_network_ids(alarm_payload)
+    if not related:
+        return True
+    owner_key = owner_net.casefold()
+    return any(owner_key == net.casefold() for net in related)
+
+
+def _delivered_owner_id_set(alarm_payload: dict[str, Any]) -> set[int]:
+    raw = alarm_payload.get("delivered_owner_ids")
+    if not isinstance(raw, list):
+        metadata = _as_dict(alarm_payload.get("metadata"))
+        raw = metadata.get("delivered_owner_ids")
+    if not isinstance(raw, list):
+        return set()
+    out: set[int] = set()
+    for item in raw:
+        try:
+            out.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def owner_should_receive_webhook(owner: Owner, alarm_payload: dict[str, Any]) -> bool:
+    """Delivered recipients always qualify; sender-only echo uses network match.
+
+    If ``delivered_owner_ids`` is missing/empty (e.g. NS_PANIC client redaction),
+    trust the caller-scoped ``owner_ids`` list and allow the owner.
+    """
+    delivered = _delivered_owner_id_set(alarm_payload)
+    try:
+        owner_id = int(owner.id)
+    except (TypeError, ValueError):
         return False
-    return owner_net.casefold() == origin.casefold()
+    if not delivered:
+        return True
+    if owner_id in delivered:
+        return True
+    return owner_matches_message_network(owner, alarm_payload)
 
 
 def build_smart_home_webhook_payload(
@@ -166,30 +234,24 @@ async def send_smart_home_webhooks(
     owner_ids: list[int],
     alarm_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """POST the alarm to each same-network recipient owner's webhook URL.
+    """POST the alarm to each eligible recipient owner's webhook URL.
 
-    Only owners whose ``zone_id`` matches the message origin network are
-    notified. Returns counts for response diagnostics. Never raises.
+    Eligibility: owner is in ``owner_ids``, has a valid ``sn_webhook``, and their
+    ``zone_id`` matches a routing network for this message (or routing metadata
+    is missing). Returns counts for response diagnostics. Never raises.
     """
     msg_type = str(alarm_payload.get("type") or "")
     if not is_pushable_geo_type(msg_type):
+        logger.info("Smart-home webhook type=%s skipped: not a pushable geo type", msg_type)
         return {"webhook_sent": 0, "webhook_failed": 0, "webhook_skipped": True}
 
     unique_ids = sorted({int(oid) for oid in owner_ids if isinstance(oid, int)})
     if not unique_ids:
+        logger.info("Smart-home webhook type=%s skipped: no owner targets", msg_type)
         return {"webhook_sent": 0, "webhook_failed": 0, "webhook_no_targets": True}
 
+    related_networks = message_related_network_ids(alarm_payload)
     origin_network = message_origin_network_id(alarm_payload)
-    if not origin_network:
-        logger.info(
-            "Smart-home webhook type=%s skipped: missing origin network",
-            msg_type,
-        )
-        return {
-            "webhook_sent": 0,
-            "webhook_failed": 0,
-            "webhook_skipped_network": True,
-        }
 
     owners = (
         db.query(Owner)
@@ -198,12 +260,21 @@ async def send_smart_home_webhooks(
     )
     targets: list[tuple[Owner, str]] = []
     skipped_network = 0
+    skipped_no_url = 0
     for owner in owners:
-        if not owner_matches_message_network(owner, alarm_payload):
+        if not owner_should_receive_webhook(owner, alarm_payload):
             skipped_network += 1
+            logger.info(
+                "Smart-home webhook skip owner=%s zone=%s type=%s related_networks=%s",
+                owner.id,
+                getattr(owner, "zone_id", ""),
+                msg_type,
+                sorted(related_networks),
+            )
             continue
         url = normalize_webhook_url(str(getattr(owner, "sn_webhook", "") or ""))
         if not url:
+            skipped_no_url += 1
             continue
         if not is_valid_webhook_url(url):
             logger.warning(
@@ -211,15 +282,27 @@ async def send_smart_home_webhooks(
                 owner.id,
                 url[:80],
             )
+            skipped_no_url += 1
             continue
         targets.append((owner, url))
 
     if not targets:
+        logger.info(
+            "Smart-home webhook type=%s no targets (owners=%s skipped_network=%d "
+            "skipped_no_url=%d related_networks=%s origin=%s)",
+            msg_type,
+            unique_ids,
+            skipped_network,
+            skipped_no_url,
+            sorted(related_networks),
+            origin_network,
+        )
         return {
             "webhook_sent": 0,
             "webhook_failed": 0,
             "webhook_no_urls": True,
             "webhook_skipped_network_count": skipped_network,
+            "webhook_skipped_no_url_count": skipped_no_url,
         }
 
     sent = 0
@@ -247,17 +330,21 @@ async def send_smart_home_webhooks(
                 failed += 1
 
     logger.info(
-        "Smart-home webhook type=%s origin=%s targets=%d sent=%d failed=%d skipped_network=%d",
+        "Smart-home webhook type=%s origin=%s related=%s targets=%d sent=%d "
+        "failed=%d skipped_network=%d skipped_no_url=%d",
         msg_type,
         origin_network,
+        sorted(related_networks),
         len(targets),
         sent,
         failed,
         skipped_network,
+        skipped_no_url,
     )
     return {
         "webhook_sent": sent,
         "webhook_failed": failed,
         "webhook_targets": len(targets),
         "webhook_skipped_network_count": skipped_network,
+        "webhook_skipped_no_url_count": skipped_no_url,
     }
