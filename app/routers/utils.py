@@ -298,7 +298,8 @@ async def generate_qr_registration(
         "Build an `.xlsx` workbook for the given invite tokens (owned by the caller). "
         "Each row includes the invite's pre-issued Communal ID, token metadata, and an "
         "embedded QR code image for the join URL. Returns a short-lived **download_url** "
-        "the mobile app can open."
+        "the mobile app can open. Restricted to the platform system administrator; "
+        "network admins may generate a single invite QR but cannot export."
     ),
 )
 async def export_qr_invites_xlsx(
@@ -317,6 +318,13 @@ async def export_qr_invites_xlsx(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only administrators can export invite QR workbooks",
+        )
+    # Multi-QR Excel download is restricted to the platform system administrator.
+    # Network (zone) admins may generate a single invite QR but cannot export/download.
+    if not is_system_administrator(owner):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the system administrator can download invite QR workbooks",
         )
 
     web_base = (

@@ -330,3 +330,61 @@ async def test_qr_preview_member_invite(test_db, override_get_db):
         assert body["invite_kind"] == "member"
         assert body["zone_id"] == admin.zone_id
         assert body["account_type"] == "exclusive"
+
+
+@pytest.mark.asyncio
+async def test_qr_export_xlsx_forbidden_for_network_admin(test_db, override_get_db):
+    """Network (non-Private) admins can generate a single QR but cannot download/export."""
+    _, token = _admin(
+        test_db,
+        email="family-admin@example.com",
+        zone_id="family-zone",
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert generate.status_code == 200, generate.text
+        invite_token = generate.json()["token"]
+
+        export = await client.post(
+            "/utils/qr/export-xlsx",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"tokens": [invite_token]},
+        )
+        assert export.status_code == 403, export.text
+        detail = export.json().get("detail", export.text)
+        if isinstance(detail, list):
+            detail = " ".join(str(item) for item in detail)
+        assert "system administrator" in str(detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_qr_export_xlsx_allowed_for_system_admin(test_db, override_get_db):
+    """Private system admin may export invite QR workbooks."""
+    _, token = _admin(
+        test_db,
+        email="system-admin@example.com",
+        zone_id="system-zone",
+        account_type=AccountType.PRIVATE,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert generate.status_code == 200, generate.text
+        invite_token = generate.json()["token"]
+
+        export = await client.post(
+            "/utils/qr/export-xlsx",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"tokens": [invite_token]},
+        )
+        assert export.status_code == 200, export.text
+        body = export.json()
+        assert body.get("download_url") or body.get("export_id")
