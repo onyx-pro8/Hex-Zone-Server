@@ -25,6 +25,10 @@ from app.services.access_policy import can_message_owner
 from app.services import message_block_service
 from app.services.device_entitlements import is_smart_home_hid
 from app.services.owner_home_service import apply_owner_home_geocode, sync_owner_home_from_address
+from app.services.smart_home_webhook_service import (
+    is_valid_webhook_url,
+    normalize_webhook_url,
+)
 
 from app.services.avatar_upload_service import (
     client_avatar_url,
@@ -1437,7 +1441,20 @@ async def put_my_settings(
                 exc,
             )
 
-    owner.sn_webhook = (payload.shared_notification.webhook or "").strip()
+    owner.sn_webhook = normalize_webhook_url(
+        (payload.shared_notification.webhook or "").strip()
+    )
+    if owner.sn_webhook and not is_valid_webhook_url(owner.sn_webhook):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_WEBHOOK_URL",
+                "message": (
+                    "Webhook must be a full http:// or https:// URL "
+                    "(example: https://webhook.site/your-id)."
+                ),
+            },
+        )
     owner.sn_periodical_check_sec = (
         (payload.shared_notification.periodical_check_sec or "86400").strip() or "86400"
     )

@@ -27,9 +27,21 @@ def _webhook_timeout_seconds() -> float:
     return max(1.0, float(getattr(settings, "SMART_HOME_WEBHOOK_TIMEOUT_SECONDS", 5)))
 
 
-def is_valid_webhook_url(url: str) -> bool:
-    """Accept only absolute http(s) URLs."""
+def normalize_webhook_url(url: str) -> str:
+    """Trim and add https:// when the user omitted the scheme (common paste)."""
     raw = (url or "").strip()
+    if not raw:
+        return ""
+    if len(raw) > 2048:
+        return raw
+    if "://" not in raw:
+        raw = f"https://{raw.lstrip('/')}"
+    return raw
+
+
+def is_valid_webhook_url(url: str) -> bool:
+    """Accept only absolute http(s) URLs (after optional scheme normalization)."""
+    raw = normalize_webhook_url(url)
     if not raw or len(raw) > 2048:
         return False
     try:
@@ -190,7 +202,7 @@ async def send_smart_home_webhooks(
         if not owner_matches_message_network(owner, alarm_payload):
             skipped_network += 1
             continue
-        url = str(getattr(owner, "sn_webhook", "") or "").strip()
+        url = normalize_webhook_url(str(getattr(owner, "sn_webhook", "") or ""))
         if not url:
             continue
         if not is_valid_webhook_url(url):

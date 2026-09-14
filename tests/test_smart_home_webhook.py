@@ -10,18 +10,32 @@ from app.services.smart_home_webhook_service import (
     build_smart_home_webhook_payload,
     is_valid_webhook_url,
     message_origin_network_id,
+    normalize_webhook_url,
     owner_matches_message_network,
     send_smart_home_webhooks,
 )
 
 
+def test_normalize_webhook_url_adds_https():
+    assert (
+        normalize_webhook_url("webhook.site/e3ad20fa-abf3-42ed-8eda-e854ea66ed74")
+        == "https://webhook.site/e3ad20fa-abf3-42ed-8eda-e854ea66ed74"
+    )
+    assert normalize_webhook_url("https://hub.example.com/x") == "https://hub.example.com/x"
+    assert normalize_webhook_url("") == ""
+
+
 def test_is_valid_webhook_url():
     assert is_valid_webhook_url("https://hub.example.com/hooks/hex") is True
     assert is_valid_webhook_url("http://192.168.1.10:8123/api/webhook/abc") is True
+    assert (
+        is_valid_webhook_url("webhook.site/e3ad20fa-abf3-42ed-8eda-e854ea66ed74")
+        is True
+    )
     assert is_valid_webhook_url("") is False
     assert is_valid_webhook_url("ftp://hub.example.com/x") is False
-    assert is_valid_webhook_url("not-a-url") is False
     assert is_valid_webhook_url("https://") is False
+    assert is_valid_webhook_url("://missing-host") is False
 
 
 def test_message_origin_network_id_prefers_sender_network():
@@ -162,6 +176,44 @@ async def test_send_smart_home_webhooks_skips_other_networks():
     )
     assert stats["webhook_sent"] == 0
     assert stats.get("webhook_skipped_network_count") == 1
+
+
+@pytest.mark.asyncio
+async def test_send_smart_home_webhooks_normalizes_scheme_less_url():
+    owner = SimpleNamespace(
+        id=9,
+        active=True,
+        sn_webhook="webhook.site/abc-def",
+        zone_id="ZONE-ABC",
+    )
+    db = MagicMock()
+    query = db.query.return_value
+    query.filter.return_value.all.return_value = [owner]
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "app.services.smart_home_webhook_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        stats = await send_smart_home_webhooks(
+            db,
+            [9],
+            {
+                "type": "PANIC",
+                "text": "Help",
+                "metadata": {"sender_network_id": "ZONE-ABC"},
+            },
+        )
+
+    assert stats["webhook_sent"] == 1
+    args, _kwargs = mock_client.post.await_args
+    assert args[0] == "https://webhook.site/abc-def"
 
 
 @pytest.mark.asyncio
