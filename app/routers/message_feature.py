@@ -115,6 +115,9 @@ async def _finalize_geo_propagation(db: Session, result: dict) -> dict:
             webhook_payload,
         )
         client_result.update(webhook_stats)
+        await smart_home_webhook_service.notify_smart_home_webhook_owners(
+            list(webhook_stats.get("webhook_owner_results") or [])
+        )
 
         push_stats = await push_notification_service.send_alarm_push_to_owners(
             db, delivered, client_result

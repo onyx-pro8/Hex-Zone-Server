@@ -183,6 +183,9 @@ def _scan_wellness_reminders_once(db: Session) -> int:
                 webhook_stats = await smart_home_webhook_service.send_smart_home_webhooks(
                     db, pending, payload
                 )
+                await smart_home_webhook_service.notify_smart_home_webhook_owners(
+                    list(webhook_stats.get("webhook_owner_results") or [])
+                )
                 return {**push_stats, **webhook_stats}
 
             stats = asyncio.run(_deliver())

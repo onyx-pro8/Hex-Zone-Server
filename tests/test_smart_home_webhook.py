@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.models import Device, Owner
 from app.services.smart_home_webhook_service import (
     build_smart_home_webhook_payload,
     is_valid_webhook_url,
@@ -16,6 +17,23 @@ from app.services.smart_home_webhook_service import (
     owner_should_receive_webhook,
     send_smart_home_webhooks,
 )
+
+
+def _db_with_owner_and_hub(owner: SimpleNamespace, hid: str = "DEV-TEST1"):
+    hub = SimpleNamespace(hid=hid, created_at=None)
+
+    def query_side_effect(model):
+        q = MagicMock()
+        if model is Owner:
+            q.filter.return_value.all.return_value = [owner]
+        else:
+            q.filter.return_value.order_by.return_value.all.return_value = [hub]
+            q.filter.return_value.all.return_value = [hub]
+        return q
+
+    db = MagicMock()
+    db.query.side_effect = query_side_effect
+    return db
 
 
 def test_normalize_webhook_url_adds_https():
@@ -101,7 +119,6 @@ def test_build_smart_home_webhook_payload():
         recipient_owner_id=9,
         network_id="ZONE-ABC",
     )
-    # Client Home Assistant contract: title + message only.
     assert body == {
         "title": "SENSOR in Safe Zone Patrol",
         "message": "Door opened",
@@ -116,11 +133,10 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
         id=9,
         active=True,
         sn_webhook="https://hub.example.com/hooks/hex",
+        sn_hid="DEV-TEST1",
         zone_id="ZONE-ABC",
     )
-    db = MagicMock()
-    query = db.query.return_value
-    query.filter.return_value.all.return_value = [owner]
+    db = _db_with_owner_and_hub(owner)
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -156,6 +172,7 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
 
     assert stats["webhook_sent"] == 1
     assert stats["webhook_failed"] == 0
+    assert stats["webhook_owner_results"][0]["ok"] is True
     mock_client.post.assert_awaited_once()
     args, kwargs = mock_client.post.await_args
     assert args[0] == "https://hub.example.com/hooks/hex"
@@ -172,11 +189,10 @@ async def test_send_webhook_when_delivered_on_admin_network_from_other_sender():
         id=1,
         active=True,
         sn_webhook="https://webhook.site/test-id",
+        sn_hid="DEV-ADMIN",
         zone_id="DISTRICT-11",
     )
-    db = MagicMock()
-    query = db.query.return_value
-    query.filter.return_value.all.return_value = [owner]
+    db = _db_with_owner_and_hub(owner, hid="DEV-ADMIN")
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -228,17 +244,53 @@ def test_delivered_owner_always_gets_webhook_even_if_sender_network_differs():
 
 
 @pytest.mark.asyncio
+async def test_send_skips_without_registered_hub_hid():
+    owner = SimpleNamespace(
+        id=1,
+        active=True,
+        sn_webhook="https://webhook.site/test-id",
+        sn_hid="",
+        zone_id="DISTRICT-11",
+    )
+
+    def query_side_effect(model):
+        q = MagicMock()
+        if model is Owner:
+            q.filter.return_value.all.return_value = [owner]
+        else:
+            q.filter.return_value.order_by.return_value.all.return_value = []
+            q.filter.return_value.all.return_value = []
+        return q
+
+    db = MagicMock()
+    db.query.side_effect = query_side_effect
+
+    stats = await send_smart_home_webhooks(
+        db,
+        [1],
+        {
+            "type": "PANIC",
+            "text": "Help",
+            "delivered_owner_ids": [1],
+            "metadata": {"sender_network_id": "DISTRICT-11"},
+        },
+    )
+    assert stats["webhook_sent"] == 0
+    assert stats.get("webhook_skipped_no_hid_count") == 1
+    assert stats.get("webhook_owner_results") == []
+
+
+@pytest.mark.asyncio
 async def test_send_smart_home_webhooks_skips_other_networks():
     """Sender-only echo (not in delivered) is skipped when networks differ."""
     owner = SimpleNamespace(
         id=9,
         active=True,
         sn_webhook="https://hub.example.com/hooks/hex",
+        sn_hid="DEV-TEST1",
         zone_id="ZONE-ABC",
     )
-    db = MagicMock()
-    query = db.query.return_value
-    query.filter.return_value.all.return_value = [owner]
+    db = _db_with_owner_and_hub(owner)
 
     stats = await send_smart_home_webhooks(
         db,
@@ -266,11 +318,10 @@ async def test_send_smart_home_webhooks_normalizes_scheme_less_url():
         id=9,
         active=True,
         sn_webhook="webhook.site/abc-def",
+        sn_hid="DEV-TEST1",
         zone_id="ZONE-ABC",
     )
-    db = MagicMock()
-    query = db.query.return_value
-    query.filter.return_value.all.return_value = [owner]
+    db = _db_with_owner_and_hub(owner)
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -300,10 +351,14 @@ async def test_send_smart_home_webhooks_normalizes_scheme_less_url():
 
 @pytest.mark.asyncio
 async def test_send_smart_home_webhooks_skips_without_url():
-    owner = SimpleNamespace(id=9, active=True, sn_webhook="", zone_id="ZONE-ABC")
-    db = MagicMock()
-    query = db.query.return_value
-    query.filter.return_value.all.return_value = [owner]
+    owner = SimpleNamespace(
+        id=9,
+        active=True,
+        sn_webhook="",
+        sn_hid="DEV-TEST1",
+        zone_id="ZONE-ABC",
+    )
+    db = _db_with_owner_and_hub(owner)
 
     stats = await send_smart_home_webhooks(
         db,

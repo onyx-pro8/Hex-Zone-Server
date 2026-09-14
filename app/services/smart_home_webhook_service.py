@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.domain.message_types import is_pushable_geo_type
-from app.models import Owner
+from app.models import Device, Owner
+from app.services.device_entitlements import is_smart_home_hid
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,30 @@ def _delivered_owner_id_set(alarm_payload: dict[str, Any]) -> set[int]:
     return out
 
 
+def owner_registered_smart_home_hid(db: Session, owner: Owner) -> str | None:
+    """Return a registered DEV- hub HID for this owner, or None if none exist.
+
+    Prefers ``owners.sn_hid`` when it still matches an active hub.
+    """
+    devices = (
+        db.query(Device)
+        .filter(Device.owner_id == owner.id, Device.active.is_(True))
+        .order_by(Device.created_at.asc())
+        .all()
+    )
+    hubs = [device for device in devices if is_smart_home_hid(device.hid)]
+    if not hubs:
+        return None
+    preferred = str(getattr(owner, "sn_hid", "") or "").strip()
+    if preferred:
+        preferred_key = preferred.upper()
+        for hub in hubs:
+            hid = str(hub.hid or "").strip()
+            if hid.upper() == preferred_key:
+                return hid
+    return str(hubs[0].hid or "").strip() or None
+
+
 def owner_should_receive_webhook(owner: Owner, alarm_payload: dict[str, Any]) -> bool:
     """Delivered recipients always qualify; sender-only echo uses network match.
 
@@ -226,21 +251,35 @@ async def send_smart_home_webhooks(
     owner_ids: list[int],
     alarm_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """POST the alarm to each eligible recipient owner's webhook URL.
+    """POST the alarm to each eligible hub owner's webhook URL.
 
-    Eligibility: owner is in ``owner_ids``, has a valid ``sn_webhook``, and their
-    ``zone_id`` matches a routing network for this message (or routing metadata
-    is missing). Returns counts for response diagnostics. Never raises.
+    Eligibility per owner:
+    - in ``owner_ids`` and passes delivery/network rules
+    - has a registered smart-home HID (``DEV-`` device)
+    - has a valid ``sn_webhook``
+
+    Returns aggregate counts plus ``webhook_owner_results`` for per-user toasts.
+    Never raises.
     """
     msg_type = str(alarm_payload.get("type") or "")
     if not is_pushable_geo_type(msg_type):
         logger.info("Smart-home webhook type=%s skipped: not a pushable geo type", msg_type)
-        return {"webhook_sent": 0, "webhook_failed": 0, "webhook_skipped": True}
+        return {
+            "webhook_sent": 0,
+            "webhook_failed": 0,
+            "webhook_skipped": True,
+            "webhook_owner_results": [],
+        }
 
     unique_ids = sorted({int(oid) for oid in owner_ids if isinstance(oid, int)})
     if not unique_ids:
         logger.info("Smart-home webhook type=%s skipped: no owner targets", msg_type)
-        return {"webhook_sent": 0, "webhook_failed": 0, "webhook_no_targets": True}
+        return {
+            "webhook_sent": 0,
+            "webhook_failed": 0,
+            "webhook_no_targets": True,
+            "webhook_owner_results": [],
+        }
 
     related_networks = message_related_network_ids(alarm_payload)
     origin_network = message_origin_network_id(alarm_payload)
@@ -250,19 +289,17 @@ async def send_smart_home_webhooks(
         .filter(Owner.id.in_(unique_ids), Owner.active.is_(True))
         .all()
     )
-    targets: list[tuple[Owner, str]] = []
+    targets: list[tuple[Owner, str, str]] = []  # owner, url, hid
     skipped_network = 0
     skipped_no_url = 0
+    skipped_no_hid = 0
     for owner in owners:
         if not owner_should_receive_webhook(owner, alarm_payload):
             skipped_network += 1
-            logger.info(
-                "Smart-home webhook skip owner=%s zone=%s type=%s related_networks=%s",
-                owner.id,
-                getattr(owner, "zone_id", ""),
-                msg_type,
-                sorted(related_networks),
-            )
+            continue
+        hid = owner_registered_smart_home_hid(db, owner)
+        if not hid:
+            skipped_no_hid += 1
             continue
         url = normalize_webhook_url(str(getattr(owner, "sn_webhook", "") or ""))
         if not url:
@@ -276,15 +313,16 @@ async def send_smart_home_webhooks(
             )
             skipped_no_url += 1
             continue
-        targets.append((owner, url))
+        targets.append((owner, url, hid))
 
     if not targets:
         logger.info(
             "Smart-home webhook type=%s no targets (owners=%s skipped_network=%d "
-            "skipped_no_url=%d related_networks=%s origin=%s)",
+            "skipped_no_hid=%d skipped_no_url=%d related_networks=%s origin=%s)",
             msg_type,
             unique_ids,
             skipped_network,
+            skipped_no_hid,
             skipped_no_url,
             sorted(related_networks),
             origin_network,
@@ -294,11 +332,14 @@ async def send_smart_home_webhooks(
             "webhook_failed": 0,
             "webhook_no_urls": True,
             "webhook_skipped_network_count": skipped_network,
+            "webhook_skipped_no_hid_count": skipped_no_hid,
             "webhook_skipped_no_url_count": skipped_no_url,
+            "webhook_owner_results": [],
         }
 
     sent = 0
     failed = 0
+    owner_results: list[dict[str, Any]] = []
     timeout = _webhook_timeout_seconds()
     async with httpx.AsyncClient(
         timeout=timeout,
@@ -309,13 +350,21 @@ async def send_smart_home_webhooks(
             "X-Hex-Zone-Event": "SMART_HOME_ALARM",
         },
     ) as client:
-        for owner, url in targets:
+        for owner, url, hid in targets:
             body = build_smart_home_webhook_payload(
                 alarm_payload,
                 recipient_owner_id=owner.id,
                 network_id=str(owner.zone_id or ""),
             )
             ok = await _post_webhook(client, url=url, body=body)
+            owner_results.append(
+                {
+                    "owner_id": int(owner.id),
+                    "ok": ok,
+                    "hid": hid,
+                    "title": body.get("title") or "",
+                }
+            )
             if ok:
                 sent += 1
             else:
@@ -323,7 +372,7 @@ async def send_smart_home_webhooks(
 
     logger.info(
         "Smart-home webhook type=%s origin=%s related=%s targets=%d sent=%d "
-        "failed=%d skipped_network=%d skipped_no_url=%d",
+        "failed=%d skipped_network=%d skipped_no_hid=%d skipped_no_url=%d",
         msg_type,
         origin_network,
         sorted(related_networks),
@@ -331,6 +380,7 @@ async def send_smart_home_webhooks(
         sent,
         failed,
         skipped_network,
+        skipped_no_hid,
         skipped_no_url,
     )
     return {
@@ -338,5 +388,37 @@ async def send_smart_home_webhooks(
         "webhook_failed": failed,
         "webhook_targets": len(targets),
         "webhook_skipped_network_count": skipped_network,
+        "webhook_skipped_no_hid_count": skipped_no_hid,
         "webhook_skipped_no_url_count": skipped_no_url,
+        "webhook_owner_results": owner_results,
     }
+
+
+async def notify_smart_home_webhook_owners(owner_results: list[dict[str, Any]]) -> None:
+    """Push short success/failure toasts to each hub owner via WebSocket."""
+    if not owner_results:
+        return
+    from app.websocket.manager import ws_manager
+
+    for row in owner_results:
+        try:
+            owner_id = int(row.get("owner_id"))
+        except (TypeError, ValueError):
+            continue
+        ok = bool(row.get("ok"))
+        payload = {
+            "ok": ok,
+            "hid": str(row.get("hid") or ""),
+            "title": str(row.get("title") or ""),
+            "toast": "Hub notified." if ok else "Hub webhook failed.",
+        }
+        try:
+            await ws_manager.broadcast_to_users(
+                [owner_id],
+                "SMART_HOME_WEBHOOK",
+                payload,
+            )
+        except Exception:  # pragma: no cover - never break alarm delivery
+            logger.exception(
+                "Smart-home webhook WS notify failed for owner %s", owner_id
+            )
