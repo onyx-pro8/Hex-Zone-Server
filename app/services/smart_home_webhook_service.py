@@ -163,40 +163,34 @@ def build_smart_home_webhook_payload(
     recipient_owner_id: int,
     network_id: str | None = None,
 ) -> dict[str, Any]:
-    """Stable JSON body hubs can parse for sirens / notifications.
+    """JSON body for client Home Assistant webhooks.
 
-    Includes Hex Zone fields (``type``, ``text``, …) plus Home Assistant–friendly
-    ``title`` / ``message`` aliases for client automations.
+    Contract (client automation)::
+
+        title   -> trigger.json.title   (default \"System Update\")
+        message -> trigger.json.message
+
+    Extra Hex Zone diagnostics are omitted so hubs only see the HA fields.
+    ``recipient_owner_id`` / ``network_id`` are accepted for call-site
+    compatibility but not included in the POST body.
     """
-    metadata = _as_dict(alarm_payload.get("metadata"))
-    hid = str(metadata.get("hid") or "").strip()
+    del recipient_owner_id, network_id  # reserved for future hub routing
     msg_type = str(alarm_payload.get("type") or "").strip().upper()
-    priority = str(alarm_payload.get("priority") or "").strip()
     text = str(alarm_payload.get("text") or "")
-    title = msg_type or "System Update"
-    if priority:
-        title = f"{title} ({priority})"
+    if not text:
+        metadata = _as_dict(alarm_payload.get("metadata"))
+        msg = _as_dict(metadata.get("msg"))
+        text = str(
+            msg.get("description")
+            or msg.get("title")
+            or msg.get("text")
+            or ""
+        )
+    # Client HA title format, e.g. "PANIC in Safe Zone Patrol".
+    title = f"{msg_type} in Safe Zone Patrol" if msg_type else "System Update"
     return {
-        "event": "SMART_HOME_ALARM",
-        "id": alarm_payload.get("id"),
-        "type": msg_type,
-        "category": str(alarm_payload.get("category") or ""),
-        "scope": str(alarm_payload.get("scope") or ""),
-        "priority": priority,
-        "text": text,
-        # Client Home Assistant automations expect these keys.
         "title": title,
         "message": text,
-        "sender_id": alarm_payload.get("sender_id"),
-        "zone_id": alarm_payload.get("zone_id"),
-        "network_id": (network_id or "").strip(),
-        "recipient_owner_id": recipient_owner_id,
-        "hid": hid,
-        "created_at": alarm_payload.get("created_at"),
-        "response_tracking_enabled": bool(
-            alarm_payload.get("response_tracking_enabled")
-        ),
-        "metadata": metadata,
     }
 
 
@@ -210,20 +204,18 @@ async def _post_webhook(
         response = await client.post(url, json=body)
         if response.status_code >= 400:
             logger.warning(
-                "Smart-home webhook HTTP %s for %s (type=%s id=%s)",
+                "Smart-home webhook HTTP %s for %s (title=%s)",
                 response.status_code,
                 url,
-                body.get("type"),
-                body.get("id"),
+                body.get("title"),
             )
             return False
         return True
     except httpx.HTTPError as exc:
         logger.warning(
-            "Smart-home webhook failed for %s (type=%s id=%s): %s",
+            "Smart-home webhook failed for %s (title=%s): %s",
             url,
-            body.get("type"),
-            body.get("id"),
+            body.get("title"),
             exc,
         )
         return False

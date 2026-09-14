@@ -101,14 +101,13 @@ def test_build_smart_home_webhook_payload():
         recipient_owner_id=9,
         network_id="ZONE-ABC",
     )
-    assert body["event"] == "SMART_HOME_ALARM"
-    assert body["type"] == "SENSOR"
-    assert body["hid"] == "DEV-A1B2C3"
-    assert body["recipient_owner_id"] == 9
-    assert body["network_id"] == "ZONE-ABC"
-    assert body["text"] == "Door opened"
-    assert body["title"] == "SENSOR (MEDIUM)"
-    assert body["message"] == "Door opened"
+    # Client Home Assistant contract: title + message only.
+    assert body == {
+        "title": "SENSOR in Safe Zone Patrol",
+        "message": "Door opened",
+    }
+    assert "metadata" not in body
+    assert "event" not in body
 
 
 @pytest.mark.asyncio
@@ -160,8 +159,10 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
     mock_client.post.assert_awaited_once()
     args, kwargs = mock_client.post.await_args
     assert args[0] == "https://hub.example.com/hooks/hex"
-    assert kwargs["json"]["event"] == "SMART_HOME_ALARM"
-    assert kwargs["json"]["type"] == "PANIC"
+    assert kwargs["json"] == {
+        "title": "PANIC in Safe Zone Patrol",
+        "message": "Help",
+    }
 
 
 @pytest.mark.asyncio
