@@ -16,9 +16,9 @@ edit/delete authorization in server-side policy.
 - Listing visibility:
   - **Primary** zones: visible to the account administrator and all members
   - **Secondary** zones: visible only to the creator
-  - Map and zone list are **network-scoped only** (up to account quota). Cross-account
-    public defining zones are **not** merged into `GET /zones` — use `GET /zones/public`
-    for communal selection only.
+  - Map and zone list are **network-scoped only** (up to account quota). Communal
+    selection uses `GET /zones/public`, which returns only **primary** zones in the
+    caller's network (not other networks).
   - System administrator listing/edit rules are unchanged (sees all zones)
 
 ## Edit / delete authorization

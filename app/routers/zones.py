@@ -25,6 +25,7 @@ from app.services.communal_zone_service import (
     resolution_to_response_payload as communal_resolution_to_response_payload,
     resolve_communal_id_for_owner,
     resolve_communal_reference,
+    zone_eligible_for_communal_assignment,
 )
 from app.services.geospatial_service import (
     DynamicZoneResolution,
@@ -949,7 +950,7 @@ async def list_zones(
         ]
 
     # Map/list stay network-scoped (system admin already sees all accounts).
-    # Cross-account public defining zones are only via GET /zones/public (communal).
+    # Communal selection uses GET /zones/public (network primary zones only).
 
     return [
         ZoneContractResponse.model_validate(row)
@@ -1311,11 +1312,13 @@ async def generate_zone_reference(
 @router.get(
     "/public",
     response_model=list[ZoneContractResponse],
-    summary="List public defining zones",
+    summary="List network primary zones for Communal selection",
     description=(
-        "List active public defining zones for Communal ID selection only. "
-        "These are not merged into GET /zones map/list — network users only see "
-        "zones in their own account (system admin sees all)."
+        "List defining zones eligible for Communal ID assignment. "
+        "Network admins and members receive only **primary** zones in their own "
+        "network. Solo Individual accounts receive their own defining zones. "
+        "System administrators receive all public defining zones. "
+        "Not merged into GET /zones map/list."
     ),
 )
 async def list_public_zones(
@@ -1327,7 +1330,7 @@ async def list_public_zones(
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
-    zones = list_public_defining_zones(db, skip=skip, limit=limit)
+    zones = list_public_defining_zones(db, owner=owner, skip=skip, limit=limit)
     return [
         ZoneContractResponse.model_validate(row)
         for row in _serialize_zones(db, zones)
@@ -1339,8 +1342,9 @@ async def list_public_zones(
     response_model=AssignCommunalResponse,
     summary="Assign Communal ID to selected zones",
     description=(
-        "Set config.communal_id on one or more zones the caller can edit. "
-        "Used by Communal mode after selecting public zones."
+        "Set config.communal_id on one or more network primary zones "
+        "(or an Individual's own defining zones). Used by Communal mode after "
+        "selecting zones from GET /zones/public."
     ),
 )
 async def assign_communal_to_zones(
@@ -1369,7 +1373,17 @@ async def assign_communal_to_zones(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Zone {record_id} not found",
             )
-        ensure_zone_edit_allowed(owner, target)
+        if not zone_eligible_for_communal_assignment(owner, target):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error_code": "COMMUNAL_ZONE_FORBIDDEN",
+                    "message": (
+                        "Communal IDs can only be assigned to primary zones "
+                        "in your network."
+                    ),
+                },
+            )
         assign_communal_id(target, reference_id, is_public=body.is_public)
         updated_rows.append(target)
 

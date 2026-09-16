@@ -167,7 +167,7 @@ def list_zones(db: Session, owner: Owner) -> list[dict]:
     zones = query.all()
 
     # Network-scoped only (system admin sees all via visible_zone_owner_ids).
-    # Cross-account public defining zones remain on GET /zones/public.
+    # Communal selection uses GET /zones/public (network primary zones).
 
     lookup_ids: set[int] = set()
     for zone in zones:

@@ -214,21 +214,79 @@ def mint_invite_communal_id(db: Session) -> str:
     return f"COMM-{secrets.token_hex(4).upper()}"
 
 
+def zone_network_id(zone: Zone) -> str:
+    return str(getattr(zone, "zone_id", None) or "").strip()
+
+
+def caller_network_id(owner) -> str:
+    return str(getattr(owner, "zone_id", None) or "").strip()
+
+
+def zone_eligible_for_communal_assignment(owner, zone: Zone) -> bool:
+    """True when the caller may attach a Communal ID to this defining zone.
+
+    Network admins and members may only use **primary** zones in their own
+    network. Solo Individual accounts (no primary tier) may use defining zones
+    they created in their network. System administrators may use any public
+    defining zone.
+    """
+    from app.services.account_type_policy import (
+        is_individual_account_type,
+        is_system_administrator,
+    )
+    from app.services.zone_policy import owner_is_invited_member, zone_is_primary
+
+    if not is_zone_public(zone):
+        return False
+    if is_system_administrator(owner):
+        return True
+
+    network = caller_network_id(owner)
+    if not network or zone_network_id(zone) != network:
+        return False
+
+    if zone_is_primary(zone):
+        return True
+
+    # Solo Individuals never create primary zones — allow their own defining zones.
+    # Invited members (also Individual account type) stay primary-only.
+    if is_individual_account_type(getattr(owner, "account_type", None)) and not owner_is_invited_member(
+        owner
+    ):
+        return int(getattr(zone, "creator_id", 0) or 0) == int(owner.id)
+
+    return False
+
+
 def list_public_defining_zones(
     db: Session,
     *,
+    owner=None,
     skip: int = 0,
     limit: int = 200,
 ) -> list[Zone]:
+    """List defining zones eligible for Communal ID selection.
+
+    Scoped to the caller's network primary zones (not every network). System
+    administrators still see all public defining zones.
+    """
     if db is None:
         return []
-    zones = (
-        db.query(Zone)
-        .filter(Zone.active.is_(True))
-        .order_by(Zone.updated_at.desc(), Zone.id.desc())
-        .all()
-    )
-    public = [z for z in zones if is_zone_public(z)]
+    query = db.query(Zone).filter(Zone.active.is_(True))
+    if owner is not None:
+        from app.services.account_type_policy import is_system_administrator
+
+        if not is_system_administrator(owner):
+            network = caller_network_id(owner)
+            if not network:
+                return []
+            query = query.filter(Zone.zone_id == network)
+
+    zones = query.order_by(Zone.updated_at.desc(), Zone.id.desc()).all()
+    if owner is None:
+        public = [z for z in zones if is_zone_public(z)]
+    else:
+        public = [z for z in zones if zone_eligible_for_communal_assignment(owner, z)]
     return public[skip : skip + limit]
 
 

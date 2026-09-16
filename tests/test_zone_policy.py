@@ -434,3 +434,100 @@ async def test_concurrent_create_at_boundary_allows_single_success(zone_test_db,
     finally:
         settings.MAX_ZONES_ADMINISTRATOR = original_admin
         settings.MAX_ZONES_ADMINISTRATOR_PRIMARY = 2
+
+
+def _defining_zone_payload(name: str) -> dict:
+    return {
+        "name": name,
+        "type": "geofence",
+        "geometry": {},
+        "config": {"h3_cells": ["8928308280fffff"], "is_public": True},
+    }
+
+
+@pytest.mark.asyncio
+async def test_communal_public_list_is_network_primary_only(zone_test_db, policy_limits):
+    """Communal picker must not expose other networks' primary zones."""
+    async with _client() as client:
+        admin_a_id, admin_a_token = await _register_and_login(
+            client, "admin-net-a@example.com", "administrator", "network-a"
+        )
+        _, member_a_token = await _register_and_login(
+            client,
+            "member-net-a@example.com",
+            "user",
+            "network-a",
+            account_owner_id=admin_a_id,
+        )
+        _, admin_b_token = await _register_and_login(
+            client, "admin-net-b@example.com", "administrator", "network-b"
+        )
+
+        headers_a = {"Authorization": f"Bearer {admin_a_token}"}
+        headers_member = {"Authorization": f"Bearer {member_a_token}"}
+        headers_b = {"Authorization": f"Bearer {admin_b_token}"}
+
+        zone_a = await client.post(
+            "/zones/", headers=headers_a, json=_defining_zone_payload("A Primary")
+        )
+        zone_b = await client.post(
+            "/zones/", headers=headers_b, json=_defining_zone_payload("B Primary")
+        )
+        assert zone_a.status_code == 201, zone_a.text
+        assert zone_b.status_code == 201, zone_b.text
+        assert zone_a.json()["is_primary"] is True
+        assert zone_b.json()["is_primary"] is True
+        id_a = zone_a.json()["id"]
+        id_b = zone_b.json()["id"]
+
+        # Secondary in network A must not appear in the communal picker.
+        secondary = await client.post(
+            "/zones/",
+            headers=headers_member,
+            json=_defining_zone_payload("A Member Secondary"),
+        )
+        assert secondary.status_code == 201, secondary.text
+        assert secondary.json()["is_primary"] is False
+        id_secondary = secondary.json()["id"]
+
+        listed_admin = await client.get("/zones/public", headers=headers_a)
+        listed_member = await client.get("/zones/public", headers=headers_member)
+        listed_b = await client.get("/zones/public", headers=headers_b)
+
+        assert listed_admin.status_code == 200, listed_admin.text
+        assert listed_member.status_code == 200, listed_member.text
+        assert listed_b.status_code == 200, listed_b.text
+
+        ids_admin = {row["id"] for row in listed_admin.json()}
+        ids_member = {row["id"] for row in listed_member.json()}
+        ids_b = {row["id"] for row in listed_b.json()}
+
+        assert id_a in ids_admin
+        assert id_b not in ids_admin
+        assert id_secondary not in ids_admin
+
+        assert id_a in ids_member
+        assert id_b not in ids_member
+        assert id_secondary not in ids_member
+
+        assert id_b in ids_b
+        assert id_a not in ids_b
+
+        # Member may assign communal ID to network primary (not other networks).
+        assign_ok = await client.post(
+            "/zones/assign-communal",
+            headers=headers_member,
+            json={"communal_id": "COMM-NET-A", "zone_ids": [id_a]},
+        )
+        assert assign_ok.status_code == 200, assign_ok.text
+
+        assign_cross = await client.post(
+            "/zones/assign-communal",
+            headers=headers_member,
+            json={"communal_id": "COMM-NET-A", "zone_ids": [id_b]},
+        )
+        assert assign_cross.status_code == 403
+        assert assign_cross.json().get("error_code") == "COMMUNAL_ZONE_FORBIDDEN" or (
+            isinstance(assign_cross.json().get("detail"), dict)
+            and assign_cross.json()["detail"].get("error_code") == "COMMUNAL_ZONE_FORBIDDEN"
+        )
