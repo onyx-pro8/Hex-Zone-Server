@@ -1365,6 +1365,10 @@ async def assign_communal_to_zones(
             detail="Communal ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
         )
 
+    account_owner_ids = None
+    if not is_system_administrator(owner):
+        account_owner_ids = [int(oid) for oid in visible_zone_owner_ids(db, owner)]
+
     updated_rows: list[Zone] = []
     for record_id in body.zone_ids:
         target = zone_crud.get_zone_by_record_id_with_geojson(db, record_id)
@@ -1373,7 +1377,9 @@ async def assign_communal_to_zones(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Zone {record_id} not found",
             )
-        if not zone_eligible_for_communal_assignment(owner, target):
+        if not zone_eligible_for_communal_assignment(
+            owner, target, account_owner_ids=account_owner_ids
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={

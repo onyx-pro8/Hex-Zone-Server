@@ -222,13 +222,18 @@ def caller_network_id(owner) -> str:
     return str(getattr(owner, "zone_id", None) or "").strip()
 
 
-def zone_eligible_for_communal_assignment(owner, zone: Zone) -> bool:
+def zone_eligible_for_communal_assignment(
+    owner,
+    zone: Zone,
+    *,
+    account_owner_ids: list[int] | None = None,
+) -> bool:
     """True when the caller may attach a Communal ID to this defining zone.
 
-    Network admins and members may only use **primary** zones in their own
-    network. Solo Individual accounts (no primary tier) may use defining zones
-    they created in their network. System administrators may use any public
-    defining zone.
+    Network admins and members may only use **primary** zones owned within their
+    account (same visibility scope as GET /zones). Solo Individual accounts (no
+    primary tier) may use defining zones they created. System administrators may
+    use any public defining zone.
     """
     from app.services.account_type_policy import (
         is_individual_account_type,
@@ -241,9 +246,15 @@ def zone_eligible_for_communal_assignment(owner, zone: Zone) -> bool:
     if is_system_administrator(owner):
         return True
 
-    network = caller_network_id(owner)
-    if not network or zone_network_id(zone) != network:
-        return False
+    if account_owner_ids is not None:
+        allowed = {int(oid) for oid in account_owner_ids}
+        if int(getattr(zone, "owner_id", 0) or 0) not in allowed:
+            return False
+    else:
+        # Fallback when caller did not pass account scope: shared network id.
+        network = caller_network_id(owner)
+        if not network or zone_network_id(zone) != network:
+            return False
 
     if zone_is_primary(zone):
         return True
@@ -267,26 +278,36 @@ def list_public_defining_zones(
 ) -> list[Zone]:
     """List defining zones eligible for Communal ID selection.
 
-    Scoped to the caller's network primary zones (not every network). System
-    administrators still see all public defining zones.
+    Uses the same account owner scope as GET /zones, then keeps primary defining
+    zones (or a Solo Individual's own defining zones). System administrators see
+    all public defining zones.
     """
     if db is None:
         return []
-    query = db.query(Zone).filter(Zone.active.is_(True))
-    if owner is not None:
-        from app.services.account_type_policy import is_system_administrator
 
-        if not is_system_administrator(owner):
-            network = caller_network_id(owner)
-            if not network:
-                return []
-            query = query.filter(Zone.zone_id == network)
+    from app.services.account_type_policy import is_system_administrator
+    from app.services.access_policy import zone_listing_owner_ids
+
+    query = db.query(Zone).filter(Zone.active.is_(True))
+    account_owner_ids: list[int] | None = None
+
+    if owner is not None and not is_system_administrator(owner):
+        account_owner_ids = [int(oid) for oid in zone_listing_owner_ids(db, owner)]
+        if not account_owner_ids:
+            return []
+        query = query.filter(Zone.owner_id.in_(tuple(account_owner_ids)))
 
     zones = query.order_by(Zone.updated_at.desc(), Zone.id.desc()).all()
     if owner is None:
         public = [z for z in zones if is_zone_public(z)]
     else:
-        public = [z for z in zones if zone_eligible_for_communal_assignment(owner, z)]
+        public = [
+            z
+            for z in zones
+            if zone_eligible_for_communal_assignment(
+                owner, z, account_owner_ids=account_owner_ids
+            )
+        ]
     return public[skip : skip + limit]
 
 
