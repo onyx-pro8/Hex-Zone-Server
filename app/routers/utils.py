@@ -1,5 +1,5 @@
 """Router for utility endpoints."""
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
@@ -106,6 +106,58 @@ class RegistrationCodeIssueResponse(BaseModel):
     email_delivery: EmailDeliveryResponse
 
     model_config = {"populate_by_name": True}
+
+
+class EmailAvailableResponse(BaseModel):
+    email: str
+    available: bool
+    message: str
+
+
+@router.get(
+    "/email-available",
+    response_model=EmailAvailableResponse,
+    summary="Check whether an email can be used for registration",
+    description=(
+        "Public endpoint (no Authorization). Returns whether the email is free for a new "
+        "account. Used by the multi-step signup/invite onboarding flow before collecting "
+        "the rest of the profile."
+    ),
+    responses={
+        200: {
+            "description": "Availability result for the supplied email.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "email": "alex@example.com",
+                        "available": True,
+                        "message": "Email is available.",
+                    }
+                }
+            },
+        },
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            "description": "Email is missing or not a valid address.",
+        },
+    },
+)
+async def check_email_available(
+    email: EmailStr = Query(..., description="Email address to check"),
+    db: Session = Depends(get_db),
+):
+    normalized = str(email).strip().lower()
+    existing = owner_crud.get_owner_by_email(db, normalized)
+    if existing:
+        return EmailAvailableResponse(
+            email=normalized,
+            available=False,
+            message="Email already registered",
+        )
+    return EmailAvailableResponse(
+        email=normalized,
+        available=True,
+        message="Email is available.",
+    )
 
 
 @router.get(
