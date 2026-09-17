@@ -19,6 +19,7 @@ from app.services.device_entitlements import (
     assert_no_conflicting_online_session,
     assert_owner_device_capacity,
     count_smart_home_devices,
+    device_presence_is_active,
     evict_offline_devices_to_make_room,
     expire_stale_device_sessions,
     is_client_session_hid,
@@ -90,6 +91,14 @@ async def create_device(
             or ("unique" in error_text and "hid" in error_text)
         ):
             existing = device_crud.get_device_by_hid(db, device.hid, owner_id=owner.id)
+            if not existing and is_client_session_hid(device.hid):
+                # Same phone switching accounts: HID is globally unique and may
+                # still belong to a previous owner. Reassign idle login sessions.
+                foreign = device_crud.get_device_by_hid(db, device.hid)
+                if foreign is not None and not device_presence_is_active(foreign):
+                    foreign.owner_id = owner.id
+                    db.flush()
+                    existing = foreign
             if not existing:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
