@@ -236,16 +236,18 @@ def list_registry_ids_for_network(db: Session, network_id: str) -> list[str]:
     return [normalize_reference_id(row[0]) for row in rows if row and row[0]]
 
 
-def list_network_communal_ids(db: Session, owner) -> list[dict[str, Any]]:
-    """Communal IDs minted for this network, including ones with zero zones."""
+def list_public_communal_ids(db: Session, owner=None) -> list[dict[str, Any]]:
+    """All public Communal IDs in the registry (any network), including zero-zone IDs.
+
+    Communal IDs are global — any network admin may attach any registered ID
+    to a primary zone. ``owner`` is unused but kept for call-site compatibility.
+    """
     from app.models import CommunalIdRegistry, Owner
 
-    network = caller_network_id(owner)
-    if not network or db is None:
+    if db is None:
         return []
     rows = (
         db.query(CommunalIdRegistry)
-        .filter(CommunalIdRegistry.network_id == network)
         .order_by(CommunalIdRegistry.created_at.desc(), CommunalIdRegistry.id.desc())
         .all()
     )
@@ -278,7 +280,7 @@ def list_network_communal_ids(db: Session, owner) -> list[dict[str, Any]]:
                 "reference_id": reference_id,
                 "creator_id": creator_id,
                 "creator_name": creator_name,
-                "network_id": network,
+                "network_id": str(getattr(row, "network_id", "") or "").strip(),
                 "zone_count": len(matched),
                 "created_at": (
                     row.created_at.isoformat() if getattr(row, "created_at", None) else None
@@ -286,6 +288,11 @@ def list_network_communal_ids(db: Session, owner) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+# Back-compat alias used by older call sites / tests.
+def list_network_communal_ids(db: Session, owner) -> list[dict[str, Any]]:
+    return list_public_communal_ids(db, owner)
 
 
 def zone_communal_id_taken(db: Session, reference_id: str) -> bool:
