@@ -20,6 +20,7 @@ from app.services.communal_zone_service import (
     assert_may_generate_communal_id,
     assign_communal_id,
     extract_communal_ids_from_config,
+    find_zones_by_communal_id,
     generate_communal_reference,
     is_valid_reference_format,
     list_public_communal_ids,
@@ -1438,6 +1439,52 @@ async def list_communal_ids(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
     rows = list_public_communal_ids(db, owner)
     return [CommunalIdListItem.model_validate(row) for row in rows]
+
+
+@router.get(
+    "/communal-ids/{reference_id}/zones",
+    response_model=list[ZoneContractResponse],
+    summary="List zones attached to a Communal ID",
+    description=(
+        "Returns every active zone tagged with this public Communal ID, "
+        "including zones owned by other networks. The ID creator's network "
+        "uses this to view and map shared-in zones."
+    ),
+)
+async def list_zones_for_communal_id(
+    reference_id: str = Path(..., min_length=3, max_length=32),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    normalized = normalize_reference_id(reference_id)
+    if not is_valid_reference_format(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Communal ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
+        )
+    matched = find_zones_by_communal_id(db, normalized)
+    # Deduplicate by record id while preserving order.
+    seen: set[int] = set()
+    unique: list[Zone] = []
+    for zone in matched:
+        zid = int(zone.id)
+        if zid in seen:
+            continue
+        seen.add(zid)
+        unique.append(zone)
+    caller_network = str(getattr(owner, "zone_id", None) or "").strip()
+    shared_ids = {
+        int(zone.id)
+        for zone in unique
+        if str(getattr(zone, "zone_id", None) or "").strip() != caller_network
+    }
+    return [
+        ZoneContractResponse.model_validate(row)
+        for row in _serialize_zones(db, unique, shared_ids=shared_ids)
+    ]
 
 
 @router.get(

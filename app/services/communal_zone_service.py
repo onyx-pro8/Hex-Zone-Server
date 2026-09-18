@@ -325,9 +325,31 @@ def zone_communal_id_taken(db: Session, reference_id: str) -> bool:
     return False
 
 
-def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:
+def _load_zones_by_ids_with_geometry(db: Session, matched_ids: list[int]) -> list[Zone]:
+    """Load zones by id with GeoJSON polygons; never silently drop matches."""
     from app.crud import zone as zone_crud
 
+    if not matched_ids:
+        return []
+    try:
+        loaded = zone_crud.list_zones_by_record_ids_with_geojson(db, matched_ids)
+        if loaded:
+            return loaded
+    except Exception:
+        pass
+    # Fallback: load one-by-one so a single bad row cannot hide the rest.
+    out: list[Zone] = []
+    for zid in matched_ids:
+        try:
+            zone = zone_crud.get_zone_by_record_id_with_geojson(db, zid)
+        except Exception:
+            zone = db.query(Zone).filter(Zone.id == zid).first()
+        if zone is not None:
+            out.append(zone)
+    return out
+
+
+def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:
     normalized = normalize_reference_id(reference_id)
     if not normalized or db is None:
         return []
@@ -346,18 +368,11 @@ def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:
             ids.append(normalize_reference_id(legacy))
         if normalized in ids:
             matched_ids.append(int(zone_id))
-    if not matched_ids:
-        return []
-    try:
-        return zone_crud.list_zones_by_record_ids_with_geojson(db, matched_ids)
-    except Exception:
-        return []
+    return _load_zones_by_ids_with_geometry(db, matched_ids)
 
 
 def find_zones_by_communal_ids(db: Session, reference_ids: list[str]) -> list[Zone]:
     """Zones tagged with any of the given Communal IDs (unique by zone id)."""
-    from app.crud import zone as zone_crud
-
     wanted = {
         normalize_reference_id(cid)
         for cid in reference_ids
@@ -386,12 +401,7 @@ def find_zones_by_communal_ids(db: Session, reference_ids: list[str]) -> list[Zo
             continue
         seen.add(zid)
         matched_ids.append(zid)
-    if not matched_ids:
-        return []
-    try:
-        return zone_crud.list_zones_by_record_ids_with_geojson(db, matched_ids)
-    except Exception:
-        return []
+    return _load_zones_by_ids_with_geometry(db, matched_ids)
 
 
 def list_zones_shared_into_network(db: Session, owner) -> list[Zone]:
