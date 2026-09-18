@@ -16,10 +16,8 @@ def create_qr_registration(
 
     ``expires_in_hours=None`` (or ``0``) means the token never expires.
     Every invite token is single-use (one successful join).
-    Also mints a Communal ID for the future Individual invitee.
+    Communal IDs are no longer minted for invitees.
     """
-    from app.services.communal_zone_service import mint_invite_communal_id
-
     token = generate_qr_token()
     if expires_in_hours is None or int(expires_in_hours) <= 0:
         expires_at = None
@@ -30,7 +28,7 @@ def create_qr_registration(
         token=token,
         owner_id=owner_id,
         expires_at=expires_at,
-        communal_id=mint_invite_communal_id(db),
+        communal_id=None,
     )
     db.add(db_qr)
     db.flush()
@@ -39,15 +37,10 @@ def create_qr_registration(
 
 
 def ensure_qr_communal_id(db: Session, qr: QRRegistration) -> str:
-    """Backfill a Communal ID on a legacy invite that predates this column."""
-    from app.services.communal_zone_service import mint_invite_communal_id
-
+    """Legacy helper — invites no longer carry Communal IDs."""
+    del db
     existing = (getattr(qr, "communal_id", None) or "").strip()
-    if existing:
-        return existing.upper()
-    qr.communal_id = mint_invite_communal_id(db)
-    db.flush()
-    return qr.communal_id
+    return existing.upper() if existing else ""
 
 
 def get_qr_registration(db: Session, token: str) -> Optional[QRRegistration]:

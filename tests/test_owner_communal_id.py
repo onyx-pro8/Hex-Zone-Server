@@ -1,9 +1,10 @@
-"""Individual accounts receive a unique server-assigned Communal ID."""
+"""Individuals/members no longer receive Communal IDs; admins mint public ones."""
 from __future__ import annotations
 
 from datetime import datetime
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -15,7 +16,6 @@ from app.services.communal_zone_service import (
     assign_owner_communal_id,
     resolve_communal_id_for_owner,
 )
-from fastapi import HTTPException
 
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -54,13 +54,10 @@ def _owner(db, *, email: str, account_type: AccountType, role: OwnerRole = Owner
     return owner
 
 
-def test_assign_owner_communal_id_for_individual(db):
+def test_assign_owner_communal_id_no_longer_mints(db):
     owner = _owner(db, email="solo@example.com", account_type=AccountType.EXCLUSIVE)
-    cid = assign_owner_communal_id(db, owner)
-    assert cid.startswith("COMM-")
-    assert owner.communal_id == cid
-    # Idempotent
-    assert assign_owner_communal_id(db, owner) == cid
+    assert assign_owner_communal_id(db, owner) == ""
+    assert owner.communal_id is None
 
 
 def test_assign_skips_non_individual(db):
@@ -81,19 +78,40 @@ def test_individual_cannot_generate(db):
     assert exc.value.status_code == 403
 
 
-def test_individual_locked_to_assigned_id(db):
-    owner = _owner(db, email="solo@example.com", account_type=AccountType.EXCLUSIVE)
-    assigned = assign_owner_communal_id(db, owner)
-    assert resolve_communal_id_for_owner(owner, None) == assigned
-    assert resolve_communal_id_for_owner(owner, assigned) == assigned
+def test_member_cannot_generate(db):
+    owner = _owner(
+        db,
+        email="member@example.com",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+    )
     with pytest.raises(HTTPException) as exc:
-        resolve_communal_id_for_owner(owner, "COMM-OTHER")
+        assert_may_generate_communal_id(owner)
     assert exc.value.status_code == 403
 
 
-def test_invited_individuals_get_unique_ids(db):
-    first = _owner(db, email="a@example.com", account_type=AccountType.EXCLUSIVE)
-    second = _owner(db, email="b@example.com", account_type=AccountType.EXCLUSIVE)
-    a = assign_owner_communal_id(db, first)
-    b = assign_owner_communal_id(db, second)
-    assert a != b
+def test_admin_may_generate(db):
+    owner = _owner(
+        db,
+        email="admin@example.com",
+        account_type=AccountType.PRIVATE_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    assert_may_generate_communal_id(owner)
+
+
+def test_individual_cannot_attach_communal_ids(db):
+    owner = _owner(db, email="solo@example.com", account_type=AccountType.EXCLUSIVE)
+    with pytest.raises(HTTPException) as exc:
+        resolve_communal_id_for_owner(owner, "COMM-ABC")
+    assert exc.value.status_code == 403
+
+
+def test_admin_may_resolve_requested_id(db):
+    owner = _owner(
+        db,
+        email="admin@example.com",
+        account_type=AccountType.PRIVATE_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    assert resolve_communal_id_for_owner(owner, "comm-abc") == "COMM-ABC"

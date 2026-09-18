@@ -16,10 +16,12 @@ edit/delete authorization in server-side policy.
 - Listing visibility:
   - **Primary** zones: visible to the account administrator and all members
   - **Secondary** zones: visible only to the creator
-  - Map and zone list are **network-scoped only** (up to account quota). Communal
-    selection uses `GET /zones/public`, which returns only **primary** defining
-    zones in the caller's account (same owner scope as `GET /zones`, not other
-    accounts).
+  - Map and zone list are **network-scoped** (up to account quota), plus any
+    zones tagged with **Communal IDs** minted by this network's administrators.
+    Those shared-in zones are visible to all network members but **do not count**
+    toward zone quota. Admins attach one or more Communal IDs when creating a
+    **primary** zone. The Communal tool only validates/generates public IDs
+    (admins only — not members or Individuals).
   - System administrator listing/edit rules are unchanged (sees all zones)
 
 ## Edit / delete authorization

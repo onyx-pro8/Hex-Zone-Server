@@ -56,8 +56,8 @@ class Owner(Base):
     address = Column(String(255), nullable=False)
     # Optional profile image as a URL or data URI (set from User settings).
     avatar_url = Column(Text, nullable=True)
-    # Assigned Communal ID for Individual (exclusive) accounts. Issued by the
-    # server on sign-up / invite join. Individuals cannot generate or change it.
+    # Legacy column: Communal IDs are no longer issued to Individuals/members.
+    # Network admins mint public IDs into communal_id_registry instead.
     communal_id = Column(String(32), nullable=True, index=True)
     # Canonical owner home location (geocoded from `address`) for SENSOR /
     # WELLNESS_CHECK routing and client `mapCenter`. Live GPS is in

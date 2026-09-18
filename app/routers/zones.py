@@ -15,15 +15,18 @@ from app.models.zone import Zone, ZoneType
 from app.services.access_policy import visible_owner_ids, visible_zone_owner_ids
 from app.services.account_type_policy import is_system_administrator
 from app.services.communal_zone_service import (
-    assign_communal_id,
+    apply_communal_ids_to_config,
+    assert_communal_ids_attachable,
     assert_may_generate_communal_id,
-    assign_owner_communal_id,
+    assign_communal_id,
+    extract_communal_ids_from_config,
     generate_communal_reference,
     is_valid_reference_format,
     list_public_defining_zones,
+    list_zones_shared_into_network,
     normalize_reference_id,
+    register_communal_id,
     resolution_to_response_payload as communal_resolution_to_response_payload,
-    resolve_communal_id_for_owner,
     resolve_communal_reference,
     zone_eligible_for_communal_assignment,
 )
@@ -218,6 +221,7 @@ class ZoneContractResponse(BaseModel):
     geometry: dict[str, Any]
     config: dict[str, Any]
     is_primary: bool = False
+    shared_via_communal: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     evicted_zones: Optional[list[EvictedZoneInfoResponse]] = None
@@ -314,9 +318,23 @@ class ZoneReferenceValidateResponse(BaseModel):
 
 class ZoneReferenceGenerateRequest(BaseModel):
     zone_type: str = Field(default="communal_id")
+    reference_id: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Optional Communal ID to register. When omitted, a new unique ID is minted.",
+    )
+    persist: bool = Field(
+        default=True,
+        description=(
+            "When true, register the ID for this admin's network. "
+            "When false, only mint a unique candidate without saving."
+        ),
+    )
 
     model_config = ConfigDict(
-        json_schema_extra={"example": {"zone_type": "communal_id"}}
+        json_schema_extra={
+            "example": {"zone_type": "communal_id", "persist": True}
+        }
     )
 
 
@@ -539,14 +557,14 @@ def _validate_zone_payload(zone_type: str, geometry: dict[str, Any], config: dic
         return
 
     if zone_type in {"communal_id", "custom_1"}:
-        communal_id = config.get("communal_id")
-        if not isinstance(communal_id, str) or not communal_id.strip():
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="communal_id requires non-empty config.communal_id",
-            )
-        # Communal mode does not define geometry — membership is via shared ID.
-        return
+        # Communal is validate/generate only — zone rows of this type are rejected.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Communal does not create a zone. Generate or validate a Communal ID, "
+                "then attach it when creating a primary zone."
+            ),
+        )
 
     if zone_type in {"government_local_code", "custom_2"}:
         local_code = config.get("local_code")
@@ -662,6 +680,7 @@ def _serialize_zone(
     *,
     db: Session | None = None,
     owners_by_id: dict[int, Owner] | None = None,
+    shared_via_communal: bool = False,
 ) -> dict[str, Any]:
     params = zone.parameters if isinstance(zone.parameters, dict) else {}
     geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
@@ -703,19 +722,58 @@ def _serialize_zone(
         "geometry": geometry if isinstance(geometry, dict) else {},
         "config": config if isinstance(config, dict) else {},
         "is_primary": zone_is_primary(zone),
+        "shared_via_communal": bool(shared_via_communal),
         "created_at": zone.created_at.isoformat() if zone.created_at else None,
         "updated_at": zone.updated_at.isoformat() if zone.updated_at else None,
     }
 
 
-def _serialize_zones(db: Session, zones: list[Zone]) -> list[dict[str, Any]]:
+def _serialize_zones(
+    db: Session,
+    zones: list[Zone],
+    *,
+    shared_ids: set[int] | None = None,
+) -> list[dict[str, Any]]:
     owner_ids: set[int] = set()
     for zone in zones:
         owner_ids.add(int(zone.owner_id))
         if zone.creator_id is not None:
             owner_ids.add(int(zone.creator_id))
     owners = _owners_by_ids(db, owner_ids)
-    return [_serialize_zone(zone, owners_by_id=owners) for zone in zones]
+    marked = shared_ids or set()
+    return [
+        _serialize_zone(
+            zone,
+            owners_by_id=owners,
+            shared_via_communal=int(zone.id) in marked,
+        )
+        for zone in zones
+    ]
+
+
+def _merge_communal_shared_zones(
+    db: Session,
+    caller: Owner,
+    zones: list[Zone],
+) -> tuple[list[Zone], set[int]]:
+    """Append zones shared into this network via Communal IDs it owns."""
+    if is_system_administrator(caller):
+        return zones, set()
+    shared = list_zones_shared_into_network(db, caller)
+    if not shared:
+        return zones, set()
+    seen = {int(z.id) for z in zones}
+    shared_ids: set[int] = set()
+    merged = list(zones)
+    for zone in shared:
+        zid = int(zone.id)
+        if zid in seen:
+            # Already visible as a normal network zone — not "shared-in".
+            continue
+        seen.add(zid)
+        shared_ids.add(zid)
+        merged.append(zone)
+    return merged, shared_ids
 
 
 @router.post(
@@ -787,20 +845,14 @@ async def create_zone(
     config = dict(normalized.get("config", {}) or {})
     zone_type = normalized["type"]
 
-    # Individuals always use their assigned Communal ID (cannot mint or pick another).
-    assign_owner_communal_id(db, owner)
-    from app.services.account_type_policy import is_individual_account_type
-
-    if is_individual_account_type(owner.account_type):
-        assigned = resolve_communal_id_for_owner(owner, config.get("communal_id"))
-        if zone_type in {"communal_id", "custom_1"}:
-            config["communal_id"] = assigned
-        elif config.get("communal_id") is not None or config.get("communalId") is not None:
-            config["communal_id"] = assigned
-            config.pop("communalId", None)
-        else:
-            # Defining zones for Individuals automatically carry their Communal ID.
-            config["communal_id"] = assigned
+    requested_communal_ids = extract_communal_ids_from_config(config)
+    validated_communal_ids = assert_communal_ids_attachable(
+        db,
+        owner,
+        requested_communal_ids,
+        is_primary=bool(is_primary),
+    )
+    config = apply_communal_ids_to_config(config, validated_communal_ids)
 
     normalized_name = normalize_zone_name(normalized["name"])
     ensure_unique_zone_name(db, account_owner_ids, normalized_name)
@@ -821,7 +873,7 @@ async def create_zone(
     h3_cells = _extract_h3_cells(config)
     geo_fence_polygon = _extract_geo_fence_polygon(geometry)
 
-    # Defining zones are public by default so Communal mode can list them.
+    # Defining zones are public by default so they can be shared via Communal IDs.
     if zone_type not in {"communal_id", "custom_1"}:
         if "is_public" not in config and "isPublic" not in config:
             config = dict(config)
@@ -923,9 +975,10 @@ async def list_zones(
                 for zone in zones
                 if zone_is_primary(zone) or int(zone.creator_id) == int(caller.id)
             ]
+        zones, shared_ids = _merge_communal_shared_zones(db, caller, zones)
         return [
             ZoneContractResponse.model_validate(row)
-            for row in _serialize_zones(db, zones)
+            for row in _serialize_zones(db, zones, shared_ids=shared_ids)
         ]
 
     if owner_id is not None and owner_id not in allowed_ids:
@@ -949,12 +1002,13 @@ async def list_zones(
             if zone_is_primary(zone) or int(zone.creator_id) == int(caller.id)
         ]
 
-    # Map/list stay network-scoped (system admin already sees all accounts).
-    # Communal selection uses GET /zones/public (network primary zones only).
+    # Network-scoped zones plus any zones shared into this network via Communal
+    # IDs minted by this network's administrators (not counted toward quota).
+    zones, shared_ids = _merge_communal_shared_zones(db, caller, zones)
 
     return [
         ZoneContractResponse.model_validate(row)
-        for row in _serialize_zones(db, zones)
+        for row in _serialize_zones(db, zones, shared_ids=shared_ids)
     ]
 
 
@@ -1281,8 +1335,12 @@ async def validate_zone_reference(
 @router.post(
     "/generate-reference",
     response_model=ZoneReferenceValidateResponse,
-    summary="Generate a new communal reference ID",
-    description="Type 2: server generates a communal ID and resolvable preview geometry.",
+    summary="Generate or register a communal reference ID",
+    description=(
+        "Type 2: mint and/or register a public Communal ID for the admin's network. "
+        "Use persist=false to preview a unique ID; Save with persist=true (or a "
+        "reference_id) to register it."
+    ),
 )
 async def generate_zone_reference(
     body: ZoneReferenceGenerateRequest,
@@ -1303,7 +1361,49 @@ async def generate_zone_reference(
     assert_may_generate_communal_id(owner)
 
     owner_ids = account_owner_ids_for_policy(db, owner)
+    requested = normalize_reference_id(body.reference_id or "")
+    if requested:
+        if not is_valid_reference_format(requested):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Communal ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
+            )
+        registered = register_communal_id(db, owner, requested)
+        db.commit()
+        resolution = {
+            "valid": True,
+            "zone_type": "communal_id",
+            "reference_id": registered,
+            "display_name": registered,
+            "geometry": {},
+            "config": {"communal_id": registered, "communal_ids": [registered]},
+            "h3_cells": [],
+            "source": "generated",
+            "exists": True,
+            "message": f"Saved Communal ID {registered}.",
+            "zones": [],
+        }
+        payload = communal_resolution_to_response_payload(resolution)
+        payload["zones"] = []
+        return ZoneReferenceValidateResponse.model_validate(payload)
+
     resolution = generate_communal_reference(db, owner_ids)
+    reference_id = normalize_reference_id(resolution.get("reference_id") or "")
+    if body.persist:
+        registered = register_communal_id(db, owner, reference_id)
+        db.commit()
+        resolution["reference_id"] = registered
+        resolution["config"] = {
+            "communal_id": registered,
+            "communal_ids": [registered],
+        }
+        resolution["exists"] = True
+        resolution["message"] = f"Generated new Communal ID {registered}."
+    else:
+        resolution["exists"] = False
+        resolution["message"] = (
+            f"Candidate Communal ID {reference_id}. Tap Save to register it."
+        )
     payload = communal_resolution_to_response_payload(resolution)
     payload["zones"] = []
     return ZoneReferenceValidateResponse.model_validate(payload)
@@ -1340,11 +1440,10 @@ async def list_public_zones(
 @router.post(
     "/assign-communal",
     response_model=AssignCommunalResponse,
-    summary="Assign Communal ID to selected zones",
+    summary="Assign Communal ID to selected primary zones (admin)",
     description=(
-        "Set config.communal_id on one or more network primary zones "
-        "(or an Individual's own defining zones). Used by Communal mode after "
-        "selecting zones from GET /zones/public."
+        "Add a registered Communal ID onto one or more primary zones the admin "
+        "may edit. Prefer attaching communal_ids when creating a primary zone."
     ),
 )
 async def assign_communal_to_zones(
@@ -1356,14 +1455,16 @@ async def assign_communal_to_zones(
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
 
-    # Individuals may only assign their server-issued Communal ID.
-    assign_owner_communal_id(db, owner)
-    reference_id = resolve_communal_id_for_owner(owner, body.communal_id)
+    assert_may_generate_communal_id(owner)
+    reference_id = normalize_reference_id(body.communal_id)
     if not is_valid_reference_format(reference_id):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Communal ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
         )
+    assert_communal_ids_attachable(
+        db, owner, [reference_id], is_primary=True
+    )
 
     account_owner_ids = None
     if not is_system_administrator(owner):
@@ -1529,13 +1630,17 @@ async def update_zone(
         "config": dict(normalized.get("config", current["config"]) or {}),
     }
 
-    assign_owner_communal_id(db, owner)
-    from app.services.account_type_policy import is_individual_account_type
-
-    if is_individual_account_type(owner.account_type):
-        assigned = resolve_communal_id_for_owner(owner, merged["config"].get("communal_id"))
-        merged["config"]["communal_id"] = assigned
-        merged["config"].pop("communalId", None)
+    merged_primary = zone_is_primary(target_zone)
+    requested_communal_ids = extract_communal_ids_from_config(merged["config"])
+    config_patch = normalized.get("config") or {}
+    if requested_communal_ids or "communal_id" in config_patch or "communal_ids" in config_patch:
+        validated = assert_communal_ids_attachable(
+            db,
+            owner,
+            requested_communal_ids,
+            is_primary=bool(merged_primary),
+        )
+        merged["config"] = apply_communal_ids_to_config(merged["config"], validated)
 
     normalized_name = normalize_zone_name(merged["name"])
     zone_owner = owner_crud.get_owner(db, target_zone.owner_id)

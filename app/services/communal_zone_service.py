@@ -1,7 +1,12 @@
-"""Communal ID lookup, generation, and public-zone helpers.
+"""Communal ID registry, multi-ID tagging, and cross-network sharing helpers.
 
-Communal IDs group defining zones (geofence, grid, proximity, dynamic,
-government_local_code, object). Communal mode itself does not define geometry.
+Communal IDs are public codes minted by network administrators. Primary zones
+may attach one or more IDs. Zones tagged with an ID become visible to every
+member of the ID creator's network without counting toward that network's
+zone quota.
+
+The Communal zone type itself does not draw geometry — it only validates and
+generates IDs.
 """
 from __future__ import annotations
 
@@ -74,12 +79,47 @@ def zone_contract_type(zone: Zone) -> str:
     return str(model).strip().lower()
 
 
-def get_communal_id(zone: Zone) -> Optional[str]:
+def _coerce_id_list(raw: Any) -> list[str]:
+    if isinstance(raw, str) and raw.strip():
+        return [normalize_reference_id(raw)]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        normalized = normalize_reference_id(item)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def get_communal_ids(zone: Zone) -> list[str]:
+    """Return all Communal IDs attached to a zone (multi + legacy single)."""
     config = zone_config(zone)
-    stored = config.get("communal_id") or config.get("communalId")
-    if not isinstance(stored, str) or not stored.strip():
-        return None
-    return normalize_reference_id(stored)
+    ids = _coerce_id_list(config.get("communal_ids") or config.get("communalIds"))
+    legacy = config.get("communal_id") or config.get("communalId")
+    if isinstance(legacy, str) and legacy.strip():
+        normalized = normalize_reference_id(legacy)
+        if normalized and normalized not in ids:
+            ids.append(normalized)
+    return ids
+
+
+def get_communal_id(zone: Zone) -> Optional[str]:
+    """Primary/legacy single Communal ID (first of multi, if any)."""
+    ids = get_communal_ids(zone)
+    return ids[0] if ids else None
+
+
+def zone_has_communal_id(zone: Zone, reference_id: str) -> bool:
+    normalized = normalize_reference_id(reference_id)
+    if not normalized:
+        return False
+    return normalized in get_communal_ids(zone)
 
 
 def is_defining_zone(zone: Zone) -> bool:
@@ -88,7 +128,6 @@ def is_defining_zone(zone: Zone) -> bool:
         return False
     if contract in DEFINING_ZONE_TYPES:
         return True
-    # Legacy model enums that map to defining types.
     model = getattr(zone.zone_type, "value", None) or str(zone.zone_type or "")
     return model in {
         "geofence",
@@ -113,12 +152,95 @@ def is_zone_public(zone: Zone) -> bool:
     return bool(zone.active)
 
 
+def extract_communal_ids_from_config(config: dict[str, Any] | None) -> list[str]:
+    """Normalize communal_ids / communal_id from a create/update config dict."""
+    if not isinstance(config, dict):
+        return []
+    ids = _coerce_id_list(config.get("communal_ids") or config.get("communalIds"))
+    legacy = config.get("communal_id") or config.get("communalId")
+    if isinstance(legacy, str) and legacy.strip():
+        normalized = normalize_reference_id(legacy)
+        if normalized and normalized not in ids:
+            ids.append(normalized)
+    return [cid for cid in ids if is_valid_reference_format(cid)]
+
+
+def apply_communal_ids_to_config(
+    config: dict[str, Any],
+    communal_ids: list[str],
+) -> dict[str, Any]:
+    """Write multi + legacy single fields; clear when empty."""
+    out = dict(config)
+    out.pop("communalId", None)
+    out.pop("communalIds", None)
+    cleaned = [
+        normalize_reference_id(cid)
+        for cid in communal_ids
+        if is_valid_reference_format(cid)
+    ]
+    # Dedupe preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for cid in cleaned:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        unique.append(cid)
+    if unique:
+        out["communal_ids"] = unique
+        out["communal_id"] = unique[0]
+    else:
+        out.pop("communal_ids", None)
+        out.pop("communal_id", None)
+    return out
+
+
+def registry_communal_id_taken(db: Session, reference_id: str) -> bool:
+    from app.models import CommunalIdRegistry
+
+    normalized = normalize_reference_id(reference_id)
+    if not normalized or db is None:
+        return False
+    return (
+        db.query(CommunalIdRegistry.id)
+        .filter(CommunalIdRegistry.reference_id == normalized)
+        .first()
+        is not None
+    )
+
+
+def get_registry_entry(db: Session, reference_id: str):
+    from app.models import CommunalIdRegistry
+
+    normalized = normalize_reference_id(reference_id)
+    if not normalized or db is None:
+        return None
+    return (
+        db.query(CommunalIdRegistry)
+        .filter(CommunalIdRegistry.reference_id == normalized)
+        .first()
+    )
+
+
+def list_registry_ids_for_network(db: Session, network_id: str) -> list[str]:
+    from app.models import CommunalIdRegistry
+
+    network = str(network_id or "").strip()
+    if not network or db is None:
+        return []
+    rows = (
+        db.query(CommunalIdRegistry.reference_id)
+        .filter(CommunalIdRegistry.network_id == network)
+        .all()
+    )
+    return [normalize_reference_id(row[0]) for row in rows if row and row[0]]
+
+
 def zone_communal_id_taken(db: Session, reference_id: str) -> bool:
     """True when any active zone config already stores this Communal ID."""
     normalized = normalize_reference_id(reference_id)
     if not normalized or db is None:
         return False
-    # Select only id + parameters to avoid PostGIS geometry (AsEWKB) on SQLite.
     rows = (
         db.query(Zone.id, Zone.parameters)
         .filter(Zone.active.is_(True))
@@ -127,8 +249,11 @@ def zone_communal_id_taken(db: Session, reference_id: str) -> bool:
     for _, parameters in rows:
         params = parameters if isinstance(parameters, dict) else {}
         config = params.get("config") if isinstance(params.get("config"), dict) else {}
-        stored = config.get("communal_id") or config.get("communalId")
-        if isinstance(stored, str) and normalize_reference_id(stored) == normalized:
+        ids = _coerce_id_list(config.get("communal_ids") or config.get("communalIds"))
+        legacy = config.get("communal_id") or config.get("communalId")
+        if isinstance(legacy, str) and legacy.strip():
+            ids.append(normalize_reference_id(legacy))
+        if normalized in ids:
             return True
     return False
 
@@ -146,8 +271,11 @@ def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:
     for zone_id, parameters in rows:
         params = parameters if isinstance(parameters, dict) else {}
         config = params.get("config") if isinstance(params.get("config"), dict) else {}
-        stored = config.get("communal_id") or config.get("communalId")
-        if isinstance(stored, str) and normalize_reference_id(stored) == normalized:
+        ids = _coerce_id_list(config.get("communal_ids") or config.get("communalIds"))
+        legacy = config.get("communal_id") or config.get("communalId")
+        if isinstance(legacy, str) and legacy.strip():
+            ids.append(normalize_reference_id(legacy))
+        if normalized in ids:
             matched_ids.append(int(zone_id))
     if not matched_ids:
         return []
@@ -158,13 +286,60 @@ def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:
             .all()
         )
     except Exception:
-        # SQLite / missing spatial functions: return lightweight stand-ins unused
-        # by uniqueness checks (callers that need geometry use Postgres).
         return []
 
 
+def find_zones_by_communal_ids(db: Session, reference_ids: list[str]) -> list[Zone]:
+    wanted = {
+        normalize_reference_id(cid)
+        for cid in reference_ids
+        if is_valid_reference_format(cid)
+    }
+    if not wanted or db is None:
+        return []
+    rows = (
+        db.query(Zone.id, Zone.parameters)
+        .filter(Zone.active.is_(True))
+        .all()
+    )
+    matched_ids: list[int] = []
+    for zone_id, parameters in rows:
+        params = parameters if isinstance(parameters, dict) else {}
+        config = params.get("config") if isinstance(params.get("config"), dict) else {}
+        ids = set(_coerce_id_list(config.get("communal_ids") or config.get("communalIds")))
+        legacy = config.get("communal_id") or config.get("communalId")
+        if isinstance(legacy, str) and legacy.strip():
+            ids.add(normalize_reference_id(legacy))
+        if ids & wanted:
+            matched_ids.append(int(zone_id))
+    if not matched_ids:
+        return []
+    try:
+        return (
+            db.query(Zone)
+            .filter(Zone.id.in_(tuple(matched_ids)))
+            .all()
+        )
+    except Exception:
+        return []
+
+
+def list_zones_shared_into_network(db: Session, owner) -> list[Zone]:
+    """Zones tagged with Communal IDs minted by this network's admins.
+
+    Visible to all network members; callers should not count these toward quota.
+    """
+    network = caller_network_id(owner)
+    if not network:
+        return []
+    registry_ids = list_registry_ids_for_network(db, network)
+    if not registry_ids:
+        return []
+    return find_zones_by_communal_ids(db, registry_ids)
+
+
 def owner_communal_id_taken(db: Session, reference_id: str) -> bool:
-    """True when another owner already holds this assigned Communal ID."""
+    """True when another owner already holds this legacy assigned Communal ID."""
     from app.models import Owner
 
     normalized = normalize_reference_id(reference_id)
@@ -179,7 +354,7 @@ def owner_communal_id_taken(db: Session, reference_id: str) -> bool:
 
 
 def qr_invite_communal_id_taken(db: Session, reference_id: str) -> bool:
-    """True when a member-invite QR already reserved this Communal ID."""
+    """True when a member-invite QR already reserved this Communal ID (legacy)."""
     from app.models import QRRegistration
 
     normalized = normalize_reference_id(reference_id)
@@ -194,24 +369,19 @@ def qr_invite_communal_id_taken(db: Session, reference_id: str) -> bool:
 
 
 def communal_id_exists(db: Session, reference_id: str) -> bool:
-    """True when the ID is used on a zone, owner, or pending/used QR invite."""
+    """True when the ID is registered, used on a zone, or held on legacy owner/QR."""
     return (
-        zone_communal_id_taken(db, reference_id)
+        registry_communal_id_taken(db, reference_id)
+        or zone_communal_id_taken(db, reference_id)
         or owner_communal_id_taken(db, reference_id)
         or qr_invite_communal_id_taken(db, reference_id)
     )
 
 
 def mint_invite_communal_id(db: Session) -> str:
-    """Mint a unique Communal ID reserved for a member-invite QR."""
-    for _ in range(32):
-        candidate = generate_unique_communal_id(db)
-        if qr_invite_communal_id_taken(db, candidate):
-            continue
-        if owner_communal_id_taken(db, candidate):
-            continue
-        return candidate
-    return f"COMM-{secrets.token_hex(4).upper()}"
+    """Deprecated — invites no longer mint Communal IDs. Returns empty string."""
+    del db
+    return ""
 
 
 def zone_network_id(zone: Zone) -> str:
@@ -230,43 +400,34 @@ def zone_eligible_for_communal_assignment(
 ) -> bool:
     """True when the caller may attach a Communal ID to this defining zone.
 
-    Network admins and members may only use **primary** zones owned within their
-    account (same visibility scope as GET /zones). Solo Individual accounts (no
-    primary tier) may use defining zones they created. System administrators may
-    use any public defining zone.
+    Only network / system administrators may stamp IDs, and only onto **primary**
+    defining zones. System administrators may use any public defining primary.
     """
-    from app.services.account_type_policy import (
-        is_individual_account_type,
-        is_system_administrator,
-    )
-    from app.services.zone_policy import owner_is_invited_member, zone_is_primary
+    from app.services.account_type_policy import is_system_administrator
+    from app.services.zone_policy import zone_is_primary
+    from app.models.owner import OwnerRole
 
     if not is_zone_public(zone):
         return False
+    if not zone_is_primary(zone):
+        return False
+
+    role = getattr(getattr(owner, "role", None), "value", None) or str(
+        getattr(owner, "role", "") or ""
+    )
     if is_system_administrator(owner):
         return True
+    if str(role).strip().lower() != OwnerRole.ADMINISTRATOR.value:
+        return False
 
     if account_owner_ids is not None:
         allowed = {int(oid) for oid in account_owner_ids}
-        if int(getattr(zone, "owner_id", 0) or 0) not in allowed:
-            return False
-    else:
-        # Fallback when caller did not pass account scope: shared network id.
-        network = caller_network_id(owner)
-        if not network or zone_network_id(zone) != network:
-            return False
+        return int(getattr(zone, "owner_id", 0) or 0) in allowed
 
-    if zone_is_primary(zone):
-        return True
-
-    # Solo Individuals never create primary zones — allow their own defining zones.
-    # Invited members (also Individual account type) stay primary-only.
-    if is_individual_account_type(getattr(owner, "account_type", None)) and not owner_is_invited_member(
-        owner
-    ):
-        return int(getattr(zone, "creator_id", 0) or 0) == int(owner.id)
-
-    return False
+    network = caller_network_id(owner)
+    if not network or zone_network_id(zone) != network:
+        return False
+    return True
 
 
 def list_public_defining_zones(
@@ -276,12 +437,7 @@ def list_public_defining_zones(
     skip: int = 0,
     limit: int = 200,
 ) -> list[Zone]:
-    """List defining zones eligible for Communal ID selection.
-
-    Uses the same account owner scope as GET /zones, then keeps primary defining
-    zones (or a Solo Individual's own defining zones). System administrators see
-    all public defining zones.
-    """
+    """List primary defining zones in the caller's account (legacy picker)."""
     if db is None:
         return []
 
@@ -320,82 +476,151 @@ def generate_unique_communal_id(db: Session | None = None) -> str:
     return f"COMM-{secrets.token_hex(4).upper()}"
 
 
-def assign_owner_communal_id(db: Session, owner) -> str:
-    """Ensure an Individual (exclusive) owner has a unique assigned Communal ID.
+def register_communal_id(db: Session, owner, reference_id: str | None = None) -> str:
+    """Persist a public Communal ID owned by this admin's network."""
+    from app.models import CommunalIdRegistry
 
-    Returns the owner's communal_id. Non-Individual owners are left unchanged
-    (returns empty string when none is set).
-    """
-    from app.services.account_type_policy import is_individual_account_type
+    normalized = normalize_reference_id(reference_id or "")
+    if not normalized:
+        normalized = generate_unique_communal_id(db)
+    if not is_valid_reference_format(normalized):
+        from fastapi import HTTPException, status
 
-    existing = normalize_reference_id(getattr(owner, "communal_id", None) or "")
-    if existing:
-        return existing
-    if not is_individual_account_type(getattr(owner, "account_type", None)):
-        return ""
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Communal ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
+        )
+    if communal_id_exists(db, normalized):
+        from fastapi import HTTPException, status
 
-    for _ in range(32):
-        candidate = generate_unique_communal_id(db)
-        # generate_unique_communal_id already checks zones+owners; still skip
-        # collisions against this owner's pending row if any.
-        if owner_communal_id_taken(db, candidate):
-            continue
-        owner.communal_id = candidate
-        db.flush()
-        return candidate
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Communal ID {normalized} already exists.",
+        )
 
-    fallback = f"COMM-{secrets.token_hex(4).upper()}"
-    owner.communal_id = fallback
+    network = caller_network_id(owner)
+    if not network:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Administrator network id is required to mint a Communal ID.",
+        )
+
+    row = CommunalIdRegistry(
+        reference_id=normalized,
+        creator_id=int(owner.id),
+        network_id=network,
+    )
+    db.add(row)
     db.flush()
-    return fallback
+    return normalized
+
+
+def assign_owner_communal_id(db: Session, owner) -> str:
+    """No-op: Individuals/members are no longer issued Communal IDs.
+
+    Returns any legacy value already stored on the owner, otherwise "".
+    """
+    del db
+    return normalize_reference_id(getattr(owner, "communal_id", None) or "")
 
 
 def assert_may_generate_communal_id(owner) -> None:
-    """Individuals cannot mint new Communal IDs — only admins of other tiers."""
+    """Only network / system administrators may mint Communal IDs."""
     from fastapi import HTTPException, status
 
+    from app.models.owner import OwnerRole
     from app.services.account_type_policy import is_individual_account_type
+
+    role = getattr(getattr(owner, "role", None), "value", None) or str(
+        getattr(owner, "role", "") or ""
+    )
+    if str(role).strip().lower() != OwnerRole.ADMINISTRATOR.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only network administrators can generate Communal IDs.",
+        )
+    if is_individual_account_type(getattr(owner, "account_type", None)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Individual accounts cannot generate Communal IDs.",
+        )
+
+
+def assert_may_use_communal_tools(owner) -> None:
+    """Members and Individuals cannot use Communal validate/generate tools."""
+    assert_may_generate_communal_id(owner)
+
+
+def resolve_communal_id_for_owner(owner, requested: str | None) -> str:
+    """Return a requested Communal ID for admins; Individuals may not attach IDs."""
+    from fastapi import HTTPException, status
+
+    from app.models.owner import OwnerRole
+    from app.services.account_type_policy import is_individual_account_type
+
+    requested_norm = normalize_reference_id(requested or "")
 
     if is_individual_account_type(getattr(owner, "account_type", None)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Individual accounts cannot generate Communal IDs. "
-                "Use the Communal ID assigned to your account."
-            ),
+            detail="Individual accounts cannot attach Communal IDs to zones.",
         )
 
-
-def resolve_communal_id_for_owner(owner, requested: str | None) -> str:
-    """Return the Communal ID an owner may apply to zones.
-
-    Individuals are locked to their assigned ID. Other tiers may use the
-    requested value (validated by the caller).
-    """
-    from fastapi import HTTPException, status
-
-    from app.services.account_type_policy import is_individual_account_type
-
-    assigned = normalize_reference_id(getattr(owner, "communal_id", None) or "")
-    requested_norm = normalize_reference_id(requested or "")
-
-    if is_individual_account_type(getattr(owner, "account_type", None)):
-        if not assigned:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Individual account is missing an assigned Communal ID.",
-            )
-        if requested_norm and requested_norm != assigned:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "Individual accounts can only use their assigned Communal ID "
-                    f"({assigned})."
-                ),
-            )
-        return assigned
+    role = getattr(getattr(owner, "role", None), "value", None) or str(
+        getattr(owner, "role", "") or ""
+    )
+    if str(role).strip().lower() != OwnerRole.ADMINISTRATOR.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only network administrators can attach Communal IDs to zones.",
+        )
 
     return requested_norm
+
+
+def assert_communal_ids_attachable(
+    db: Session,
+    owner,
+    communal_ids: list[str],
+    *,
+    is_primary: bool,
+) -> list[str]:
+    """Validate that primary-zone Communal IDs exist in the public registry."""
+    from fastapi import HTTPException, status
+
+    cleaned = [
+        normalize_reference_id(cid)
+        for cid in communal_ids
+        if is_valid_reference_format(cid)
+    ]
+    if not cleaned:
+        return []
+    if not is_primary:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Communal IDs can only be attached to primary zones.",
+        )
+    # Ensure caller is an admin (raises for individuals/members).
+    resolve_communal_id_for_owner(owner, cleaned[0])
+
+    missing: list[str] = []
+    for cid in cleaned:
+        if not (
+            registry_communal_id_taken(db, cid) or zone_communal_id_taken(db, cid)
+        ):
+            missing.append(cid)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Unknown Communal ID(s): "
+                + ", ".join(missing)
+                + ". Validate or generate them first."
+            ),
+        )
+    return cleaned
 
 
 def assign_communal_id(
@@ -404,11 +629,37 @@ def assign_communal_id(
     *,
     is_public: bool | None = None,
 ) -> dict[str, Any]:
-    """Mutate zone parameters to set communal_id; returns updated config."""
+    """Add a Communal ID to a zone (keeps existing multi-IDs)."""
     normalized = normalize_reference_id(reference_id)
     params = dict(zone_parameters(zone))
     config = dict(params.get("config") if isinstance(params.get("config"), dict) else {})
-    config["communal_id"] = normalized
+    existing = get_communal_ids(zone)
+    if normalized not in existing:
+        existing.append(normalized)
+    config = apply_communal_ids_to_config(config, existing)
+    if is_public is not None:
+        config["is_public"] = bool(is_public)
+    elif "is_public" not in config and "isPublic" not in config:
+        config["is_public"] = True
+    params["config"] = config
+    if "contractType" not in params:
+        params["contractType"] = zone_contract_type(zone) or "geofence"
+    if "geometry" not in params:
+        params["geometry"] = {}
+    zone.parameters = params
+    return config
+
+
+def assign_communal_ids(
+    zone: Zone,
+    reference_ids: list[str],
+    *,
+    is_public: bool | None = None,
+) -> dict[str, Any]:
+    """Replace the zone's Communal ID list."""
+    params = dict(zone_parameters(zone))
+    config = dict(params.get("config") if isinstance(params.get("config"), dict) else {})
+    config = apply_communal_ids_to_config(config, reference_ids)
     if is_public is not None:
         config["is_public"] = bool(is_public)
     elif "is_public" not in config and "isPublic" not in config:
@@ -425,8 +676,8 @@ def assign_communal_id(
 # --- Backward-compatible aliases used by older imports / tests -----------------
 
 def generate_communal_reference(db: Session | None, owner_ids: list[int] | None = None):
-    """Generate a unique communal ID (no geometry)."""
-    del owner_ids  # unused — IDs are globally unique across the DB
+    """Generate a unique communal ID (no geometry). Does not persist — caller registers."""
+    del owner_ids
     reference_id = generate_unique_communal_id(db)
     return {
         "valid": True,
@@ -434,10 +685,10 @@ def generate_communal_reference(db: Session | None, owner_ids: list[int] | None 
         "reference_id": reference_id,
         "display_name": reference_id,
         "geometry": {},
-        "config": {"communal_id": reference_id},
+        "config": {"communal_id": reference_id, "communal_ids": [reference_id]},
         "h3_cells": [],
         "source": "generated",
-        "exists": False,
+        "exists": True,
         "message": f"Generated new Communal ID {reference_id}.",
         "zones": [],
     }
@@ -448,7 +699,7 @@ def resolve_communal_reference(
     owner_ids: list[int] | None,
     reference_id: str,
 ) -> Optional[dict[str, Any]]:
-    """Existence check for a communal ID (no invented geometry)."""
+    """Existence check for a communal ID (registry and/or zones)."""
     del owner_ids
     normalized = normalize_reference_id(reference_id)
     if not is_valid_reference_format(normalized):
@@ -468,22 +719,28 @@ def resolve_communal_reference(
             "zones": [],
         }
     matched = find_zones_by_communal_id(db, normalized)
-    exists = bool(matched)
+    registered = registry_communal_id_taken(db, normalized)
+    exists = bool(matched) or registered
+    if matched:
+        message = f"Communal ID found on {len(matched)} zone(s)."
+    elif registered:
+        message = "Communal ID is registered and ready to attach to primary zones."
+    else:
+        message = "Communal ID not found. You can generate a new one."
     return {
         "valid": exists,
         "zone_type": "communal_id",
         "reference_id": normalized,
-        "display_name": matched[0].name if matched else None,
+        "display_name": matched[0].name if matched else normalized,
         "geometry": {},
-        "config": {"communal_id": normalized},
+        "config": {
+            "communal_id": normalized,
+            "communal_ids": [normalized],
+        },
         "h3_cells": [],
         "source": "database",
         "exists": exists,
-        "message": (
-            f"Communal ID found on {len(matched)} zone(s)."
-            if exists
-            else "Communal ID not found. You can generate a new one."
-        ),
+        "message": message,
         "zones": matched,
     }
 

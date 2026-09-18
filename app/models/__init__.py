@@ -2,6 +2,7 @@
 from app.models.owner import Owner
 from app.models.device import Device
 from app.models.zone import Zone
+from app.models.communal_id import CommunalIdRegistry
 from app.models.qr_registration import QRRegistration
 from app.models.registration_code import RegistrationCode
 from app.models.message import Message
@@ -26,6 +27,7 @@ __all__ = [
     "Owner",
     "Device",
     "Zone",
+    "CommunalIdRegistry",
     "QRRegistration",
     "RegistrationCode",
     "Message",
