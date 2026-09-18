@@ -326,6 +326,30 @@ def get_zone_by_record_id_with_geojson(db: Session, record_id: int) -> Optional[
     return zone
 
 
+def list_zones_by_record_ids_with_geojson(
+    db: Session,
+    record_ids: Sequence[int],
+    *,
+    active_only: bool = True,
+) -> List[Zone]:
+    """Load zones by primary key with GeoJSON polygons (deduped, stable order)."""
+    unique_ids = list(dict.fromkeys(int(zid) for zid in record_ids if zid is not None))
+    if not unique_ids:
+        return []
+    query = select(
+        Zone,
+        func.ST_AsGeoJSON(Zone.geo_fence_polygon).label("geo_fence_polygon"),
+    ).where(Zone.id.in_(tuple(unique_ids)))
+    if active_only:
+        query = query.where(Zone.active == True)
+    result = db.execute(query).all()
+    by_id: dict[int, Zone] = {}
+    for zone, geojson_text in result:
+        apply_zone_geo_fence_geojson(zone, geojson_text)
+        by_id[int(zone.id)] = zone
+    return [by_id[zid] for zid in unique_ids if zid in by_id]
+
+
 def delete_zone(db: Session, zone_id: str, owner_id: Optional[int] = None) -> bool:
     """Soft-delete a zone (active=False). Create quota no longer counts the row."""
     from app.services.zone_policy import soft_delete_zone

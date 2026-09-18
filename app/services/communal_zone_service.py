@@ -290,9 +290,17 @@ def list_public_communal_ids(db: Session, owner=None) -> list[dict[str, Any]]:
     return out
 
 
-# Back-compat alias used by older call sites / tests.
+# Back-compat: network-scoped list for the zones sidebar.
 def list_network_communal_ids(db: Session, owner) -> list[dict[str, Any]]:
-    return list_public_communal_ids(db, owner)
+    """Communal IDs minted for the caller's network only."""
+    network = caller_network_id(owner)
+    if not network:
+        return []
+    return [
+        row
+        for row in list_public_communal_ids(db, owner)
+        if str(row.get("network_id") or "").strip() == network
+    ]
 
 
 def zone_communal_id_taken(db: Session, reference_id: str) -> bool:
@@ -318,6 +326,8 @@ def zone_communal_id_taken(db: Session, reference_id: str) -> bool:
 
 
 def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:
+    from app.crud import zone as zone_crud
+
     normalized = normalize_reference_id(reference_id)
     if not normalized or db is None:
         return []
@@ -339,16 +349,15 @@ def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:
     if not matched_ids:
         return []
     try:
-        return (
-            db.query(Zone)
-            .filter(Zone.id.in_(tuple(matched_ids)))
-            .all()
-        )
+        return zone_crud.list_zones_by_record_ids_with_geojson(db, matched_ids)
     except Exception:
         return []
 
 
 def find_zones_by_communal_ids(db: Session, reference_ids: list[str]) -> list[Zone]:
+    """Zones tagged with any of the given Communal IDs (unique by zone id)."""
+    from app.crud import zone as zone_crud
+
     wanted = {
         normalize_reference_id(cid)
         for cid in reference_ids
@@ -362,6 +371,7 @@ def find_zones_by_communal_ids(db: Session, reference_ids: list[str]) -> list[Zo
         .all()
     )
     matched_ids: list[int] = []
+    seen: set[int] = set()
     for zone_id, parameters in rows:
         params = parameters if isinstance(parameters, dict) else {}
         config = params.get("config") if isinstance(params.get("config"), dict) else {}
@@ -369,16 +379,17 @@ def find_zones_by_communal_ids(db: Session, reference_ids: list[str]) -> list[Zo
         legacy = config.get("communal_id") or config.get("communalId")
         if isinstance(legacy, str) and legacy.strip():
             ids.add(normalize_reference_id(legacy))
-        if ids & wanted:
-            matched_ids.append(int(zone_id))
+        if not (ids & wanted):
+            continue
+        zid = int(zone_id)
+        if zid in seen:
+            continue
+        seen.add(zid)
+        matched_ids.append(zid)
     if not matched_ids:
         return []
     try:
-        return (
-            db.query(Zone)
-            .filter(Zone.id.in_(tuple(matched_ids)))
-            .all()
-        )
+        return zone_crud.list_zones_by_record_ids_with_geojson(db, matched_ids)
     except Exception:
         return []
 
