@@ -236,6 +236,39 @@ def list_registry_ids_for_network(db: Session, network_id: str) -> list[str]:
     return [normalize_reference_id(row[0]) for row in rows if row and row[0]]
 
 
+def list_network_communal_ids(db: Session, owner) -> list[dict[str, Any]]:
+    """Communal IDs minted for this network, including ones with zero zones."""
+    from app.models import CommunalIdRegistry
+
+    network = caller_network_id(owner)
+    if not network or db is None:
+        return []
+    rows = (
+        db.query(CommunalIdRegistry)
+        .filter(CommunalIdRegistry.network_id == network)
+        .order_by(CommunalIdRegistry.created_at.desc(), CommunalIdRegistry.id.desc())
+        .all()
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        reference_id = normalize_reference_id(getattr(row, "reference_id", "") or "")
+        if not reference_id:
+            continue
+        matched = find_zones_by_communal_id(db, reference_id)
+        out.append(
+            {
+                "reference_id": reference_id,
+                "creator_id": int(getattr(row, "creator_id", 0) or 0) or None,
+                "network_id": network,
+                "zone_count": len(matched),
+                "created_at": (
+                    row.created_at.isoformat() if getattr(row, "created_at", None) else None
+                ),
+            }
+        )
+    return out
+
+
 def zone_communal_id_taken(db: Session, reference_id: str) -> bool:
     """True when any active zone config already stores this Communal ID."""
     normalized = normalize_reference_id(reference_id)

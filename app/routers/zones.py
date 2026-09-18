@@ -22,6 +22,7 @@ from app.services.communal_zone_service import (
     extract_communal_ids_from_config,
     generate_communal_reference,
     is_valid_reference_format,
+    list_network_communal_ids,
     list_public_defining_zones,
     list_zones_shared_into_network,
     normalize_reference_id,
@@ -314,6 +315,14 @@ class ZoneReferenceValidateResponse(BaseModel):
     message: Optional[str] = None
     exists: Optional[bool] = None
     zones: list[CommunalZoneSummary] = Field(default_factory=list)
+
+
+class CommunalIdListItem(BaseModel):
+    reference_id: str
+    creator_id: Optional[int] = None
+    network_id: str
+    zone_count: int = 0
+    created_at: Optional[str] = None
 
 
 class ZoneReferenceGenerateRequest(BaseModel):
@@ -1407,6 +1416,26 @@ async def generate_zone_reference(
     payload = communal_resolution_to_response_payload(resolution)
     payload["zones"] = []
     return ZoneReferenceValidateResponse.model_validate(payload)
+
+
+@router.get(
+    "/communal-ids",
+    response_model=list[CommunalIdListItem],
+    summary="List Communal IDs for the caller's network",
+    description=(
+        "Returns Communal IDs minted by administrators of this network, "
+        "including IDs that do not yet have any zones attached."
+    ),
+)
+async def list_communal_ids(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    rows = list_network_communal_ids(db, owner)
+    return [CommunalIdListItem.model_validate(row) for row in rows]
 
 
 @router.get(
