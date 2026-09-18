@@ -320,6 +320,7 @@ class ZoneReferenceValidateResponse(BaseModel):
 class CommunalIdListItem(BaseModel):
     reference_id: str
     creator_id: Optional[int] = None
+    creator_name: Optional[str] = None
     network_id: str
     zone_count: int = 0
     created_at: Optional[str] = None

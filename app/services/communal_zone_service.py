@@ -238,7 +238,7 @@ def list_registry_ids_for_network(db: Session, network_id: str) -> list[str]:
 
 def list_network_communal_ids(db: Session, owner) -> list[dict[str, Any]]:
     """Communal IDs minted for this network, including ones with zero zones."""
-    from app.models import CommunalIdRegistry
+    from app.models import CommunalIdRegistry, Owner
 
     network = caller_network_id(owner)
     if not network or db is None:
@@ -249,16 +249,35 @@ def list_network_communal_ids(db: Session, owner) -> list[dict[str, Any]]:
         .order_by(CommunalIdRegistry.created_at.desc(), CommunalIdRegistry.id.desc())
         .all()
     )
+    creator_ids = {
+        int(getattr(row, "creator_id", 0) or 0)
+        for row in rows
+        if getattr(row, "creator_id", None)
+    }
+    creators: dict[int, Owner] = {}
+    if creator_ids:
+        for person in db.query(Owner).filter(Owner.id.in_(tuple(creator_ids))).all():
+            creators[int(person.id)] = person
+
     out: list[dict[str, Any]] = []
     for row in rows:
         reference_id = normalize_reference_id(getattr(row, "reference_id", "") or "")
         if not reference_id:
             continue
         matched = find_zones_by_communal_id(db, reference_id)
+        creator_id = int(getattr(row, "creator_id", 0) or 0) or None
+        person = creators.get(int(creator_id)) if creator_id else None
+        if person is not None:
+            first = str(getattr(person, "first_name", "") or "").strip()
+            last = str(getattr(person, "last_name", "") or "").strip()
+            creator_name = f"{first} {last}".strip() or None
+        else:
+            creator_name = None
         out.append(
             {
                 "reference_id": reference_id,
-                "creator_id": int(getattr(row, "creator_id", 0) or 0) or None,
+                "creator_id": creator_id,
+                "creator_name": creator_name,
                 "network_id": network,
                 "zone_count": len(matched),
                 "created_at": (
