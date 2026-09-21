@@ -39,7 +39,7 @@ USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE: dict[str, int | None] = {
     "private": None,
     "exclusive": 1,
     "private_plus": 10,  # Family
-    "enhanced": 1,
+    "enhanced": 2,  # Individual Pro: admin + 1 invited Individual
     "enhanced_plus": None,  # resolved from owner.tier_level
 }
 

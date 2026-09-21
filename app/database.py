@@ -965,9 +965,22 @@ def init_db():
 
     try:
         from app.services.system_admin_seed import ensure_system_admin
+        from app.services.account_type_policy import migrate_invited_member_account_types
 
         with session_maker() as db:
             ensure_system_admin(db)
+            try:
+                migrated = migrate_invited_member_account_types(db)
+                if migrated:
+                    logger.info(
+                        "Migrated %s invited Family/Organization member account type(s)",
+                        migrated,
+                    )
+            except Exception as migrate_exc:
+                logger.exception(
+                    "Invited member account-type migration failed: %s",
+                    migrate_exc,
+                )
     except Exception as exc:
         logger.exception("System administrator seed failed: %s", exc)
 

@@ -20,6 +20,14 @@ INDIVIDUAL_ACCOUNT_USER_ROLE_ONLY_DETAIL = (
     "Individual accounts always use the user role and cannot be administrators."
 )
 
+ROLE_CHANGE_SYSTEM_ADMIN_ONLY_DETAIL = (
+    "Only system administrators may change user roles."
+)
+
+ACCOUNT_TYPE_CHANGE_SYSTEM_ADMIN_ONLY_DETAIL = (
+    "Only system administrators may change account types."
+)
+
 
 def is_individual_account_type(account_type: str | AccountType | None) -> bool:
     """True for Exclusive / Individual tier."""
@@ -61,6 +69,26 @@ def assert_individual_role_change_allowed(
         )
 
 
+def assert_role_change_allowed(
+    *,
+    caller: Owner,
+    account_type: str | AccountType | None = None,
+    new_role: str | OwnerRole | None = None,
+) -> None:
+    """Only system administrators may change roles; Individuals stay user-only."""
+    if new_role is None:
+        return
+    if not is_system_administrator(caller):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ROLE_CHANGE_SYSTEM_ADMIN_ONLY_DETAIL,
+        )
+    assert_individual_role_change_allowed(
+        account_type=account_type,
+        new_role=new_role,
+    )
+
+
 def is_system_administrator(owner: Owner) -> bool:
     """True for the built-in Private-tier platform administrator."""
     if owner.role.value != "administrator":
@@ -71,14 +99,56 @@ def is_system_administrator(owner: Owner) -> bool:
 def account_type_for_invited_member(administrator: Owner) -> AccountType:
     """Account type for users invited by a non–system-admin account holder.
 
-    Always Individual (Exclusive). These are *Invited Individuals* linked under
-    the inviter via ``account_owner_id`` (Family/Organization member flow).
+    - Family (private_plus) / Organization (enhanced_plus): same type as inviter,
+      role stays ``user``.
+    - Individual Pro (enhanced): invited seat is Individual (exclusive).
+    - Other tiers: Individual (exclusive).
 
     System-admin (Private) QR invites are separate: they provision a *Solo*
     Individual on a new network (own account root), not a linked member.
     """
-    _ = administrator  # inviter used by callers for linkage / capacity checks
+    key = normalize_pricing_tier_key(administrator.account_type.value)
+    if key in {"private_plus", "enhanced_plus"}:
+        return administrator.account_type
     return AccountType.EXCLUSIVE
+
+
+def migrate_invited_member_account_types(db: Session) -> int:
+    """Align linked Family/Organization members with their account holder's type.
+
+    Legacy rows stored invited members as Exclusive; Family/Org members should
+    share the administrator's ``private_plus`` / ``enhanced_plus`` type (role
+    remains user). Individual Pro invitees stay Exclusive and are left alone.
+    Returns the number of owners updated.
+    """
+    updated = 0
+    admins = (
+        db.query(Owner)
+        .filter(
+            Owner.role == OwnerRole.ADMINISTRATOR,
+            Owner.account_type.in_((AccountType.PRIVATE_PLUS, AccountType.ENHANCED_PLUS)),
+            Owner.active.is_(True),
+        )
+        .all()
+    )
+    for admin in admins:
+        root_id = admin.account_owner_id or admin.id
+        member_type = account_type_for_invited_member(admin)
+        members = (
+            db.query(Owner)
+            .filter(
+                Owner.account_owner_id == root_id,
+                Owner.id != admin.id,
+                Owner.account_type != member_type,
+            )
+            .all()
+        )
+        for member in members:
+            member.account_type = member_type
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
 
 
 def owner_may_edit_network_id(owner: Owner) -> bool:
@@ -124,45 +194,31 @@ def assert_account_type_change_allowed(
 ) -> None:
     """Validate an account-type assignment.
 
-    - System administrators (Private) may assign any tier to others (Private only
-      to administrators) and may change their own tier.
-    - Other administrators may change only their own tier, and never to Private.
+    Only system administrators (Private) may change account types — for themselves
+    or any other user. Private may only be assigned to administrator accounts.
     """
     new_key = normalize_pricing_tier_key(new_account_type)
     current_key = normalize_pricing_tier_key(target.account_type.value)
     if new_key == current_key:
         return
 
-    if is_system_administrator(caller):
-        if (
-            is_system_administrator(target)
-            and new_key != PRICING_TIER_PRIVATE
-            and count_system_administrators(db) <= 1
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot change account type: at least one system administrator is required.",
-            )
-        if new_key == PRICING_TIER_PRIVATE and target.role.value != "administrator":
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Only administrator accounts may be assigned the Private (system) account type.",
-            )
-        return
+    if not is_system_administrator(caller):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ACCOUNT_TYPE_CHANGE_SYSTEM_ADMIN_ONLY_DETAIL,
+        )
 
-    # Non–system-admin: only self-service among non-Private tiers.
-    if caller.id != target.id:
+    if (
+        is_system_administrator(target)
+        and new_key != PRICING_TIER_PRIVATE
+        and count_system_administrators(db) <= 1
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only system administrators may change other users' account types.",
+            detail="Cannot change account type: at least one system administrator is required.",
         )
-    if caller.role.value != "administrator":
+    if new_key == PRICING_TIER_PRIVATE and target.role.value != "administrator":
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only administrators may change account type.",
-        )
-    if new_key == PRICING_TIER_PRIVATE:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Private is reserved for system administrators.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only administrator accounts may be assigned the Private (system) account type.",
         )

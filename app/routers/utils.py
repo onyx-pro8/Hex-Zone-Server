@@ -280,9 +280,10 @@ async def convert_to_h3(
         "Not for door guest access — use **`GET /api/access/qr-link`** for canonical **`/access?zid=`** URLs. "
         "**System administrator (Private):** provisions a new **Individual (Exclusive)** user "
         "account for a new network (invitee chooses their own network ID on join). "
-        "**Private+ / Enhanced+:** invites an **Individual (Exclusive)** user member onto "
-        "the inviter's existing network. "
-        "**Exclusive** and **Enhanced** (solo) accounts cannot generate these invites. "
+        "**Family (Private+) / Organization (Enhanced+):** invite a **user-role** member with "
+        "the same account type onto the inviter's network. "
+        "**Individual Pro (Enhanced):** invite one **Individual** user onto the primary zone. "
+        "**Exclusive** (solo Individual) accounts cannot generate these invites. "
         "Each invite mints a unique Communal ID for the invitee (Individuals cannot "
         "generate one themselves). "
         "Send **`expires_in_hours`: 0** (or **null**) for a never-expiring "
@@ -507,7 +508,8 @@ def _load_valid_qr_and_inviter(db: Session, token: str):
     summary="Preview QR invite token",
     description=(
         "Public (no auth) preview of a QR invite. Clients use this to choose the "
-        "join form: **member** (Individual account on inviter zone) vs **new_network_admin** "
+        "join form: **member** (user-role member on inviter zone; Family/Org inherit "
+        "inviter account type, Individual Pro invites are Individual) vs **new_network_admin** "
         "(Individual user account for a new network ID supplied on join)."
     ),
     responses={
@@ -550,8 +552,10 @@ async def preview_qr_registration(
         "Complete registration by consuming an invite token from the QR flow. "
         "**System administrator (Private) tokens:** create an **Individual** "
         "user account for a **new** network; require **`zone_id`** in the body. "
-        "**Other invite-capable admins:** create an **Individual** user member on "
-        "the inviter's zone (inherit zone only; account type is always Exclusive). "
+        "**Family / Organization admins:** create a **user-role** member with the same "
+        "account type on the inviter's zone. "
+        "**Individual Pro:** create an **Individual** user member on the inviter's zone "
+        "(max one invited seat). "
         "All invite tokens (timed and never-expiring) are single-use."
     ),
     responses={
@@ -640,7 +644,7 @@ async def join_with_qr(
             join_welcome_message=None,
         )
 
-    # Network-admin member invite: inherit inviter zone; Individual account type.
+    # Network-admin member invite: inherit inviter zone; account type from policy.
     assert_admin_user_member_capacity(db, owner)
 
     member_account_type = account_type_for_invited_member(owner)

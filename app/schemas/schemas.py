@@ -157,7 +157,10 @@ class OwnerUpdate(BaseModel):
     )
     role: Optional[OwnerRoleEnum] = Field(
         None,
-        description="Account role (administrator or user). Callers may update their own role.",
+        description=(
+            "Account role (administrator or user). "
+            "Only system administrators may change this field."
+        ),
     )
     avatar_url: Optional[str] = Field(
         None,

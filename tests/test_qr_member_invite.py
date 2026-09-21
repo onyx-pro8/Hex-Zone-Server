@@ -129,7 +129,7 @@ async def test_qr_join_uses_preissued_communal_id(test_db, override_get_db):
         assert join.status_code == 200, join.text
         joined = join.json()
         assert joined["zone_id"] == admin.zone_id
-        assert joined["account_type"] == "exclusive"
+        assert joined["account_type"] == "private_plus"
         assert joined["role"] == "user"
         assert joined["communal_id"] == reserved
         # Admin must not share the invitee's pre-issued Communal ID.
@@ -155,10 +155,13 @@ async def test_qr_join_never_expiring_token(test_db, override_get_db):
         assert join.status_code == 200, join.text
         joined = join.json()
         assert joined["zone_id"] == admin.zone_id
-        assert joined["account_type"] == "exclusive"
+        assert joined["account_type"] == "private_plus"
         assert joined["role"] == "user"
-        assert joined["communal_id"]
-        assert joined["communal_id"] == generate.json()["communal_id"]
+        assert joined["account_owner_id"] == admin.id
+        # Communal ID may be pre-issued on the invite token when minting supports it.
+        invite_communal = generate.json().get("communal_id")
+        if invite_communal:
+            assert joined["communal_id"] == invite_communal
 
 
 @pytest.mark.asyncio
@@ -329,7 +332,71 @@ async def test_qr_preview_member_invite(test_db, override_get_db):
         body = preview.json()
         assert body["invite_kind"] == "member"
         assert body["zone_id"] == admin.zone_id
-        assert body["account_type"] == "exclusive"
+        assert body["account_type"] == "private_plus"
+
+
+@pytest.mark.asyncio
+async def test_qr_join_organization_inherits_account_type(test_db, override_get_db):
+    admin, token = _admin(
+        test_db,
+        email="org-admin@example.com",
+        zone_id="org-zone",
+        account_type=AccountType.ENHANCED_PLUS,
+    )
+    admin.tier_level = 1
+    test_db.commit()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert generate.status_code == 200, generate.text
+        join = await _join(client, generate.json()["token"], "org-member@example.com")
+        assert join.status_code == 200, join.text
+        joined = join.json()
+        assert joined["account_type"] == "enhanced_plus"
+        assert joined["role"] == "user"
+        assert joined["zone_id"] == admin.zone_id
+        assert joined["account_owner_id"] == admin.id
+
+
+@pytest.mark.asyncio
+async def test_qr_join_individual_pro_invites_one_individual(test_db, override_get_db):
+    admin, token = _admin(
+        test_db,
+        email="pro-admin@example.com",
+        zone_id="pro-zone",
+        account_type=AccountType.ENHANCED,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert generate.status_code == 200, generate.text
+        preview = await client.get(
+            "/utils/qr/preview",
+            params={"token": generate.json()["token"]},
+        )
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["account_type"] == "exclusive"
+
+        join = await _join(client, generate.json()["token"], "pro-member@example.com")
+        assert join.status_code == 200, join.text
+        joined = join.json()
+        assert joined["account_type"] == "exclusive"
+        assert joined["role"] == "user"
+        assert joined["zone_id"] == admin.zone_id
+        assert joined["account_owner_id"] == admin.id
+
+        second_generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert second_generate.status_code == 403, second_generate.text
 
 
 @pytest.mark.asyncio

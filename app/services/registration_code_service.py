@@ -50,7 +50,7 @@ PRICING_TIER_LABELS: dict[str, str] = {
     PRICING_TIER_PRIVATE: "Private — unlimited users (system owner)",
     PRICING_TIER_PRIVATE_PLUS: "Private Plus [+] — max 10 users (family)",
     PRICING_TIER_EXCLUSIVE: "Individual — 1 user, up to 3 secondary zones, no smart-home (FREE)",
-    PRICING_TIER_ENHANCED: "Enhanced — 1 user, up to 2 primary zones, 1 device",
+    PRICING_TIER_ENHANCED: "Enhanced — Individual Pro, admin + 1 invited Individual, 1 device",
     PRICING_TIER_ENHANCED_PLUS: "Enhanced Plus [+] — tiered user capacity (levels 1–5: 20/50/100/500/2500)",
 }
 

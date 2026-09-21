@@ -153,33 +153,6 @@ def test_non_system_admin_cannot_change_other_users_account_type(db):
     assert exc.value.status_code == 403
 
 
-def test_non_system_admin_can_change_own_account_type_except_private(db):
-    regular_admin = _owner(
-        db,
-        email="regular-admin@example.com",
-        zone_id="regular-zone",
-        account_type=AccountType.EXCLUSIVE,
-        role=OwnerRole.ADMINISTRATOR,
-    )
-    db.commit()
-
-    assert_account_type_change_allowed(
-        db,
-        regular_admin,
-        regular_admin,
-        AccountType.ENHANCED.value,
-    )
-
-    with pytest.raises(HTTPException) as exc:
-        assert_account_type_change_allowed(
-            db,
-            regular_admin,
-            regular_admin,
-            AccountType.PRIVATE.value,
-        )
-    assert exc.value.status_code == 403
-
-
 def test_private_account_type_requires_administrator_role(db):
     system_admin = _owner(
         db,
@@ -208,7 +181,7 @@ def test_private_account_type_requires_administrator_role(db):
     assert exc.value.status_code == 422
 
 
-def test_invited_member_account_type_is_always_exclusive(db):
+def test_invited_member_account_type_matches_family_or_org(db):
     exclusive_admin = _owner(
         db,
         email="exclusive-admin@example.com",
@@ -230,11 +203,19 @@ def test_invited_member_account_type_is_always_exclusive(db):
         account_type=AccountType.ENHANCED_PLUS,
         role=OwnerRole.ADMINISTRATOR,
     )
+    pro_admin = _owner(
+        db,
+        email="pro-admin@example.com",
+        zone_id="pro-zone",
+        account_type=AccountType.ENHANCED,
+        role=OwnerRole.ADMINISTRATOR,
+    )
     db.commit()
 
     assert account_type_for_invited_member(exclusive_admin) == AccountType.EXCLUSIVE
-    assert account_type_for_invited_member(plus_admin) == AccountType.EXCLUSIVE
-    assert account_type_for_invited_member(org_admin) == AccountType.EXCLUSIVE
+    assert account_type_for_invited_member(plus_admin) == AccountType.PRIVATE_PLUS
+    assert account_type_for_invited_member(org_admin) == AccountType.ENHANCED_PLUS
+    assert account_type_for_invited_member(pro_admin) == AccountType.EXCLUSIVE
 
 
 def test_invited_member_account_type_system_admin_is_exclusive(db):
@@ -249,3 +230,48 @@ def test_invited_member_account_type_system_admin_is_exclusive(db):
 
     assert account_type_for_invited_member(system_admin) == AccountType.EXCLUSIVE
 
+
+def test_migrate_invited_member_account_types(db):
+    from app.services.account_type_policy import migrate_invited_member_account_types
+
+    family_admin = _owner(
+        db,
+        email="family-admin@example.com",
+        zone_id="family-zone",
+        account_type=AccountType.PRIVATE_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    legacy_member = _owner(
+        db,
+        email="legacy-member@example.com",
+        zone_id="family-zone",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+        account_owner_id=family_admin.id,
+    )
+    db.commit()
+
+    updated = migrate_invited_member_account_types(db)
+    db.refresh(legacy_member)
+    assert updated == 1
+    assert legacy_member.account_type == AccountType.PRIVATE_PLUS
+
+
+def test_non_system_admin_cannot_change_own_account_type(db):
+    regular_admin = _owner(
+        db,
+        email="regular-admin@example.com",
+        zone_id="regular-zone",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        assert_account_type_change_allowed(
+            db,
+            regular_admin,
+            regular_admin,
+            AccountType.ENHANCED.value,
+        )
+    assert exc.value.status_code == 403

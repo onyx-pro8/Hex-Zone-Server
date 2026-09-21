@@ -24,10 +24,11 @@ from app.services.registration_code_service import (
 from app.services.account_type_policy import (
     assert_account_type_allowed_for_public_registration,
     assert_account_type_change_allowed,
-    assert_individual_role_change_allowed,
     assert_owner_may_edit_network_id,
+    assert_role_change_allowed,
     coerce_individual_registration_role,
     is_individual_account_type,
+    is_system_administrator,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
 from app.services.avatar_upload_service import avatar_bytes_and_media_type
@@ -98,7 +99,7 @@ async def register_owner(
         account_type=owner.account_type.value,
     )
 
-    # Invited users always get Individual (Exclusive) features.
+    # Invited users inherit Family/Org type (or Individual under Pro).
     if owner.role == OwnerRoleEnum.USER and owner.account_owner_id is not None:
         administrator = db.get(OwnerModel, owner.account_owner_id)
         if administrator is not None:
@@ -437,10 +438,10 @@ async def update_owner(
                 detail="Email is already in use",
             )
 
-    if owner_update.role is not None and not is_admin and current_user["user_id"] != owner_id:
+    if owner_update.role is not None and not is_system_administrator(caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to change another owner's role",
+            detail="Only system administrators may change user roles",
         )
 
     if owner_update.role is not None or owner_update.account_type is not None:
@@ -455,7 +456,8 @@ async def update_owner(
             if owner_update.account_type is not None
             else target.account_type.value
         )
-        assert_individual_role_change_allowed(
+        assert_role_change_allowed(
+            caller=caller,
             account_type=effective_type,
             new_role=owner_update.role,
         )

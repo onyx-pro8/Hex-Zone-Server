@@ -124,7 +124,12 @@ def cascade_account_type_from_administrator(
     administrator: Owner,
     account_type: AccountType,
 ) -> None:
-    """Keep invited users on Individual (Exclusive) under this administrator."""
+    """Sync invited members' account type from the account holder.
+
+    Family/Organization members inherit the admin tier; Individual Pro invites
+    stay Individual (Exclusive).
+    """
+    _ = account_type  # caller passes the admin's new type; policy reads administrator
     if administrator.role.value != "administrator":
         return
     from app.services.account_type_policy import account_type_for_invited_member
