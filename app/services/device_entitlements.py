@@ -262,7 +262,28 @@ def _count_active_account_users(db: Session, admin_owner: Owner) -> int:
     return admin_active + _count_active_user_members(db, admin_owner.id)
 
 
-def assert_admin_user_member_capacity(db: Session, admin_owner: Owner) -> None:
+MEMBER_CAPACITY_FULL_DETAIL = (
+    "Currently the number of members on this account is limited. "
+    "You can sign up as an independent Individual account instead."
+)
+
+
+def admin_user_members_at_capacity(db: Session, admin_owner: Owner) -> bool:
+    """True when this account already uses every allowed active user seat."""
+    limit = max_total_users_for_owner(admin_owner)
+    if limit is None:
+        return False
+    if not account_type_supports_member_invite(admin_owner.account_type.value):
+        return True
+    return _count_active_account_users(db, admin_owner) >= limit
+
+
+def assert_admin_user_member_capacity(
+    db: Session,
+    admin_owner: Owner,
+    *,
+    invitee_facing: bool = False,
+) -> None:
     """Ensure the administrator has capacity to add another user member."""
     account_type = admin_owner.account_type.value
     limit = max_total_users_for_owner(admin_owner)
@@ -275,10 +296,15 @@ def assert_admin_user_member_capacity(db: Session, admin_owner: Owner) -> None:
         )
     current = _count_active_account_users(db, admin_owner)
     if current >= limit:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
+        detail = (
+            MEMBER_CAPACITY_FULL_DETAIL
+            if invitee_facing
+            else (
                 f"Account type '{account_type}' allows at most {limit} user(s) "
                 f"on this account"
-            ),
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail,
         )

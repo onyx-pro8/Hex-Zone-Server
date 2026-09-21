@@ -27,6 +27,7 @@ from app.services.registration_code_service import (
 )
 from app.services.device_entitlements import (
     account_type_supports_member_invite,
+    admin_user_members_at_capacity,
     assert_admin_user_member_capacity,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
@@ -535,12 +536,14 @@ async def preview_qr_registration(
             invite_kind="new_network_admin",
             account_type="exclusive",
             zone_id=None,
+            members_at_capacity=False,
         )
     member_type = account_type_for_invited_member(owner)
     return QRRegistrationPreview(
         invite_kind="member",
         account_type=member_type.value,
         zone_id=owner.zone_id,
+        members_at_capacity=admin_user_members_at_capacity(db, owner),
     )
 
 
@@ -563,7 +566,11 @@ async def preview_qr_registration(
             "description": "QR token already used or expired.",
         },
         status.HTTP_403_FORBIDDEN: {
-            "description": "QR token is invalid for account join policy.",
+            "description": (
+                "QR token is invalid for account join policy, or the inviter "
+                "account has no remaining member seats (invitee may sign up as "
+                "an independent Individual instead)."
+            ),
         },
         status.HTTP_404_NOT_FOUND: {
             "description": "QR token not found.",
@@ -645,7 +652,7 @@ async def join_with_qr(
         )
 
     # Network-admin member invite: inherit inviter zone; account type from policy.
-    assert_admin_user_member_capacity(db, owner)
+    assert_admin_user_member_capacity(db, owner, invitee_facing=True)
 
     member_account_type = account_type_for_invited_member(owner)
     new_owner_data = OwnerCreate(

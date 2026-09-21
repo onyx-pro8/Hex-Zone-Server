@@ -333,6 +333,49 @@ async def test_qr_preview_member_invite(test_db, override_get_db):
         assert body["invite_kind"] == "member"
         assert body["zone_id"] == admin.zone_id
         assert body["account_type"] == "private_plus"
+        assert body["members_at_capacity"] is False
+
+
+@pytest.mark.asyncio
+async def test_qr_join_rejects_when_member_capacity_full(test_db, override_get_db):
+    """Leftover invites surface a clear limit message and independent-signup hint."""
+    admin, token = _admin(
+        test_db,
+        email="pro-admin@example.com",
+        zone_id="pro-zone",
+        account_type=AccountType.ENHANCED,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert first.status_code == 200, first.text
+        second = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert second.status_code == 200, second.text
+
+        join_first = await _join(client, first.json()["token"], "seat-one@example.com")
+        assert join_first.status_code == 200, join_first.text
+
+        leftover = second.json()["token"]
+        preview = await client.get("/utils/qr/preview", params={"token": leftover})
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["members_at_capacity"] is True
+
+        join_second = await _join(client, leftover, "seat-two@example.com")
+        assert join_second.status_code == 403, join_second.text
+        body = join_second.json()
+        detail = body.get("detail") or body.get("message") or (body.get("error") or {}).get("message") or ""
+        if isinstance(detail, list):
+            detail = " ".join(str(item) for item in detail)
+        text = str(detail).lower()
+        assert "limited" in text
+        assert "independent" in text
 
 
 @pytest.mark.asyncio

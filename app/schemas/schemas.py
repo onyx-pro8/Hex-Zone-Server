@@ -501,6 +501,14 @@ class QRRegistrationPreview(BaseModel):
         default=None,
         description="Inviter zone id for member invites; null for new-network-admin invites.",
     )
+    members_at_capacity: bool = Field(
+        default=False,
+        description=(
+            "True when this member invite cannot be redeemed because the inviter's "
+            "account has no remaining member seats. Invitees may still sign up as an "
+            "independent Individual account."
+        ),
+    )
 
 
 class QRRegistrationUse(BaseModel):
