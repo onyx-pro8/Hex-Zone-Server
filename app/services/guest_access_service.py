@@ -18,6 +18,7 @@ from app.domain.permission_visibility import (
     PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST,
 )
 from app.models import AccessSchedule, GuestAccessQrToken, GuestAccessSession, Owner, Zone, ZoneMessageEvent
+from app.models.access_schedule import AccessScheduleStatus
 from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import OwnerRole
 from app.services.access_policy import zone_listing_owner_ids
@@ -356,6 +357,7 @@ def find_matching_schedule_for_arrival(
     q = db.query(AccessSchedule).filter(
         AccessSchedule.zone_id == zone_id,
         AccessSchedule.active.is_(True),
+        AccessSchedule.status == AccessScheduleStatus.ACCEPTED,
         or_(AccessSchedule.starts_at.is_(None), AccessSchedule.starts_at <= now),
         or_(AccessSchedule.ends_at.is_(None), AccessSchedule.ends_at >= now),
         or_(*conditions),

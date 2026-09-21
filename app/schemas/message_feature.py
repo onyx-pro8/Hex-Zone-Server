@@ -2,7 +2,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.domain.message_types import CanonicalMessageType, normalize_message_type
 
@@ -110,7 +110,7 @@ class AccessScheduleCreate(BaseModel):
     ends_at: datetime | None = Field(default=None, description="Window end (UTC); null means open-ended future.")
     notify_member_assist: bool = Field(
         default=False,
-        description="When true, zone administrators also receive assist notifications for this schedule.",
+        description="When true, zone administrators also receive assist notifications when a matching guest arrives.",
     )
 
 
@@ -124,10 +124,22 @@ class AccessScheduleResponse(BaseModel):
     ends_at: datetime | None
     notify_member_assist: bool
     active: bool
+    status: str = Field(
+        description="PENDING until an admin accepts; ACCEPTED schedules auto-approve matching guests."
+    )
     created_by_owner_id: int | None
+    reviewed_by: int | None = None
     created_at: datetime
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _coerce_status(cls, value: object) -> str:
+        if hasattr(value, "value"):
+            return str(getattr(value, "value"))
+        return str(value or "PENDING")
 
 
 class PermissionDecisionResponse(BaseModel):

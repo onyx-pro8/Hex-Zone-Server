@@ -873,6 +873,69 @@ def init_db():
                 text("CREATE INDEX IF NOT EXISTS ix_guest_passes_created_at ON guest_passes (created_at);")
             )
 
+            # Access schedule approval workflow (PENDING → ACCEPTED / REJECTED / REVOKED)
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE access_schedules
+                    ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'PENDING';
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE access_schedules
+                    ADD COLUMN IF NOT EXISTS reviewed_by INTEGER;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE access_schedules
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW();
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_access_schedules_status ON access_schedules (status);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_access_schedules_zone_status "
+                    "ON access_schedules (zone_id, status);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_access_schedules_reviewed_by "
+                    "ON access_schedules (reviewed_by);"
+                )
+            )
+            # Legacy rows that were already live stay accepted; everything else stays pending.
+            conn.execute(
+                text(
+                    """
+                    UPDATE access_schedules
+                    SET status = 'ACCEPTED'
+                    WHERE active IS TRUE
+                      AND status = 'PENDING';
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE access_schedules
+                    SET active = FALSE
+                    WHERE status <> 'ACCEPTED' AND active IS TRUE;
+                    """
+                )
+            )
+
         # Registration code email + pricing tier columns. Run in their own isolated
         # transaction so an unrelated failure earlier in the migration block can never
         # roll these critical patches back — the new POST /utils/registration-code/issue

@@ -5,6 +5,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models import AccessSchedule, Owner, ZoneMessageEvent
+from app.models.access_schedule import AccessScheduleStatus
 from app.models.owner import OwnerRole
 from app.schemas.message_feature import PropagationMessageCreate
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
@@ -21,6 +22,7 @@ def _build_schedule_query(db: Session, zone_id: str, payload: PropagationMessage
     query = db.query(AccessSchedule).filter(
         AccessSchedule.zone_id == zone_id,
         AccessSchedule.active.is_(True),
+        AccessSchedule.status == AccessScheduleStatus.ACCEPTED,
         or_(AccessSchedule.starts_at.is_(None), AccessSchedule.starts_at <= now),
         or_(AccessSchedule.ends_at.is_(None), AccessSchedule.ends_at >= now),
     )
@@ -122,11 +124,3 @@ def process_permission_message(db: Session, sender: Owner, payload: PropagationM
         "member_message": member_message,
         "delivered_owner_ids": delivered_owner_ids,
     }
-
-
-def create_schedule(db: Session, owner: Owner, payload: dict) -> AccessSchedule:
-    schedule = AccessSchedule(created_by_owner_id=owner.id, **payload)
-    db.add(schedule)
-    db.flush()
-    db.refresh(schedule)
-    return schedule

@@ -12,6 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models import AccessSchedule, GuestAccessSession
+from app.models.access_schedule import AccessScheduleStatus
 from app.models.guest_access_zone_message import GuestAccessZoneMessage
 from app.services.guest_arrival_zone_messages import (
     DEFAULT_EXPECTED_ARRIVAL_MESSAGE,
@@ -130,6 +131,7 @@ async def test_admin_get_put_custom_messages_permission_and_poll(test_db, overri
             starts_at=datetime.utcnow() - timedelta(hours=1),
             ends_at=datetime.utcnow() + timedelta(hours=1),
             active=True,
+            status=AccessScheduleStatus.ACCEPTED,
             notify_member_assist=False,
         )
         test_db.add(sched)

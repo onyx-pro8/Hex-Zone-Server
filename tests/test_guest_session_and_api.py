@@ -645,6 +645,7 @@ async def test_expected_schedule_guest_permission_poll_and_guest_session(test_db
     from datetime import datetime, timedelta
 
     from app.models import AccessSchedule
+from app.models.access_schedule import AccessScheduleStatus
 
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = "zone-sched-exch-1"
@@ -656,6 +657,7 @@ async def test_expected_schedule_guest_permission_poll_and_guest_session(test_db
             starts_at=datetime.utcnow() - timedelta(hours=1),
             ends_at=datetime.utcnow() + timedelta(hours=1),
             active=True,
+            status=AccessScheduleStatus.ACCEPTED,
             notify_member_assist=False,
         )
         test_db.add(sched)
@@ -698,6 +700,7 @@ async def test_schedule_evt_event_id_matches_bare_digits_on_permission(test_db, 
     from datetime import datetime, timedelta
 
     from app.models import AccessSchedule
+from app.models.access_schedule import AccessScheduleStatus
 
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = "zone-evt-canonical-1"
@@ -709,6 +712,7 @@ async def test_schedule_evt_event_id_matches_bare_digits_on_permission(test_db, 
             starts_at=datetime.utcnow() - timedelta(hours=1),
             ends_at=datetime.utcnow() + timedelta(hours=1),
             active=True,
+            status=AccessScheduleStatus.ACCEPTED,
             notify_member_assist=False,
         )
         test_db.add(sched)

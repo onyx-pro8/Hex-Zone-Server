@@ -131,6 +131,14 @@ def merged_inbox_permission_event_visible(db: Session, viewer: Owner, row: ZoneM
     if not zid:
         return False
     meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+    # Guest schedule lifecycle: all zone managers + participants in delivered_owner_ids.
+    if meta.get("flow") == "guest_schedule_lifecycle":
+        delivered = meta.get("delivered_owner_ids") or []
+        if isinstance(delivered, list) and viewer.id in delivered:
+            return True
+        if guest_access_service.can_manage_zone_guest_requests(db, viewer, zid):
+            return True
+        return viewer.id == row.sender_id or viewer.id == row.receiver_id
     vis = meta.get("permission_visibility")
     if vis == PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST:
         if row.guest_access_session_id is None:

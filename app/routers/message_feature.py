@@ -46,7 +46,13 @@ from app.domain.message_types import (
     is_pushable_geo_type,
     normalize_message_type,
 )
-from app.services import guest_access_service, message_block_service, message_feature_service, permission_service
+from app.services import (
+    access_schedule_service,
+    guest_access_service,
+    message_block_service,
+    message_feature_service,
+    permission_service,
+)
 from app.services.private_plus_messaging import geo_event_visible_in_private_plus_shared_inbox
 from app.services.message_feature_service import (
     GeoMessageSkipped,
@@ -720,11 +726,14 @@ async def delete_block_rule(
     status_code=status.HTTP_201_CREATED,
     summary="Create access schedule",
     description=(
-        "Authenticated member defines an expected visitor window for a **zone_id**. "
-        "Used by matching logic in `POST /api/access/permission` (QR guests) and by "
-        "`process_permission_message` for device-originated PERMISSION messages."
+        "Authenticated zone member requests an expected visitor window for a **zone_id**. "
+        "Member-created schedules start as **PENDING** and do **not** auto-approve guests until a zone "
+        "administrator accepts them (`POST /message-feature/access/schedules/{id}/accept`). "
+        "Schedules created by an administrator are **ACCEPTED** immediately.\n\n"
+        "Side effects: a **`PERMISSION`** zone message (`metadata.flow` = **`guest_schedule_lifecycle`**) and a "
+        "**`PERMISSION_MESSAGE`** WebSocket event are sent to zone administrators (and the requester)."
     ),
-    response_description="Persisted schedule including audit fields.",
+    response_description="Persisted schedule including status and audit fields.",
 )
 async def create_access_schedule(
     payload: AccessScheduleCreate,
@@ -734,9 +743,20 @@ async def create_access_schedule(
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
-    schedule = permission_service.create_schedule(db, owner, payload.model_dump())
+    result = access_schedule_service.create_schedule(db, owner, payload.model_dump())
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+    schedule = result["row"]
     db.commit()
     db.refresh(schedule)
+
+    member_ids = result.get("delivered_owner_ids") or []
+    ws_payload = result.get("ws_payload")
+    if member_ids and ws_payload:
+        await ws_manager.broadcast_to_users(member_ids, "PERMISSION_MESSAGE", ws_payload["data"])
     return schedule
 
 
@@ -744,19 +764,127 @@ async def create_access_schedule(
     "/access/schedules",
     response_model=list[AccessScheduleResponse],
     summary="List access schedules",
-    description="Returns active schedules, optionally filtered by **zone_id**.",
+    description=(
+        "Returns schedules for **zone_id** (newest first). Includes **PENDING**, **ACCEPTED**, "
+        "**REJECTED**, and **REVOKED** unless **status** is set. Matching guest arrivals only use "
+        "**ACCEPTED** schedules."
+    ),
     response_description="Newest-first list of schedule rows.",
 )
 async def list_access_schedules(
-    zone_id: str | None = Query(default=None, description="If set, restrict to this zone id."),
+    zone_id: str = Query(..., min_length=1, max_length=100, description="Zone / network id."),
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        max_length=16,
+        description="Optional filter: PENDING, ACCEPTED, REJECTED, REVOKED, or ALL.",
+    ),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ = current_user
-    query = db.query(AccessSchedule).filter(AccessSchedule.active.is_(True))
-    if zone_id:
-        query = query.filter(AccessSchedule.zone_id == zone_id)
-    return query.order_by(AccessSchedule.created_at.desc()).all()
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = access_schedule_service.list_schedules(
+        db, owner=owner, zone_id=zone_id, status_filter=status_filter
+    )
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+    return result["items"]
+
+
+@router.post(
+    "/access/schedules/{schedule_id}/accept",
+    response_model=AccessScheduleResponse,
+    summary="Accept a pending guest schedule",
+    description=(
+        "Zone administrator accepts a **PENDING** schedule. It becomes **ACCEPTED** / **active** and "
+        "matching guests auto-approve on arrival."
+    ),
+)
+async def accept_access_schedule(
+    schedule_id: int = Path(..., ge=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = access_schedule_service.accept_schedule(db, owner=owner, schedule_id=schedule_id)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+    member_ids = result.get("delivered_owner_ids") or []
+    ws_payload = result.get("ws_payload")
+    if member_ids and ws_payload:
+        await ws_manager.broadcast_to_users(member_ids, "PERMISSION_MESSAGE", ws_payload["data"])
+    return row
+
+
+@router.post(
+    "/access/schedules/{schedule_id}/reject",
+    response_model=AccessScheduleResponse,
+    summary="Reject a pending guest schedule",
+)
+async def reject_access_schedule(
+    schedule_id: int = Path(..., ge=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = access_schedule_service.reject_schedule(db, owner=owner, schedule_id=schedule_id)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+    member_ids = result.get("delivered_owner_ids") or []
+    ws_payload = result.get("ws_payload")
+    if member_ids and ws_payload:
+        await ws_manager.broadcast_to_users(member_ids, "PERMISSION_MESSAGE", ws_payload["data"])
+    return row
+
+
+@router.post(
+    "/access/schedules/{schedule_id}/revoke",
+    response_model=AccessScheduleResponse,
+    summary="Revoke an accepted guest schedule",
+)
+async def revoke_access_schedule(
+    schedule_id: int = Path(..., ge=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    result = access_schedule_service.revoke_schedule(db, owner=owner, schedule_id=schedule_id)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+    row = result["row"]
+    db.commit()
+    db.refresh(row)
+    member_ids = result.get("delivered_owner_ids") or []
+    ws_payload = result.get("ws_payload")
+    if member_ids and ws_payload:
+        await ws_manager.broadcast_to_users(member_ids, "PERMISSION_MESSAGE", ws_payload["data"])
+    return row
 
 
 @router.get(

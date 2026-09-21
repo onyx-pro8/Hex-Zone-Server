@@ -11,7 +11,7 @@ from app.models.push_token import PushToken
 from app.models.zone_message_event import ZoneMessageEvent
 from app.models.message_block import MessageBlock
 from app.models.zone_membership import ZoneMembership
-from app.models.access_schedule import AccessSchedule
+from app.models.access_schedule import AccessSchedule, AccessScheduleStatus
 from app.models.guest_access_session import GuestAccessSession
 from app.models.guest_access_qr_token import GuestAccessQrToken
 from app.models.guest_access_qr_token_audit import GuestAccessQrTokenAudit
@@ -37,6 +37,7 @@ __all__ = [
     "MessageBlock",
     "ZoneMembership",
     "AccessSchedule",
+    "AccessScheduleStatus",
     "GuestAccessSession",
     "GuestAccessQrToken",
     "GuestAccessQrTokenAudit",
