@@ -17,9 +17,42 @@ from app.domain.message_types import (
     normalize_message_type,
     type_priority,
 )
-from app.models import PushToken
+from app.models import Owner, PushToken, Zone
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_owner_push_title_prefix(db: Session, owner_id: int) -> str:
+    """Build ``{network} · {zone}`` for push titles (matches smart-home webhook style).
+
+    Network is the owner's ``zone_id`` (network id). Zone prefers an active
+    primary acceptable zone name, else any active zone name owned by them.
+    """
+    owner = db.query(Owner).filter(Owner.id == owner_id).first()
+    network = ""
+    if owner is not None:
+        network = str(getattr(owner, "zone_id", "") or "").strip()
+    zone = (
+        db.query(Zone)
+        .filter(Zone.owner_id == owner_id, Zone.active.is_(True))
+        .order_by(Zone.is_primary.desc(), Zone.id.asc())
+        .first()
+    )
+    zone_name = ""
+    if zone is not None:
+        zone_name = str(getattr(zone, "name", "") or "").strip()
+    if network and zone_name:
+        return f"{network} · {zone_name}"
+    if network:
+        return network
+    if zone_name:
+        return zone_name
+    return "Safe Zone Patrol"
+
+
+def default_test_push_title(db: Session, owner_id: int) -> str:
+    """Diagnostic test-push title using the owner's network/zone, not product branding."""
+    return f"{resolve_owner_push_title_prefix(db, owner_id)} test push"
 
 FCM_LEGACY_URL = "https://fcm.googleapis.com/fcm/send"
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
@@ -54,7 +87,12 @@ def _android_channel_for(message_type: str) -> str:
     return ANDROID_DEFAULT_PUSH_CHANNEL
 
 
-def _notification_copy(message_type: str, text: str) -> tuple[str, str]:
+def _notification_copy(
+    message_type: str,
+    text: str,
+    *,
+    title_prefix: str | None = None,
+) -> tuple[str, str]:
     upper = str(message_type or "").strip().upper().replace("-", "_")
     body = (text or "").strip()[:240]
     if upper == "PANIC":
@@ -62,7 +100,10 @@ def _notification_copy(message_type: str, text: str) -> tuple[str, str]:
     if upper == "NS_PANIC":
         return "🔕 NS-PANIC — silent distress", body or "A non-silent panic alarm was raised in your area."
     label = upper.replace("_", " ") or "ALARM"
-    return f"Hex Zone {label}", body or label
+    prefix = (title_prefix or "").strip()
+    if prefix:
+        return f"{prefix} · {label}", body or label
+    return label, body or label
 
 
 async def _dispatch_to_tokens(
@@ -166,7 +207,34 @@ async def send_alarm_push_to_owners(
         )
         return {"push_sent": 0, "push_failed": 0, "push_no_tokens": True}
 
-    title, body = _notification_copy(msg_type, str(alarm_payload.get("text") or ""))
+    # Prefer sender network · delivery zone when metadata is present (same shape
+    # as smart-home webhooks); else fall back to the first recipient's prefix.
+    metadata = alarm_payload.get("metadata") if isinstance(alarm_payload.get("metadata"), dict) else {}
+    sender_zone = metadata.get("sender_relevant_zone") if isinstance(metadata.get("sender_relevant_zone"), dict) else {}
+    zone_from_meta = str(sender_zone.get("name") or "").strip()
+    sender_id = alarm_payload.get("sender_id")
+    network_from_sender = ""
+    try:
+        if sender_id is not None:
+            sender = db.query(Owner).filter(Owner.id == int(sender_id)).first()
+            if sender is not None:
+                network_from_sender = str(getattr(sender, "zone_id", "") or "").strip()
+    except (TypeError, ValueError):
+        network_from_sender = ""
+    if network_from_sender and zone_from_meta:
+        title_prefix = f"{network_from_sender} · {zone_from_meta}"
+    elif zone_from_meta:
+        title_prefix = zone_from_meta
+    elif network_from_sender:
+        title_prefix = network_from_sender
+    else:
+        title_prefix = resolve_owner_push_title_prefix(db, int(owner_ids[0]))
+
+    title, body = _notification_copy(
+        msg_type,
+        str(alarm_payload.get("text") or ""),
+        title_prefix=title_prefix,
+    )
     data_payload: dict[str, str] = {
         "event": "NEW_GEO_MESSAGE",
         "type": msg_type,
@@ -176,8 +244,7 @@ async def send_alarm_push_to_owners(
         "alert_style": _alert_style(msg_type),
         "priority": str(alarm_payload.get("priority") or ""),
     }
-    metadata = alarm_payload.get("metadata")
-    if isinstance(metadata, dict):
+    if metadata:
         position = metadata.get("position")
         if isinstance(position, dict):
             data_payload["latitude"] = str(position.get("latitude", ""))
@@ -272,7 +339,7 @@ async def send_test_push_to_owner(
     db: Session,
     owner_id: int,
     *,
-    title: str = "Hex Zone test push",
+    title: str | None = None,
     body: str = "If you can read this, push delivery works end to end.",
 ) -> dict[str, Any]:
     """Send a self-test push to every active token of `owner_id`.
@@ -296,11 +363,14 @@ async def send_test_push_to_owner(
             "push_no_tokens": True,
         }
 
+    resolved_title = (title or "").strip() or default_test_push_title(db, owner_id)
+
     logger.info(
-        "Test push attempt -> owner=%s tokens=%d (%s)",
+        "Test push attempt -> owner=%s tokens=%d (%s) title=%r",
         owner_id,
         len(tokens),
         ", ".join(sorted({str(t.platform).upper() for t in tokens})),
+        resolved_title,
     )
 
     data_payload: dict[str, str] = {
@@ -310,7 +380,7 @@ async def send_test_push_to_owner(
     }
     counts = await _dispatch_to_tokens(
         tokens,
-        title=title,
+        title=resolved_title,
         body=body,
         data=data_payload,
         channel_id=ANDROID_DEFAULT_PUSH_CHANNEL,

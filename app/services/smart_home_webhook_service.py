@@ -182,40 +182,105 @@ def owner_should_receive_webhook(owner: Owner, alarm_payload: dict[str, Any]) ->
     return owner_matches_message_network(owner, alarm_payload)
 
 
+def _resolve_broadcast_name(
+    db: Session | None,
+    alarm_payload: dict[str, Any],
+) -> str:
+    """Sender display name for the webhook title."""
+    sender_id = alarm_payload.get("sender_id")
+    if sender_id is None:
+        return "Guest"
+    try:
+        sender_id_int = int(sender_id)
+    except (TypeError, ValueError):
+        return "Unknown"
+    if db is None:
+        return "Unknown"
+    sender = db.query(Owner).filter(Owner.id == sender_id_int).first()
+    if sender is None:
+        return "Unknown"
+    return str(getattr(sender, "message_display_name", None) or "Unknown").strip() or "Unknown"
+
+
+def _resolve_zone_name(
+    metadata: dict[str, Any],
+    *,
+    recipient_owner_id: int,
+) -> str:
+    """Prefer the hub owner's delivery zone name, else the sender zone name."""
+    recipient_zones = _as_dict(metadata.get("recipient_relevant_zones"))
+    recip = _as_dict(recipient_zones.get(str(recipient_owner_id)))
+    sender_zone = _as_dict(metadata.get("sender_relevant_zone"))
+    for candidate in (recip.get("name"), sender_zone.get("name")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return "Unknown zone"
+
+
+def _format_location(metadata: dict[str, Any]) -> str:
+    position = _as_dict(metadata.get("position"))
+    lat = position.get("latitude")
+    lon = position.get("longitude")
+    try:
+        lat_f = float(lat) if lat is not None else None
+        lon_f = float(lon) if lon is not None else None
+    except (TypeError, ValueError):
+        return "unknown"
+    if lat_f is None or lon_f is None:
+        return "unknown"
+    return f"{lat_f}, {lon_f}"
+
+
 def build_smart_home_webhook_payload(
     alarm_payload: dict[str, Any],
     *,
     recipient_owner_id: int,
     network_id: str | None = None,
+    db: Session | None = None,
 ) -> dict[str, Any]:
     """JSON body for client Home Assistant webhooks.
 
     Contract (client automation)::
 
-        title   -> trigger.json.title   (default \"System Update\")
+        title   -> trigger.json.title
+                   ``{broadcast_name} · {zone_name}``
         message -> trigger.json.message
+                   ``{TYPE}: {text}`` plus ``Location: {lat}, {lon}``
 
     Extra Hex Zone diagnostics are omitted so hubs only see the HA fields.
-    ``recipient_owner_id`` / ``network_id`` are accepted for call-site
-    compatibility but not included in the POST body.
+    ``network_id`` is accepted for call-site compatibility but not included
+    in the POST body.
     """
-    del recipient_owner_id, network_id  # reserved for future hub routing
+    del network_id  # reserved for future hub routing
+    metadata = _as_dict(alarm_payload.get("metadata"))
     msg_type = str(alarm_payload.get("type") or "").strip().upper()
-    text = str(alarm_payload.get("text") or "")
+    text = str(alarm_payload.get("text") or "").strip()
     if not text:
-        metadata = _as_dict(alarm_payload.get("metadata"))
         msg = _as_dict(metadata.get("msg"))
         text = str(
             msg.get("description")
             or msg.get("title")
             or msg.get("text")
             or ""
-        )
-    # Client HA title format, e.g. "PANIC in Safe Zone Patrol".
-    title = f"{msg_type} in Safe Zone Patrol" if msg_type else "System Update"
+        ).strip()
+
+    broadcast_name = _resolve_broadcast_name(db, alarm_payload)
+    zone_name = _resolve_zone_name(metadata, recipient_owner_id=recipient_owner_id)
+    location = _format_location(metadata)
+
+    title = f"{broadcast_name} · {zone_name}"
+    if msg_type and text:
+        body_line = f"{msg_type}: {text}"
+    elif msg_type:
+        body_line = msg_type
+    elif text:
+        body_line = text
+    else:
+        body_line = "System Update"
+    message = f"{body_line}\nLocation: {location}"
     return {
         "title": title,
-        "message": text,
+        "message": message,
     }
 
 
@@ -355,6 +420,7 @@ async def send_smart_home_webhooks(
                 alarm_payload,
                 recipient_owner_id=owner.id,
                 network_id=str(owner.zone_id or ""),
+                db=db,
             )
             ok = await _post_webhook(client, url=url, body=body)
             owner_results.append(

@@ -19,13 +19,19 @@ from app.services.smart_home_webhook_service import (
 )
 
 
-def _db_with_owner_and_hub(owner: SimpleNamespace, hid: str = "DEV-TEST1"):
+def _db_with_owner_and_hub(
+    owner: SimpleNamespace,
+    hid: str = "DEV-TEST1",
+    *,
+    sender: SimpleNamespace | None = None,
+):
     hub = SimpleNamespace(hid=hid, created_at=None)
 
     def query_side_effect(model):
         q = MagicMock()
         if model is Owner:
             q.filter.return_value.all.return_value = [owner]
+            q.filter.return_value.first.return_value = sender
         else:
             q.filter.return_value.order_by.return_value.all.return_value = [hub]
             q.filter.return_value.all.return_value = [hub]
@@ -102,6 +108,13 @@ def test_owner_matches_fanout_network_even_if_sender_differs():
 
 
 def test_build_smart_home_webhook_payload():
+    sender = SimpleNamespace(
+        id=7,
+        message_display_name="Alex Home",
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = sender
+
     body = build_smart_home_webhook_payload(
         {
             "id": 42,
@@ -114,18 +127,41 @@ def test_build_smart_home_webhook_payload():
             "zone_id": "ZONE-1",
             "created_at": "2026-01-01T00:00:00",
             "response_tracking_enabled": False,
-            "metadata": {"hid": "DEV-A1B2C3", "position": {"latitude": 1.0}},
+            "metadata": {
+                "hid": "DEV-A1B2C3",
+                "position": {"latitude": 43.6532, "longitude": -79.3832},
+                "sender_relevant_zone": {"name": "Front Gate"},
+                "recipient_relevant_zones": {
+                    "9": {"name": "North Yard"},
+                },
+            },
         },
         recipient_owner_id=9,
         network_id="ZONE-ABC",
+        db=db,
     )
     assert body == {
-        "title": "SENSOR in Safe Zone Patrol",
-        "message": "Door opened",
+        "title": "Alex Home · North Yard",
+        "message": "SENSOR: Door opened\nLocation: 43.6532, -79.3832",
     }
     assert "metadata" not in body
     assert "event" not in body
 
+
+def test_build_smart_home_webhook_payload_fallbacks():
+    body = build_smart_home_webhook_payload(
+        {
+            "type": "PANIC",
+            "text": "Help",
+            "sender_id": None,
+            "metadata": {"position": {"latitude": 1.0}},
+        },
+        recipient_owner_id=9,
+    )
+    assert body == {
+        "title": "Guest · Unknown zone",
+        "message": "PANIC: Help\nLocation: unknown",
+    }
 
 @pytest.mark.asyncio
 async def test_send_smart_home_webhooks_posts_to_same_network_owners():
@@ -136,7 +172,8 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
         sn_hid="DEV-TEST1",
         zone_id="ZONE-ABC",
     )
-    db = _db_with_owner_and_hub(owner)
+    sender = SimpleNamespace(id=2, message_display_name="Pat")
+    db = _db_with_owner_and_hub(owner, sender=sender)
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -166,6 +203,8 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
                 "metadata": {
                     "hid": "MOB-TEST",
                     "sender_network_id": "ZONE-ABC",
+                    "position": {"latitude": 10.5, "longitude": 20.25},
+                    "sender_relevant_zone": {"name": "Lobby"},
                 },
             },
         )
@@ -177,8 +216,8 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
     args, kwargs = mock_client.post.await_args
     assert args[0] == "https://hub.example.com/hooks/hex"
     assert kwargs["json"] == {
-        "title": "PANIC in Safe Zone Patrol",
-        "message": "Help",
+        "title": "Pat · Lobby",
+        "message": "PANIC: Help\nLocation: 10.5, 20.25",
     }
 
 

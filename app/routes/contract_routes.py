@@ -1014,7 +1014,10 @@ class PushTestRequest(BaseModel):
     title: str | None = Field(
         default=None,
         max_length=80,
-        description="Optional notification title; defaults to 'Hex Zone test push'.",
+        description=(
+            "Optional notification title; defaults to "
+            "'{network} · {zone} test push' for the authenticated owner."
+        ),
     )
     message: str | None = Field(
         default=None,
@@ -1067,7 +1070,8 @@ async def post_push_token_test(
     from app.database import session_maker
     from app.services import push_notification_service
 
-    title = (payload.title or "").strip() or "Hex Zone test push"
+    # Empty title → server builds ``{network} · {zone} test push`` from the owner.
+    title = (payload.title or "").strip() or None
     body = (payload.message or "").strip() or (
         "If you can read this, push delivery works end to end."
     )
