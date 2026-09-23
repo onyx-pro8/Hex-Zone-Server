@@ -70,6 +70,17 @@ async def get_current_guest(
     """Guest JWT + live **`guest_access_sessions`** / guest-pass / QR revocation check."""
     ctx = decode_guest_access_bearer(credentials)
     guest_access_service.require_guest_bearer_session_active(db, guest_id=ctx["guest_id"])
+    zone_id, should_broadcast = guest_access_service.touch_guest_last_seen(ctx["guest_id"])
+    if should_broadcast and zone_id:
+        staff = guest_access_service.zone_staff_owner_ids(db, zone_id)
+        if staff:
+            from app.websocket.manager import ws_manager
+
+            await ws_manager.broadcast_to_users(
+                sorted(staff),
+                "GUEST_PRESENCE",
+                {"guest_id": ctx["guest_id"], "online": True},
+            )
     return ctx
 
 

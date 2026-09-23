@@ -769,6 +769,13 @@ class ZoneMessageResponse(BaseModel):
             "(**`sender_guest_id`** or **`body`/metadata **`guest_id`**)."
         ),
     )
+    guest_online: Optional[bool] = Field(
+        default=None,
+        description=(
+            "When the row is guest-authored Access traffic, whether that guest was seen on a "
+            "guest API recently (**`guest_access_sessions.last_seen_at`**)."
+        ),
+    )
     permission_visibility: Optional[Literal["direct", "zone_pending_broadcast"]] = Field(
         default=None,
         description=(

@@ -519,6 +519,17 @@ def zone_message_event_to_member_zone_message_response(
         relevant_zone_fields=relevant_zone_fields,
     )
 
+    guest_marker = access_thread_guest_marker(row)
+    guest_online = None
+    is_guest_sender = bool(row.sender_guest_id) or (
+        row.sender_id is None and bool(guest_marker)
+    )
+    if db is not None and is_guest_sender and guest_marker:
+        from app.services import guest_access_service as _gas
+
+        sess = _gas.get_guest_access_session_by_guest_id(db, guest_marker)
+        guest_online = _gas.guest_session_is_online(sess)
+
     return ZoneMessageResponse(
         id=row.id,
         zone_id=str(privacy["zone_id"]),
@@ -538,7 +549,8 @@ def zone_message_event_to_member_zone_message_response(
         latitude=privacy.get("latitude"),
         longitude=privacy.get("longitude"),
         delivered_owner_ids=privacy.get("delivered_owner_ids"),
-        guest_id=access_thread_guest_marker(row),
+        guest_id=guest_marker,
+        guest_online=guest_online,
         permission_visibility=perm_vis,
         guest_access_session_id=row.guest_access_session_id,
         session_pending=session_pending,

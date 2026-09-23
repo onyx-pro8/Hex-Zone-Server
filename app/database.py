@@ -350,6 +350,11 @@ def init_db():
             )
             conn.execute(
                 text(
+                    "ALTER TABLE guest_access_sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP;"
+                )
+            )
+            conn.execute(
+                text(
                     "ALTER TABLE guest_access_qr_tokens "
                     "ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;"
                 )

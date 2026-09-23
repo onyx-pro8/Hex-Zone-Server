@@ -207,6 +207,14 @@ class GuestAccessSessionListItem(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     created_at: datetime
+    online: bool = Field(
+        default=False,
+        description="True when this guest has called an authenticated guest API within the last few minutes.",
+    )
+    last_seen_at: datetime | None = Field(
+        default=None,
+        description="UTC time of the most recent authenticated guest API call.",
+    )
     guest_status: Literal["EXPECTED", "UNEXPECTED", "APPROVED", "REJECTED"] = Field(
         description="Derived guest-facing status (matches GET /api/access/session/{guest_id})."
     )

@@ -750,6 +750,8 @@ def serialize_guest_session_row(db: Session, row: GuestAccessSession) -> dict:
         "guest_status": base["status"],
         "status": _guest_row_client_status(row),
         "expectation": "expected" if row.kind == "expected" else "unexpected",
+        "online": guest_session_is_online(row),
+        "last_seen_at": row.last_seen_at,
     }
 
 
@@ -759,6 +761,56 @@ def get_guest_access_session_by_guest_id(db: Session, guest_id: str) -> GuestAcc
     if not gid:
         return None
     return db.query(GuestAccessSession).filter(GuestAccessSession.guest_id == gid).first()
+
+
+GUEST_ONLINE_WINDOW_SECONDS = 180
+GUEST_LAST_SEEN_WRITE_THROTTLE_SECONDS = 15
+
+
+def guest_session_is_online(row: GuestAccessSession | None) -> bool:
+    """True when the guest JWT is still valid and they hit a guest API recently."""
+    if row is None or row.last_seen_at is None:
+        return False
+    if row.access_revoked_at is not None:
+        return False
+    age = (datetime.utcnow() - row.last_seen_at).total_seconds()
+    return age <= GUEST_ONLINE_WINDOW_SECONDS
+
+
+def touch_guest_last_seen(guest_id: str) -> tuple[str | None, bool]:
+    """Persist **last_seen_at** in its own session.
+
+    Returns ``(zone_id, should_broadcast_presence)``. Writes are throttled so a
+    guest polling ``/messages`` every few seconds does not hammer the table.
+    """
+    from app.database import session_maker
+
+    gid = (guest_id or "").strip()
+    if not gid:
+        return None, False
+    db = session_maker()
+    try:
+        row = (
+            db.query(GuestAccessSession)
+            .filter(GuestAccessSession.guest_id == gid)
+            .first()
+        )
+        if row is None or row.access_revoked_at is not None:
+            return None, False
+        now = datetime.utcnow()
+        prev = row.last_seen_at
+        age = None if prev is None else (now - prev).total_seconds()
+        if age is not None and age < GUEST_LAST_SEEN_WRITE_THROTTLE_SECONDS:
+            return row.zone_id, False
+        row.last_seen_at = now
+        db.commit()
+        return row.zone_id, True
+    except Exception:
+        logger.exception("Failed to touch guest last_seen for %s", gid)
+        db.rollback()
+        return None, False
+    finally:
+        db.close()
 
 
 def list_guest_sessions_for_zone(

@@ -34,3 +34,5 @@ class GuestAccessSession(Base):
     # Snapshot of guest-facing instruction at arrival (expected schedule, guest pass, or pending unexpected).
     arrival_guest_message_snapshot = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Refreshed on authenticated guest API calls so members can show online/offline.
+    last_seen_at = Column(DateTime, nullable=True)

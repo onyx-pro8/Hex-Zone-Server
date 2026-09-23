@@ -16,7 +16,7 @@ Server sends **`type`** + **`data`** envelopes. Common **`type`** values:
 - **`MEMBER_PRESENCE`** — `{ owner_id, online }` when a member connects/disconnects
 - **`LOCATION_UPDATE_ACK`** — ack after a successful **`LOCATION_UPDATE`**
 - **`guest_zone_message`** — legacy **`POST /api/guest/messages`** push
-- **`GUEST_PRESENCE`** — `{ guest_id, online }` when a guest sends Access CHAT
+- **`GUEST_PRESENCE`** — `{ guest_id, online }` when a guest hits `/api/guest/*` or sends Access CHAT
 """
 import json
 import logging
