@@ -396,16 +396,42 @@ def zone_message_event_to_member_zone_message_response(
 
     # Sender display name: prefer a broadcast name embedded in the event payload
     # (set by clients), else the sender owner's broadcast name / first+last.
+    # Guest-authored Access rows use the session guest_name (e.g. "Guest 3").
     broadcast_name = None
     embedded = meta.get("broadcast_name") or meta.get("broadcastName")
     if isinstance(embedded, str) and embedded.strip():
         broadcast_name = embedded.strip()
-    elif db is not None and row.sender_id is not None:
+    if not broadcast_name:
+        body_for_name = row.body_json if isinstance(row.body_json, dict) else {}
+        for key in ("broadcast_name", "broadcastName", "guest_name", "guestName"):
+            raw_name = body_for_name.get(key)
+            if isinstance(raw_name, str) and raw_name.strip() and (
+                row.sender_guest_id or row.sender_id is None
+            ):
+                broadcast_name = raw_name.strip()
+                break
+            if key in ("broadcast_name", "broadcastName") and isinstance(raw_name, str) and raw_name.strip():
+                broadcast_name = raw_name.strip()
+                break
+    if not broadcast_name and db is not None and row.sender_id is not None:
         from app.models import Owner
 
         sender_owner = db.get(Owner, row.sender_id)
         if sender_owner is not None:
             broadcast_name = sender_owner.message_display_name
+    if (
+        not broadcast_name
+        and db is not None
+        and (row.sender_guest_id or row.sender_id is None)
+    ):
+        gid = access_thread_guest_marker(row)
+        if gid:
+            from app.services import guest_access_service as _gas
+
+            sess = _gas.get_guest_access_session_by_guest_id(db, gid)
+            session_name = (getattr(sess, "guest_name", None) or "").strip() if sess else ""
+            if session_name:
+                broadcast_name = session_name
 
     latitude = None
     longitude = None
@@ -678,7 +704,12 @@ def create_guest_zone_message(
         scope=type_scope(canonical),
         text=display_text or "(no text)",
         body_json=body,
-        metadata_json={"flow": "guest_api", "guest_id": guest_id},
+        metadata_json={
+            "flow": "guest_api",
+            "guest_id": guest_id,
+            "guest_name": guest_display_name,
+            "broadcast_name": guest_display_name,
+        },
     )
     db.add(event)
     db.flush()
@@ -704,7 +735,10 @@ async def notify_access_chat_inbox_ws(db: Session, row: ZoneMessageEvent) -> Non
     if not recipients:
         return
 
-    payload = zone_message_event_to_member_zone_message_response(row).model_dump(mode="json")
+    viewer = row.receiver_id or row.sender_id
+    payload = zone_message_event_to_member_zone_message_response(
+        row, db=db, viewer_owner_id=int(viewer) if viewer is not None else None,
+    ).model_dump(mode="json")
     msg_type = str(row.type or "")
     deliver_to = [
         uid
@@ -719,6 +753,13 @@ async def notify_access_chat_inbox_ws(db: Session, row: ZoneMessageEvent) -> Non
     if not deliver_to:
         return
     await ws_manager.broadcast_to_users(sorted(deliver_to), "NEW_MESSAGE", payload)
+    guest_sender = (row.sender_guest_id or "").strip()
+    if guest_sender:
+        await ws_manager.broadcast_to_users(
+            sorted(deliver_to),
+            "GUEST_PRESENCE",
+            {"guest_id": guest_sender, "online": True},
+        )
 
 
 def create_member_to_guest_zone_message(
