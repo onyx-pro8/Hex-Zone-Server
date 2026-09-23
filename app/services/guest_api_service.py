@@ -17,7 +17,7 @@ from app.domain.message_types import (
     type_scope,
 )
 from app.domain.permission_visibility import PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST
-from app.models import GuestAccessSession, Owner, Zone, ZoneMessageEvent
+from app.models import Device, GuestAccessSession, Owner, Zone, ZoneMessageEvent
 from app.services import message_block_service
 from app.services.access_policy import zone_listing_owner_ids
 from app.models.owner import OwnerRole
@@ -71,6 +71,18 @@ def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
         .order_by(Owner.id.asc())
         .all()
     )
+    online_owner_ids: set[int] = set()
+    if owners:
+        online_rows = (
+            db.query(Device.owner_id)
+            .filter(
+                Device.owner_id.in_([o.id for o in owners]),
+                Device.is_online.is_(True),
+            )
+            .distinct()
+            .all()
+        )
+        online_owner_ids = {int(r[0]) for r in online_rows if r and r[0] is not None}
     out: list[dict] = []
     for o in owners:
         role = o.role.value if isinstance(o.role, OwnerRole) else str(o.role)
@@ -83,6 +95,7 @@ def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
                 "display_name": display,
                 "role": role,
                 "can_receive_chat": can_chat,
+                "online": o.id in online_owner_ids,
             }
         )
     return out

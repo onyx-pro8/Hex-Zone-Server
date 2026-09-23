@@ -151,6 +151,10 @@ class GuestPeerItem(BaseModel):
     can_receive_chat: bool = Field(
         description="False if the member blocked **CHAT** type delivery (guest sends still validated server-side).",
     )
+    online: bool = Field(
+        default=False,
+        description="True when this member currently has a live WebSocket session (device marked online).",
+    )
 
 
 class GuestPeersData(BaseModel):
@@ -178,6 +182,7 @@ class GuestPeersResponse(BaseModel):
                                 "display_name": "Zone Admin",
                                 "role": "administrator",
                                 "can_receive_chat": True,
+                                "online": True,
                             }
                         ],
                     },
