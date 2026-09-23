@@ -837,7 +837,7 @@ def init_db():
                         requested_by INTEGER NOT NULL REFERENCES owners(id) ON DELETE SET NULL,
                         guest_name VARCHAR(255),
                         notes VARCHAR(1000),
-                        status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+                        status VARCHAR(16) NOT NULL DEFAULT 'ACCEPTED',
                         reviewed_by INTEGER REFERENCES owners(id) ON DELETE SET NULL,
                         used_by_guest_id VARCHAR(36),
                         expires_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,

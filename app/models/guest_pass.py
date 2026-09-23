@@ -27,7 +27,7 @@ class GuestPass(Base):
     status = Column(
         Enum(GuestPassStatus, name="guestpassstatus", create_constraint=False),
         nullable=False,
-        default=GuestPassStatus.PENDING,
+        default=GuestPassStatus.ACCEPTED,
         index=True,
     )
     reviewed_by = Column(Integer, ForeignKey("owners.id", ondelete="SET NULL"), nullable=True, index=True)

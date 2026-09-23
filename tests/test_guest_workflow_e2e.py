@@ -233,6 +233,7 @@ async def test_guest_pass_created_permission_not_visible_to_unpaired_staff(test_
             },
         )
         assert gp.status_code in (200, 201), gp.text
+        assert gp.json()["data"]["status"] == "ACCEPTED"
         event_id = gp.json()["data"]["event_id"]
 
         inbox_c = await client.get(
@@ -260,6 +261,13 @@ async def test_guest_pass_created_permission_not_visible_to_unpaired_staff(test_
             and event_id in str(r.get("message", ""))
             for r in inbox_a.json()
         )
+
+        arrival = await client.post(
+            "/api/access/permission",
+            json={"zone_id": zone_id, "guest_name": "Pass Guest", "event_id": event_id},
+        )
+        assert arrival.status_code == 200, arrival.text
+        assert arrival.json()["data"]["status"] == "EXPECTED"
 
 
 @pytest.mark.asyncio

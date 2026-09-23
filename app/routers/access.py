@@ -99,7 +99,8 @@ Validates that **zone_id** exists (explicit or resolved from token), then resolv
    (`used_by_guest_id` is set),
    the guest is auto-approved as **EXPECTED**, and a `guest_is_here` WebSocket event is
    broadcast to all zone members. Guest passes are created via **`POST /api/access/guest-passes`**
-   and accepted by an admin via **`POST /api/access/guest-passes/{id}/accept`**.
+   (a new unique **`event_id`** is **ACCEPTED** immediately). An admin may revoke with
+   **`POST /api/access/guest-passes/{id}/revoke`**.
 2. **Access Schedule match**: finds an active schedule whose time window contains server time
    and matches **`event_id`** (canonical rules above) or **`guest_name`**.
 3. **No match → UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`**
@@ -116,7 +117,7 @@ Those **PERMISSION** rows live in **`zone_message_events`**. **Guest-facing arri
 unexpected pending, guest pass verified) may be overridden per zone via
 **`GET` / `PATCH` / `PUT /api/access/zones/{zone_id}/guest-arrival-messages`**; each successful arrival **snapshots**
 the effective **`message`** on **`guest_access_sessions`** and embeds the same value as **`guest_message`** on the
-**PERMISSION** event so staff and guest stay aligned. **Guest pass** create/accept/reject/revoke also appends
+**PERMISSION** event so staff and guest stay aligned. **Guest pass** create/revoke (and legacy accept/reject) also appends
 **`PERMISSION`** rows (`metadata.flow` **`guest_pass_lifecycle`**, **`body.code`** one of **`GUEST_PASS_*`**).
 Eligible owners see merged **`PERMISSION`** lines on **`GET /messages?owner_id=`**; guest-facing threads use
 **`GET /api/guest/messages`** / **`GET /api/access/guest-messages`** where a session or guest id applies.
@@ -261,8 +262,10 @@ def _network_token_contract_payload(row) -> NetworkGuestQrTokenData:
     description=(
         "**Bearer** member JWT. Any authenticated zone member can pre-register an expected guest by "
         "submitting a guest pass with a unique **`event_id`** and an **`expires_at`** datetime.\n\n"
-        "The pass is created in **PENDING** status. A zone administrator must accept it "
-        "(**`POST /api/access/guest-passes/{id}/accept`**) before it becomes active for auto-approval.\n\n"
+        "A new unique **`event_id`** is created in **ACCEPTED** status and is immediately active for "
+        "auto-approval — no administrator review. Duplicate **`event_id`** values for the same zone "
+        "are rejected (**`DUPLICATE_EVENT_ID`**). A zone administrator may later revoke the pass "
+        "(**`POST /api/access/guest-passes/{id}/revoke`**).\n\n"
         "When a guest later arrives at **`POST /api/access/permission`** with the same **`event_id`**, "
         "the server automatically approves the guest if a valid accepted pass exists.\n\n"
         "**Side effects** (same DB transaction as this response): a **`ZoneMessageEvent`** row with **`type`** "
@@ -271,7 +274,7 @@ def _network_token_contract_payload(row) -> NetworkGuestQrTokenData:
         "A **`PERMISSION_MESSAGE`** WebSocket payload (same codes and copy) is also sent to **zone staff** "
         "(see `delivered_owner_ids` in the server implementation)."
     ),
-    response_description="Created guest pass with PENDING status.",
+    response_description="Created guest pass with ACCEPTED status.",
     responses={
         status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
         status.HTTP_403_FORBIDDEN: {
@@ -334,7 +337,7 @@ async def create_guest_pass(
             event_id=row.event_id,
             guest_name=row.guest_name,
             notes=row.notes,
-            status="PENDING",
+            status="ACCEPTED",
             requested_by=row.requested_by,
             expires_at=row.expires_at,
             created_at=row.created_at,
@@ -405,8 +408,9 @@ async def list_guest_passes(
     operation_id="access_accept_guest_pass",
     summary="Accept a guest pass (admin only)",
     description=(
-        "**Bearer** JWT; **zone administrator** only. Accepts a **PENDING** guest pass, "
-        "setting its status to **ACCEPTED**. Once accepted, the pass is active for auto-approval "
+        "**Bearer** JWT; **zone administrator** only. Legacy: accepts a **PENDING** guest pass "
+        "(rows created before auto-accept). New unique event IDs are **ACCEPTED** on create. "
+        "Once accepted, the pass is active for auto-approval "
         "when a guest arrives at **`POST /api/access/permission`** with the matching **`event_id`**.\n\n"
         "**Side effects:** a persisted **`ZoneMessageEvent`** **`PERMISSION`** row (`metadata.flow` = **`guest_pass_lifecycle`**, "
         "**`body.code`** = **`GUEST_PASS_ACCEPTED`**) merged into **`GET /messages`** for eligible owners, plus a "
@@ -475,8 +479,9 @@ async def accept_guest_pass(
     operation_id="access_reject_guest_pass",
     summary="Reject a guest pass (admin only)",
     description=(
-        "**Bearer** JWT; **zone administrator** only. Rejects a **PENDING** guest pass, "
-        "setting its status to **REJECTED**. A rejected pass cannot be used for auto-approval.\n\n"
+        "**Bearer** JWT; **zone administrator** only. Legacy: rejects a **PENDING** guest pass "
+        "(rows created before auto-accept). New unique event IDs are **ACCEPTED** on create. "
+        "A rejected pass cannot be used for auto-approval.\n\n"
         "**Side effects:** a persisted **`ZoneMessageEvent`** **`PERMISSION`** row (`metadata.flow` = **`guest_pass_lifecycle`**, "
         "**`body.code`** = **`GUEST_PASS_REJECTED`**) merged into **`GET /messages`** for eligible owners, plus a "
         "**`PERMISSION_MESSAGE`** WebSocket to **zone staff**."

@@ -19,6 +19,7 @@ class GuestPassCreateRequest(BaseModel):
         max_length=100,
         description=(
             "Unique event identifier the guest will present on arrival. "
+            "A new unique event_id is **ACCEPTED** immediately (no admin review). "
             "Matching uses canonical rules (see **POST /api/access/permission**): "
             "Unicode case-insensitive for general ids; **EVT-1234** and **1234** are equivalent when the suffix is all digits."
         ),
@@ -63,7 +64,10 @@ class GuestPassCreatedData(BaseModel):
     event_id: str = Field(description="Unique event identifier for guest arrival matching.")
     guest_name: str | None = Field(default=None, description="Expected guest name (informational).")
     notes: str | None = Field(default=None, description="Reason or description.")
-    status: Literal["PENDING"] = Field(default="PENDING", description="Always PENDING on creation.")
+    status: Literal["ACCEPTED"] = Field(
+        default="ACCEPTED",
+        description="Always ACCEPTED on creation. A new unique event_id is active immediately.",
+    )
     requested_by: int = Field(description="owner_id of the member who created the pass.")
     expires_at: datetime = Field(description="ISO 8601 UTC expiry.")
     created_at: datetime = Field(description="ISO 8601 UTC creation timestamp.")
@@ -77,7 +81,7 @@ class GuestPassCreatedData(BaseModel):
                     "event_id": "EVT-2026-0515",
                     "guest_name": "Jane Doe",
                     "notes": "Client meeting, conference room B",
-                    "status": "PENDING",
+                    "status": "ACCEPTED",
                     "requested_by": 123,
                     "expires_at": "2026-05-15T18:00:00",
                     "created_at": "2026-05-12T10:30:00",

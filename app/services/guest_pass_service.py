@@ -76,7 +76,7 @@ def create_guest_pass(
         requested_by=owner.id,
         guest_name=(guest_name or "").strip() or None,
         notes=(notes or "").strip() or None,
-        status=GuestPassStatus.PENDING,
+        status=GuestPassStatus.ACCEPTED,
         expires_at=exp,
     )
     db.add(row)
@@ -313,18 +313,12 @@ def build_guest_pass_ws_payload(
 
     if code == "GUEST_PASS_CREATED":
         decision = "EXPECTED_GUEST"
-        schedule_match = False
-        sender_text = "Your guest pass request has been submitted and is pending admin review."
-        if guest_name_raw:
-            member_text = (
-                f"{requester_name} requested a guest pass (Event ID: {event_id}) "
-                f"for {guest_name_raw}, expires {expires_label}."
-            )
-        else:
-            member_text = (
-                f"{requester_name} requested a guest pass (Event ID: {event_id}), "
-                f"expires {expires_label}."
-            )
+        schedule_match = True
+        sender_text = f"Guest pass {event_id} is active. Share this Event ID with your guest."
+        member_text = (
+            f"{requester_name} created a guest pass (Event ID: {event_id}){for_guest}. "
+            f"Guests with this Event ID will be auto-approved until {expires_label}."
+        )
     elif code == "GUEST_PASS_ACCEPTED":
         decision = "EXPECTED_GUEST"
         schedule_match = True
