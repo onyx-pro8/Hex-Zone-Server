@@ -83,11 +83,15 @@ def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
             .all()
         )
         online_owner_ids = {int(r[0]) for r in online_rows if r and r[0] is not None}
+    # Prefer live WebSocket presence when available (Device flags can lag).
+    from app.websocket.manager import ws_manager
+
     out: list[dict] = []
     for o in owners:
         role = o.role.value if isinstance(o.role, OwnerRole) else str(o.role)
         display = f"{o.first_name} {o.last_name}".strip() or o.email
         can_chat = not guest_type_blocked(db, o.id, CanonicalMessageType.CHAT.value)
+        online = o.id in online_owner_ids or ws_manager.is_user_connected(o.id)
         out.append(
             {
                 "peer_kind": "owner",
@@ -95,7 +99,7 @@ def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
                 "display_name": display,
                 "role": role,
                 "can_receive_chat": can_chat,
-                "online": o.id in online_owner_ids,
+                "online": online,
             }
         )
     return out
@@ -778,6 +782,14 @@ async def notify_access_chat_inbox_ws(db: Session, row: ZoneMessageEvent) -> Non
     if not deliver_to:
         return
     await ws_manager.broadcast_to_users(sorted(deliver_to), "NEW_MESSAGE", payload)
+    guest_marker = access_thread_guest_marker(row)
+    if guest_marker:
+        guest_payload = serialize_zone_message_for_guest(row, guest_marker)
+        await ws_manager.broadcast_to_users(
+            [f"guest:{guest_marker}"],
+            "guest_zone_message",
+            guest_payload,
+        )
     guest_sender = (row.sender_guest_id or "").strip()
     if guest_sender:
         await ws_manager.broadcast_to_users(

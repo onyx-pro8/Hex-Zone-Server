@@ -102,7 +102,9 @@ class WebSocketManager:
             ]
         await self._broadcast(recipients, "NEW_MESSAGE", payload)
 
-    async def broadcast_to_users(self, user_ids: list[int], event_type: str, payload: dict) -> None:
+    async def broadcast_to_users(
+        self, user_ids: list[int | str], event_type: str, payload: dict
+    ) -> None:
         user_id_set = {str(item) for item in user_ids}
         async with self._lock:
             recipients = [
