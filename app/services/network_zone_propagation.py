@@ -151,6 +151,41 @@ def _compose_zone_label(*, name: str | None, network_id: str | None) -> str:
     return clean_name or clean_network or "Zone"
 
 
+def _compose_option_from_zone(db: Session, zone: Zone) -> dict:
+    network_id = (zone.zone_id or "").strip()
+    admin = resolve_network_administrator(db, network_id) if network_id else None
+    admin_id = int(admin.id) if admin is not None else None
+    name = str(getattr(zone, "name", None) or "").strip() or None
+    return {
+        "zone_record_id": int(zone.id),
+        "zone_id": network_id,
+        "name": name,
+        "label": _compose_zone_label(name=name, network_id=network_id),
+        "tier": (
+            "primary"
+            if _is_primary_zone_row(zone, network_admin_id=admin_id)
+            else "secondary"
+        ),
+    }
+
+
+def list_active_compose_zone_rows(db: Session) -> list[Zone]:
+    """Active zone rows available for system-admin compose (any network)."""
+    return (
+        db.query(Zone)
+        .filter(Zone.active.is_(True))
+        .order_by(Zone.name.asc(), Zone.id.asc())
+        .all()
+    )
+
+
+def list_all_compose_zones(db: Session) -> list[dict]:
+    """Every active zone, for system-admin compose (location not required)."""
+    options = [_compose_option_from_zone(db, zone) for zone in list_active_compose_zone_rows(db)]
+    options.sort(key=lambda row: (str(row.get("label") or ""), int(row["zone_record_id"])))
+    return options
+
+
 def list_matched_compose_zones(
     db: Session,
     *,
@@ -165,27 +200,75 @@ def list_matched_compose_zones(
     if network_filter:
         zone_rows = [z for z in zone_rows if (z.zone_id or "").strip() == network_filter]
 
-    options: list[dict] = []
-    for zone in zone_rows:
-        network_id = (zone.zone_id or "").strip()
-        admin = resolve_network_administrator(db, network_id) if network_id else None
-        admin_id = int(admin.id) if admin is not None else None
-        name = str(getattr(zone, "name", None) or "").strip() or None
-        options.append(
-            {
-                "zone_record_id": int(zone.id),
-                "zone_id": network_id,
-                "name": name,
-                "label": _compose_zone_label(name=name, network_id=network_id),
-                "tier": (
-                    "primary"
-                    if _is_primary_zone_row(zone, network_admin_id=admin_id)
-                    else "secondary"
-                ),
-            }
-        )
+    options = [_compose_option_from_zone(db, zone) for zone in zone_rows]
     options.sort(key=lambda row: (str(row.get("label") or ""), int(row["zone_record_id"])))
     return options
+
+
+def resolve_admin_selected_zone_recipients(
+    db: Session,
+    sender: Owner,
+    *,
+    target_zone_record_id: int | None = None,
+    exclude_owner_id: int | None = None,
+) -> tuple[list[str], list[int], list[int], dict]:
+    """Fan-out as if the sender were inside the selected zone(s).
+
+    Used by the system administrator: they may pick any active zone, or omit
+    ``target_zone_record_id`` to reach every network's zones at once.
+    Primary vs secondary rules are the same as live geo-propagation.
+    """
+    all_rows = list_active_compose_zone_rows(db)
+    if target_zone_record_id is not None:
+        selected_id = int(target_zone_record_id)
+        zone_rows = [z for z in all_rows if int(z.id) == selected_id]
+        if not zone_rows:
+            return [], [], [], _empty_propagation_meta()
+        selected = zone_rows[0]
+        result = _recipients_for_network_zone_rows(
+            db,
+            network_id=(selected.zone_id or "").strip(),
+            network_rows=zone_rows,
+            sender=sender,
+            exclude_owner_id=exclude_owner_id,
+        )
+        if result is None:
+            return [], [], [], _empty_propagation_meta(
+                network_zone_id=(selected.zone_id or "").strip()
+            )
+        zone_ids, record_ids, recipients, meta = result
+        return zone_ids, record_ids, recipients, {**meta, "admin_virtual_location": True}
+
+    by_network: dict[str, list[Zone]] = {}
+    for zone_row in all_rows:
+        nid = (zone_row.zone_id or "").strip()
+        if nid:
+            by_network.setdefault(nid, []).append(zone_row)
+
+    partial_results: list[tuple[list[str], list[int], list[int], dict]] = []
+    for network_id, network_rows in by_network.items():
+        partial = _recipients_for_network_zone_rows(
+            db,
+            network_id=network_id,
+            network_rows=network_rows,
+            sender=sender,
+            exclude_owner_id=None,
+        )
+        if partial is not None:
+            partial_results.append(partial)
+
+    if not partial_results:
+        return [], [], [], _empty_propagation_meta(network_zone_id=(sender.zone_id or "").strip())
+
+    zone_ids, record_ids, recipients, meta = _merge_propagation_results(partial_results)
+    if exclude_owner_id is not None:
+        recipients = [oid for oid in recipients if oid != int(exclude_owner_id)]
+        meta = {**meta, "recipient_owner_ids": recipients}
+    return zone_ids, record_ids, recipients, {
+        **meta,
+        "admin_virtual_location": True,
+        "admin_all_zones": True,
+    }
 
 
 def _recipients_for_network_zone_rows(

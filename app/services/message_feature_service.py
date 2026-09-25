@@ -41,11 +41,14 @@ from app.services.member_service import (
     set_member_live_position,
     upsert_member_location,
 )
+from app.services.account_type_policy import is_system_administrator
 from app.services.message_relevant_zone_service import attach_relevant_zone_metadata
 from app.services.network_zone_propagation import (
     resolve_network_administrator,
     resolve_network_geo_propagation_recipients,
+    resolve_admin_selected_zone_recipients,
     expand_primary_zone_gps_alert_recipients,
+    list_all_compose_zones,
     list_matched_compose_zones,
 )
 from app.services.private_plus_messaging import (
@@ -136,10 +139,12 @@ def _resolve_unknown_origin(
 ) -> tuple[float, float, str]:
     """Origin for UNKNOWN nearest-neighbour fan-out (live message GPS, else member_locations)."""
     try:
+        if payload.position is None:
+            raise TypeError("position is required for UNKNOWN")
         msg_lat = float(payload.position.latitude)
         msg_lon = float(payload.position.longitude)
         return msg_lat, msg_lon, "message_position"
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         pass
     live = get_owner_live_coordinates(db, sender.id)
     if live is not None:
@@ -184,11 +189,35 @@ def _geo_evaluation_coordinates(
     """Coordinates used to test acceptable-zone geometry for propagation."""
     if canonical_type in REGISTERED_ADDRESS_GEO_TYPES:
         return _resolve_registered_home_coordinates(db, sender)
+    if payload.position is None:
+        raise GeoMessageSkipped(
+            {
+                "skipped": True,
+                "reason": "no_origin_coordinates",
+                "message": "This message type requires a send location.",
+            }
+        )
     return (
         float(payload.position.latitude),
         float(payload.position.longitude),
         "message_position",
     )
+
+
+def _optional_geo_evaluation_coordinates(
+    db: Session,
+    sender: Owner,
+    payload: PropagationMessageCreate,
+    canonical_type: CanonicalMessageType,
+) -> tuple[float | None, float | None, str]:
+    """Best-effort coordinates; never raises. Used for metadata / admin send."""
+    try:
+        lat, lon, source = _geo_evaluation_coordinates(db, sender, payload, canonical_type)
+        return lat, lon, source
+    except GeoMessageSkipped:
+        return None, None, "no_coordinates"
+    except (TypeError, ValueError, AttributeError):
+        return None, None, "no_coordinates"
 
 
 def _to_canonical_type(message_type: MessageFeatureType) -> CanonicalMessageType:
@@ -468,6 +497,30 @@ def search_private_message_recipients(
     target_zone_record_id: int | None = None,
 ) -> dict:
     """Search network members by name or email for PRIVATE compose (invited members only)."""
+    if is_system_administrator(sender):
+        zone_ids, _, candidate_ids, _ = resolve_admin_selected_zone_recipients(
+            db,
+            sender,
+            target_zone_record_id=target_zone_record_id,
+            exclude_owner_id=sender.id,
+        )
+        live = get_owner_live_coordinates(db, sender.id)
+        lat = latitude if latitude is not None else (live[0] if live else None)
+        lon = longitude if longitude is not None else (live[1] if live else None)
+        members = _private_search_members(
+            db,
+            candidate_ids,
+            query,
+            limit=limit,
+            origin_lat=float(lat) if lat is not None else None,
+            origin_lon=float(lon) if lon is not None else None,
+        )
+        return {
+            "zone_ids": zone_ids,
+            "members": members,
+            "location_status": "admin_all_zones",
+        }
+
     live = get_owner_live_coordinates(db, sender.id)
     lat = latitude if latitude is not None else (live[0] if live else None)
     lon = longitude if longitude is not None else (live[1] if live else None)
@@ -594,30 +647,50 @@ def _zone_based_recipients(
     Secondary acceptable zone → zone creator only.
     Outside both → no recipients.
     """
-    eval_lat, eval_lon, geo_source = _geo_evaluation_coordinates(
-        db, sender, payload, canonical_type
-    )
     target_zone_record_id = (
         int(payload.zone_record_id) if payload.zone_record_id is not None else None
     )
-    sender_zone_ids, sender_zone_record_ids, recipient_owner_ids, zone_meta = (
-        resolve_geo_propagation_recipient_owner_ids(
-            db,
-            latitude=eval_lat,
-            longitude=eval_lon,
-            exclude_owner_id=sender.id if exclude_sender_from_recipients else None,
-            sender=sender,
-            network_zone_id=network_zone_id,
-            target_zone_record_id=target_zone_record_id,
+    exclude_id = sender.id if exclude_sender_from_recipients else None
+
+    if is_system_administrator(sender):
+        sender_zone_ids, sender_zone_record_ids, recipient_owner_ids, zone_meta = (
+            resolve_admin_selected_zone_recipients(
+                db,
+                sender,
+                target_zone_record_id=target_zone_record_id,
+                exclude_owner_id=exclude_id,
+            )
         )
-    )
-    if target_zone_record_id is not None and target_zone_record_id not in {
-        int(rid) for rid in sender_zone_record_ids
-    }:
-        raise SelectedZoneNotContainingError(
-            "You are not currently inside the selected zone."
+        if target_zone_record_id is not None and target_zone_record_id not in {
+            int(rid) for rid in sender_zone_record_ids
+        }:
+            raise SelectedZoneNotContainingError(
+                "Selected zone was not found or is inactive."
+            )
+        zone_meta = {**zone_meta, "geo_evaluation_source": "system_admin_selected_zone"}
+        eval_lat, eval_lon = None, None
+    else:
+        eval_lat, eval_lon, geo_source = _geo_evaluation_coordinates(
+            db, sender, payload, canonical_type
         )
-    zone_meta = {**zone_meta, "geo_evaluation_source": geo_source}
+        sender_zone_ids, sender_zone_record_ids, recipient_owner_ids, zone_meta = (
+            resolve_geo_propagation_recipient_owner_ids(
+                db,
+                latitude=eval_lat,
+                longitude=eval_lon,
+                exclude_owner_id=exclude_id,
+                sender=sender,
+                network_zone_id=network_zone_id,
+                target_zone_record_id=target_zone_record_id,
+            )
+        )
+        if target_zone_record_id is not None and target_zone_record_id not in {
+            int(rid) for rid in sender_zone_record_ids
+        }:
+            raise SelectedZoneNotContainingError(
+                "You are not currently inside the selected zone."
+            )
+        zone_meta = {**zone_meta, "geo_evaluation_source": geo_source}
 
     recipient_owner_ids, zone_meta = apply_private_plus_network_shared_recipients(
         db,
@@ -626,30 +699,36 @@ def _zone_based_recipients(
         sender_zone_record_ids=sender_zone_record_ids,
         recipient_owner_ids=recipient_owner_ids,
         zone_meta=zone_meta,
-        exclude_sender_id=sender.id if exclude_sender_from_recipients else None,
+        exclude_sender_id=exclude_id,
     )
     recipient_owner_ids, zone_meta = expand_primary_zone_gps_alert_recipients(
         db,
         message_type=canonical_type,
         recipient_owner_ids=recipient_owner_ids,
         zone_meta=zone_meta,
-        exclude_sender_id=sender.id if exclude_sender_from_recipients else None,
+        exclude_sender_id=exclude_id,
     )
 
     if scope == MessageScope.PRIVATE and payload.receiver_owner_id is None:
         raise ValueError("receiver_owner_id is required for private-scope message types")
 
     if scope == MessageScope.PRIVATE:
-        _assert_private_receiver_reachable(
-            db,
-            sender,
-            payload.receiver_owner_id,
-            latitude=eval_lat,
-            longitude=eval_lon,
-            sender_zone_record_ids=sender_zone_record_ids,
-            network_zone_id=network_zone_id,
-            target_zone_record_id=target_zone_record_id,
-        )
+        if is_system_administrator(sender):
+            if payload.receiver_owner_id not in set(recipient_owner_ids):
+                raise PrivateScopeRecipientError(
+                    "PRIVATE receiver must be reachable under the selected zone."
+                )
+        else:
+            _assert_private_receiver_reachable(
+                db,
+                sender,
+                payload.receiver_owner_id,
+                latitude=eval_lat,
+                longitude=eval_lon,
+                sender_zone_record_ids=sender_zone_record_ids,
+                network_zone_id=network_zone_id,
+                target_zone_record_id=target_zone_record_id,
+            )
         return (
             sender_zone_ids,
             [payload.receiver_owner_id],
@@ -670,7 +749,15 @@ def list_compose_zones_at_location(
     longitude: float | None,
     network_zone_id: str | None = None,
 ) -> dict:
-    """Overlapping acceptable zones at the compose evaluation point."""
+    """Overlapping acceptable zones at the compose evaluation point.
+
+    System administrators receive every active zone and do not need coordinates.
+    """
+    if is_system_administrator(sender):
+        return {
+            "location_status": "admin_all_zones",
+            "zones": list_all_compose_zones(db),
+        }
     live = get_owner_live_coordinates(db, sender.id)
     lat = latitude if latitude is not None else (live[0] if live else None)
     lon = longitude if longitude is not None else (live[1] if live else None)
@@ -700,42 +787,65 @@ def preview_compose_recipients(
     network_zone_id: str | None = None,
 ) -> dict:
     """Who would receive a geo message for one overlapping zone, or all matched zones."""
-    live = get_owner_live_coordinates(db, sender.id)
-    lat = latitude if latitude is not None else (live[0] if live else None)
-    lon = longitude if longitude is not None else (live[1] if live else None)
     selected_id = (
         int(target_zone_record_id) if target_zone_record_id is not None else None
     )
-    if lat is None or lon is None:
-        return {
-            "zone_ids": [],
-            "zone_record_id": selected_id,
-            "members": [],
-            "location_status": "no_coordinates",
-            "strategy": None,
-        }
+    live = get_owner_live_coordinates(db, sender.id)
+    lat = latitude if latitude is not None else (live[0] if live else None)
+    lon = longitude if longitude is not None else (live[1] if live else None)
 
-    zone_ids, zone_record_ids, recipient_owner_ids, zone_meta = (
-        resolve_geo_propagation_recipient_owner_ids(
-            db,
-            latitude=float(lat),
-            longitude=float(lon),
-            exclude_owner_id=sender.id,
-            sender=sender,
-            network_zone_id=network_zone_id,
-            target_zone_record_id=selected_id,
+    if is_system_administrator(sender):
+        zone_ids, zone_record_ids, recipient_owner_ids, zone_meta = (
+            resolve_admin_selected_zone_recipients(
+                db,
+                sender,
+                target_zone_record_id=selected_id,
+                exclude_owner_id=sender.id,
+            )
         )
-    )
-    if selected_id is not None and selected_id not in {
-        int(rid) for rid in zone_record_ids
-    }:
-        return {
-            "zone_ids": [],
-            "zone_record_id": selected_id,
-            "members": [],
-            "location_status": "outside_zone",
-            "strategy": zone_meta.get("strategy"),
-        }
+        if selected_id is not None and selected_id not in {
+            int(rid) for rid in zone_record_ids
+        }:
+            return {
+                "zone_ids": [],
+                "zone_record_id": selected_id,
+                "members": [],
+                "location_status": "outside_zone",
+                "strategy": zone_meta.get("strategy"),
+            }
+        location_status = "admin_all_zones"
+    else:
+        if lat is None or lon is None:
+            return {
+                "zone_ids": [],
+                "zone_record_id": selected_id,
+                "members": [],
+                "location_status": "no_coordinates",
+                "strategy": None,
+            }
+
+        zone_ids, zone_record_ids, recipient_owner_ids, zone_meta = (
+            resolve_geo_propagation_recipient_owner_ids(
+                db,
+                latitude=float(lat),
+                longitude=float(lon),
+                exclude_owner_id=sender.id,
+                sender=sender,
+                network_zone_id=network_zone_id,
+                target_zone_record_id=selected_id,
+            )
+        )
+        if selected_id is not None and selected_id not in {
+            int(rid) for rid in zone_record_ids
+        }:
+            return {
+                "zone_ids": [],
+                "zone_record_id": selected_id,
+                "members": [],
+                "location_status": "outside_zone",
+                "strategy": zone_meta.get("strategy"),
+            }
+        location_status = "inside_zone" if zone_record_ids else "outside_zone"
 
     recipient_owner_ids, zone_meta = apply_private_plus_network_shared_recipients(
         db,
@@ -759,14 +869,14 @@ def preview_compose_recipients(
         query,
         limit=COMPOSE_RECIPIENT_PREVIEW_MAX,
         max_cap=COMPOSE_RECIPIENT_PREVIEW_MAX,
-        origin_lat=float(lat),
-        origin_lon=float(lon),
+        origin_lat=float(lat) if lat is not None else None,
+        origin_lon=float(lon) if lon is not None else None,
     )
     return {
         "zone_ids": zone_ids,
         "zone_record_id": selected_id,
         "members": members,
-        "location_status": "inside_zone" if zone_record_ids else "outside_zone",
+        "location_status": location_status,
         "strategy": zone_meta.get("strategy"),
     }
 
@@ -875,9 +985,15 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
         zone_ids, candidate_recipients, zone_meta = _zone_based_recipients(
             db, sender, payload, canonical_type, scope
         )
-        eval_lat, eval_lon, geo_source = _geo_evaluation_coordinates(
+        eval_lat, eval_lon, geo_source = _optional_geo_evaluation_coordinates(
             db, sender, payload, canonical_type
         )
+        if (
+            eval_lat is None
+            and eval_lon is None
+            and is_system_administrator(sender)
+        ):
+            geo_source = "system_admin_selected_zone"
         position_for_metadata = {
             "latitude": eval_lat,
             "longitude": eval_lon,

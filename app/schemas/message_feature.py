@@ -36,7 +36,13 @@ class PropagationMessageCreate(BaseModel):
             "`guest_id`, and `event_id` for schedule matching."
         ),
     )
-    position: CoordinatePayload
+    position: CoordinatePayload | None = Field(
+        default=None,
+        description=(
+            "Sender coordinates for geo routing. Optional for the system administrator "
+            "when targeting a zone by ``zone_record_id`` (or all zones)."
+        ),
+    )
     city: str | None = Field(default=None, max_length=120)
     province: str | None = Field(default=None, max_length=120)
     country: str | None = Field(default=None, max_length=120)
@@ -48,7 +54,9 @@ class PropagationMessageCreate(BaseModel):
         ge=1,
         description=(
             "When the sender is inside multiple acceptable zones, limit delivery "
-            "to this ``zones.id`` geometry. Omitted means all overlapping zones."
+            "to this ``zones.id`` geometry. Omitted means all overlapping zones. "
+            "System administrators may select any active zone without being inside it; "
+            "omitting this field sends to every active zone."
         ),
     )
 

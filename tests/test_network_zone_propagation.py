@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Owner
+from app.models import MemberLocation, Owner
 from app.models.owner import AccountType, OwnerRole
 from app.schemas.message_feature import CoordinatePayload, MessageFeatureType, PropagationMessageCreate
 from app.services import message_feature_service as mfs
@@ -36,7 +36,7 @@ def _owner(
     account_owner_id: int | None,
     lat: float,
     lon: float,
-    account_type: AccountType = AccountType.PRIVATE,
+    account_type: AccountType = AccountType.PRIVATE_PLUS,
 ) -> Owner:
     owner = Owner(
         id=oid,
@@ -216,6 +216,7 @@ def test_unknown_delivers_global_nearest_regardless_of_zone_id(net_db):
         account_owner_id=None,
         lat=0.0,
         lon=0.0,
+        account_type=AccountType.PRIVATE,
     )
     sender.account_owner_id = sender.id
     _owner(
@@ -239,6 +240,15 @@ def test_unknown_delivers_global_nearest_regardless_of_zone_id(net_db):
         lon=0.0,
     )
     closer_outsider.account_owner_id = closer_outsider.id
+    for owner in (sender, net_db.get(Owner, 2), closer_outsider):
+        if owner is not None:
+            net_db.add(
+                MemberLocation(
+                    owner_id=owner.id,
+                    latitude=owner.latitude,
+                    longitude=owner.longitude,
+                )
+            )
     net_db.commit()
 
     payload = PropagationMessageCreate(
@@ -1026,3 +1036,112 @@ def test_list_matched_compose_zones_and_preview(net_db, monkeypatch):
     )
     assert preview["location_status"] == "inside_zone"
     assert {row["id"] for row in preview["members"]} == {member_a.id}
+
+
+def test_system_admin_lists_and_sends_to_any_zone_without_location(net_db, monkeypatch):
+    """Private system admin can pick any zone and fan-out as if inside it."""
+    net_a = "NET-PA"
+    net_b = "NET-PB"
+    system_admin = _owner(
+        net_db,
+        oid=1,
+        email="system@x.com",
+        network_id="DISTRICT-11",
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=0.0,
+        lon=0.0,
+        account_type=AccountType.PRIVATE,
+    )
+    system_admin.account_owner_id = system_admin.id
+    admin_a = _owner(
+        net_db,
+        oid=2,
+        email="admin_a@x.com",
+        network_id=net_a,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=47.61,
+        lon=-122.33,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    admin_a.account_owner_id = admin_a.id
+    member_a = _owner(
+        net_db,
+        oid=3,
+        email="member_a@x.com",
+        network_id=net_a,
+        role=OwnerRole.USER,
+        account_owner_id=admin_a.id,
+        lat=47.62,
+        lon=-122.34,
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    admin_b = _owner(
+        net_db,
+        oid=4,
+        email="admin_b@x.com",
+        network_id=net_b,
+        role=OwnerRole.ADMINISTRATOR,
+        account_owner_id=None,
+        lat=40.0,
+        lon=-74.0,
+        account_type=AccountType.EXCLUSIVE,
+    )
+    admin_b.account_owner_id = admin_b.id
+    net_db.commit()
+
+    zone_a = _zone_row(
+        record_id=501, network_id=net_a, creator_id=admin_a.id, owner_id=admin_a.id, name="Park A"
+    )
+    zone_b = _zone_row(
+        record_id=502, network_id=net_b, creator_id=admin_b.id, owner_id=admin_b.id, name="Park B"
+    )
+    monkeypatch.setattr(nzp, "list_active_compose_zone_rows", lambda db: [zone_a, zone_b])
+    monkeypatch.setattr(nzp, "zone_ids_for_zone_records", lambda db, ids: [net_a] if ids == [501] else [net_b] if ids == [502] else [net_a, net_b])
+    monkeypatch.setattr(
+        "app.services.network_zone_propagation.owner_ids_located_within_zone_records",
+        lambda db, zone_record_ids, exclude_owner_id=None: [],
+    )
+
+    listed = mfs.list_compose_zones_at_location(
+        net_db, system_admin, latitude=None, longitude=None
+    )
+    assert listed["location_status"] == "admin_all_zones"
+    assert {row["zone_record_id"] for row in listed["zones"]} == {501, 502}
+
+    preview = mfs.preview_compose_recipients(
+        net_db,
+        system_admin,
+        message_type=mfs.CanonicalMessageType.PANIC,
+        latitude=None,
+        longitude=None,
+        target_zone_record_id=501,
+    )
+    assert preview["location_status"] == "admin_all_zones"
+    assert {row["id"] for row in preview["members"]} == {admin_a.id, member_a.id}
+
+    selected = mfs.create_geo_propagated_message(
+        net_db,
+        system_admin,
+        PropagationMessageCreate(
+            type=MessageFeatureType.PANIC,
+            hid="admin-device",
+            msg={"description": "hello A"},
+            zone_record_id=501,
+        ),
+    )
+    assert set(selected["delivered_owner_ids"]) == {admin_a.id, member_a.id}
+    assert selected["fanout"]["admin_virtual_location"] is True
+
+    all_zones = mfs.create_geo_propagated_message(
+        net_db,
+        system_admin,
+        PropagationMessageCreate(
+            type=MessageFeatureType.PANIC,
+            hid="admin-device-all",
+            msg={"description": "hello all"},
+        ),
+    )
+    assert set(all_zones["delivered_owner_ids"]) == {admin_a.id, member_a.id, admin_b.id}
+    assert all_zones["fanout"]["admin_all_zones"] is True

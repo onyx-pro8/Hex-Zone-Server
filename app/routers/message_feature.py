@@ -316,7 +316,8 @@ async def search_members_for_private(
         "Returns every acceptable-zone geometry that contains the caller's evaluation "
         "point. Used by compose to offer a zone picker when the sender is in more than "
         "one zone. Pass **`latitude`/`longitude`** for a live fix; otherwise the latest "
-        "stored member location is used."
+        "stored member location is used. System administrators receive every active "
+        "zone and do not need coordinates (`location_status=admin_all_zones`)."
     ),
 )
 async def list_compose_zones(
@@ -342,7 +343,9 @@ async def list_compose_zones(
     description=(
         "Returns members who would receive the given message type. Pass "
         "``zone_record_id`` to scope the preview to one overlapping geometry; omit it "
-        "to preview fan-out across all matched zones (same as compose “All zones”)."
+        "to preview fan-out across all matched zones (same as compose “All zones”). "
+        "System administrators preview any selected zone, or every active zone, "
+        "without being inside it."
     ),
 )
 async def preview_compose_recipients(
