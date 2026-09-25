@@ -377,6 +377,7 @@ async def test_qr_join_uses_inviter_zone_id(test_db, override_get_db):
         assert joined_owner["zone_id"] == "inviter-zone-id"
         assert joined_owner["role"] == "user"
         assert joined_owner["account_type"] == "private_plus"
+        assert joined_owner["address"] == "Test Address 1"
 
 
 @pytest.mark.asyncio

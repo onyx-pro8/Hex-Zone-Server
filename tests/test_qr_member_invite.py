@@ -69,15 +69,23 @@ def _admin(
     return owner, token
 
 
-async def _join(client: AsyncClient, token: str, email: str, *, zone_id: str | None = None):
+async def _join(
+    client: AsyncClient,
+    token: str,
+    email: str,
+    *,
+    zone_id: str | None = None,
+    address: str | None = "Member Address",
+):
     body = {
         "token": token,
         "email": email,
         "first_name": "New",
         "last_name": "Member",
         "password": "SecurePassword123",
-        "address": "Member Address",
     }
+    if address is not None:
+        body["address"] = address
     if zone_id is not None:
         body["zone_id"] = zone_id
     return await client.post("/utils/qr/join", json=body)
@@ -131,6 +139,7 @@ async def test_qr_join_uses_preissued_communal_id(test_db, override_get_db):
         assert joined["zone_id"] == admin.zone_id
         assert joined["account_type"] == "private_plus"
         assert joined["role"] == "user"
+        assert joined["address"] == admin.address
         assert joined["communal_id"] == reserved
         # Admin must not share the invitee's pre-issued Communal ID.
         assert getattr(admin, "communal_id", None) != reserved
@@ -158,6 +167,7 @@ async def test_qr_join_never_expiring_token(test_db, override_get_db):
         assert joined["account_type"] == "private_plus"
         assert joined["role"] == "user"
         assert joined["account_owner_id"] == admin.id
+        assert joined["address"] == admin.address
         # Communal ID may be pre-issued on the invite token when minting supports it.
         invite_communal = generate.json().get("communal_id")
         if invite_communal:
@@ -334,6 +344,35 @@ async def test_qr_preview_member_invite(test_db, override_get_db):
         assert body["zone_id"] == admin.zone_id
         assert body["account_type"] == "private_plus"
         assert body["members_at_capacity"] is False
+        assert "address" not in body
+
+
+@pytest.mark.asyncio
+async def test_qr_join_family_inherits_admin_address(test_db, override_get_db):
+    """Family invitees share the administrator address even if they omit or send another."""
+    admin, token = _admin(
+        test_db,
+        email="plus-admin@example.com",
+        zone_id="plus-zone",
+        account_type=AccountType.PRIVATE_PLUS,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert generate.status_code == 200, generate.text
+        join = await _join(
+            client,
+            generate.json()["token"],
+            "family-member@example.com",
+            address=None,
+        )
+        assert join.status_code == 200, join.text
+        joined = join.json()
+        assert joined["address"] == admin.address
+        assert joined["address"] == "Admin Address"
 
 
 @pytest.mark.asyncio
@@ -402,6 +441,7 @@ async def test_qr_join_organization_inherits_account_type(test_db, override_get_
         assert joined["role"] == "user"
         assert joined["zone_id"] == admin.zone_id
         assert joined["account_owner_id"] == admin.id
+        assert joined["address"] == "Member Address"
 
 
 @pytest.mark.asyncio
@@ -433,6 +473,7 @@ async def test_qr_join_individual_pro_invites_one_individual(test_db, override_g
         assert joined["role"] == "user"
         assert joined["zone_id"] == admin.zone_id
         assert joined["account_owner_id"] == admin.id
+        assert joined["address"] == "Member Address"
 
         second_generate = await client.post(
             "/utils/qr/generate",

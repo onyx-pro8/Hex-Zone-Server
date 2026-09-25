@@ -14,6 +14,7 @@ from app.schemas.schemas import AccountTypeEnum, OwnerUpdate
 from app.services.account_type_policy import (
     account_type_for_invited_member,
     assert_account_type_change_allowed,
+    invited_member_inherits_admin_address,
 )
 
 
@@ -216,6 +217,10 @@ def test_invited_member_account_type_matches_family_or_org(db):
     assert account_type_for_invited_member(plus_admin) == AccountType.PRIVATE_PLUS
     assert account_type_for_invited_member(org_admin) == AccountType.ENHANCED_PLUS
     assert account_type_for_invited_member(pro_admin) == AccountType.EXCLUSIVE
+    assert invited_member_inherits_admin_address(plus_admin) is True
+    assert invited_member_inherits_admin_address(org_admin) is False
+    assert invited_member_inherits_admin_address(pro_admin) is False
+    assert invited_member_inherits_admin_address(exclusive_admin) is False
 
 
 def test_invited_member_account_type_system_admin_is_exclusive(db):

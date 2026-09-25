@@ -518,7 +518,15 @@ class QRRegistrationUse(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     password: str = Field(..., min_length=8)
-    address: str = Field(..., min_length=1, max_length=255)
+    address: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Required except for Family (private_plus) member invites, which inherit "
+            "the administrator's registered home address and ignore this field."
+        ),
+    )
     phone: Optional[str] = Field(None, max_length=20)
     zone_id: Optional[str] = Field(
         default=None,

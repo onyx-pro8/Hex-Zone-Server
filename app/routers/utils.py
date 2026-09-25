@@ -33,6 +33,7 @@ from app.services.device_entitlements import (
 from app.services.member_join_welcome_service import notify_members_of_new_join
 from app.services.account_type_policy import (
     account_type_for_invited_member,
+    invited_member_inherits_admin_address,
     is_system_administrator,
 )
 from app.services.system_admin_seed import (
@@ -503,6 +504,25 @@ def _load_valid_qr_and_inviter(db: Session, token: str):
     return qr, owner
 
 
+def _resolve_qr_join_address(*, inviter: Owner, submitted: str | None, inherit_admin: bool) -> str:
+    """Family member invites copy the admin address; other joins require a submitted one."""
+    if inherit_admin:
+        inherited = (inviter.address or "").strip()
+        if not inherited:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Family administrator has no registered home address.",
+            )
+        return inherited
+    address = (submitted or "").strip()
+    if not address:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="address is required",
+        )
+    return address
+
+
 @router.get(
     "/qr/preview",
     response_model=QRRegistrationPreview,
@@ -556,7 +576,8 @@ async def preview_qr_registration(
         "**System administrator (Private) tokens:** create an **Individual** "
         "user account for a **new** network; require **`zone_id`** in the body. "
         "**Family / Organization admins:** create a **user-role** member with the same "
-        "account type on the inviter's zone. "
+        "account type on the inviter's zone. Family members inherit the administrator's "
+        "home address (clients should omit the address field). "
         "**Individual Pro:** create an **Individual** user member on the inviter's zone "
         "(max one invited seat). "
         "All invite tokens (timed and never-expiring) are single-use."
@@ -633,7 +654,11 @@ async def join_with_qr(
             account_type=AccountTypeEnum.EXCLUSIVE,
             role=OwnerRoleEnum.USER,
             account_owner_id=None,
-            address=qr_data.address,
+            address=_resolve_qr_join_address(
+                inviter=owner,
+                submitted=qr_data.address,
+                inherit_admin=False,
+            ),
             phone=qr_data.phone,
         )
         new_owner = owner_crud.create_owner(
@@ -664,7 +689,11 @@ async def join_with_qr(
         account_type=AccountTypeEnum(member_account_type.value),
         role=OwnerRoleEnum.USER,
         account_owner_id=owner.id,
-        address=qr_data.address,
+        address=_resolve_qr_join_address(
+            inviter=owner,
+            submitted=qr_data.address,
+            inherit_admin=invited_member_inherits_admin_address(owner),
+        ),
         phone=qr_data.phone,
     )
 

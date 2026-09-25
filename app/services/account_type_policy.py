@@ -113,6 +113,11 @@ def account_type_for_invited_member(administrator: Owner) -> AccountType:
     return AccountType.EXCLUSIVE
 
 
+def invited_member_inherits_admin_address(administrator: Owner) -> bool:
+    """Family members live at the account holder's registered home address."""
+    return normalize_pricing_tier_key(administrator.account_type.value) == "private_plus"
+
+
 def migrate_invited_member_account_types(db: Session) -> int:
     """Align linked Family/Organization members with their account holder's type.
 
