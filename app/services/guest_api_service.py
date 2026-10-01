@@ -42,13 +42,34 @@ GUEST_WRITABLE_TYPES = frozenset({CanonicalMessageType.CHAT.value})
 _MEMBER_GUEST_THREAD_MAX_SCAN = 5000
 
 
-def _guest_messaging_peer_owner_ids(db: Session, *, zone_id: str) -> set[int]:
+def _guest_messaging_peer_owner_ids(
+    db: Session,
+    *,
+    zone_id: str,
+    guest_id: str | None = None,
+) -> set[int]:
     """Network-level CHAT peers: every active member/admin on this network id.
 
     Uses the same cohort as guest arrival notifications (**`zone_staff_owner_ids`**):
     all **`owners.zone_id`** matches plus active **`zones.owner_id`** rows. Not GPS-bound.
+
+    While a network-access request is still pending, the only peer is the network
+    administrator. After approval the full network cohort is restored and earlier
+    CHAT rows stay on the same ``guest_id``.
     """
-    return guest_access_service.zone_staff_owner_ids(db, zone_id)
+    ids = guest_access_service.zone_staff_owner_ids(db, zone_id)
+    gid = (guest_id or "").strip()
+    if not gid:
+        return ids
+    row = guest_access_service.get_guest_access_session_by_guest_id(db, gid)
+    if row is None or (row.zone_id or "").strip() != (zone_id or "").strip():
+        return ids
+    admin_id = guest_access_service.pending_network_chat_admin_owner_id(row)
+    if admin_id is None:
+        return ids
+    if admin_id in ids:
+        return {admin_id}
+    return set()
 
 
 def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) -> bool:
@@ -61,8 +82,13 @@ def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) 
     )
 
 
-def list_zone_peers_for_guest(db: Session, *, zone_id: str) -> list[dict]:
-    member_ids = _guest_messaging_peer_owner_ids(db, zone_id=zone_id)
+def list_zone_peers_for_guest(
+    db: Session,
+    *,
+    zone_id: str,
+    guest_id: str | None = None,
+) -> list[dict]:
+    member_ids = _guest_messaging_peer_owner_ids(db, zone_id=zone_id, guest_id=guest_id)
     if not member_ids:
         return []
     owners = (
@@ -699,7 +725,7 @@ def create_guest_zone_message(
     receiver = db.query(Owner).filter(Owner.id == to_owner_id, Owner.active.is_(True)).first()
     if not receiver:
         return None
-    if to_owner_id not in _guest_messaging_peer_owner_ids(db, zone_id=zid):
+    if to_owner_id not in _guest_messaging_peer_owner_ids(db, zone_id=zid, guest_id=guest_id):
         return {"__reject__": "forbidden", "message": "Recipient is not a network member peer for this network."}
 
     if msg_type not in GUEST_WRITABLE_TYPES:
@@ -843,6 +869,13 @@ def create_member_to_guest_zone_message(
     row = _guest_access_service.get_guest_access_session_by_guest_id(db, gid)
     if not row or row.zone_id != zid:
         return {"__reject__": "not_found", "message": "Guest session not found for this zone."}
+
+    pending_admin_id = _guest_access_service.pending_network_chat_admin_owner_id(row)
+    if pending_admin_id is not None and sender.id != pending_admin_id:
+        return {
+            "__reject__": "forbidden",
+            "message": "Only the network administrator can message this guest until access is approved.",
+        }
 
     display_text = (text or "").strip()
     msg_images = (

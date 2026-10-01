@@ -144,6 +144,7 @@ async def guest_me(
             allowed.append(u)
     if not allowed:
         allowed = ["CHAT"]
+    approval = guest_access_service._guest_row_client_status(row)
     return GuestMeResponse(
         status="success",
         data=GuestMeData(
@@ -152,6 +153,7 @@ async def guest_me(
             zone_ids=guest_ctx["zone_ids"],
             allowed_message_types=allowed,
             expires_at=expires_at,
+            approval_status=approval if approval in ("PENDING", "APPROVED", "REJECTED") else None,
         ),
     )
 
@@ -186,7 +188,9 @@ async def guest_zone_peers(
 ):
     zid = zone_id.strip()
     _guest_zone_allowed(guest_ctx, zid)
-    peers_raw = guest_api_service.list_zone_peers_for_guest(db, zone_id=zid)
+    peers_raw = guest_api_service.list_zone_peers_for_guest(
+        db, zone_id=zid, guest_id=str(guest_ctx.get("guest_id") or "")
+    )
     peers = [GuestPeerItem.model_validate(p) for p in peers_raw]
     return GuestPeersResponse(status="success", data=GuestPeersData(zone_id=zid, peers=peers))
 
@@ -214,6 +218,22 @@ async def guest_zone_dashboard(
 ):
     zid = zone_id.strip()
     _guest_zone_allowed(guest_ctx, zid)
+    session_row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == guest_ctx["guest_id"])
+        .first()
+    )
+    if session_row is not None and guest_access_service.pending_network_chat_admin_owner_id(session_row) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": "Guest dashboard opens after the network administrator approves access. Chat is available now.",
+                "error_code": "GUEST_ACCESS_PENDING",
+                "error": {
+                    "message": "Guest dashboard opens after the network administrator approves access. Chat is available now.",
+                },
+            },
+        )
     dash = guest_api_service.get_guest_dashboard_safe(db, zone_id=zid)
     return GuestDashboardResponse(status="success", data=GuestDashboardData.model_validate(dash))
 
@@ -391,7 +411,9 @@ async def guest_post_message(
             },
         )
 
-    peers = guest_api_service.list_zone_peers_for_guest(db, zone_id=zone_id)
+    peers = guest_api_service.list_zone_peers_for_guest(
+        db, zone_id=zone_id, guest_id=str(guest_ctx.get("guest_id") or "")
+    )
     peer = next((p for p in peers if p["owner_id"] == to_owner_id), None)
     if not peer:
         err_code = "PEERS_NOT_AVAILABLE" if len(peers) == 0 else "GUEST_NOT_AUTHORIZED_FOR_ZONE"

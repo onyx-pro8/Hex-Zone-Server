@@ -111,6 +111,13 @@ class GuestMeData(BaseModel):
         description="Message types permitted for this guest session.",
     )
     expires_at: str = Field(description="ISO-8601 UTC from JWT **`exp`** (guest token lifetime sets **`GET /api/guest/me`** refresh cadence).")
+    approval_status: Literal["PENDING", "APPROVED", "REJECTED"] | None = Field(
+        default=None,
+        description=(
+            "**PENDING** while a network-access guest may chat with the administrator but full access "
+            "is not granted yet. **APPROVED** after the administrator accepts (same chat thread)."
+        ),
+    )
 
 
 class GuestMeResponse(BaseModel):

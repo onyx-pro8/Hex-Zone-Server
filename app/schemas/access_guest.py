@@ -539,6 +539,17 @@ class AccessPermissionResponseData(BaseModel):
         default=None,
         description="ISO-8601 UTC expiry for **exchange_code** when present.",
     )
+    chat_access_token: str | None = Field(
+        default=None,
+        description=(
+            "Guest JWT for the existing chat UI while a **network access** request is still **pending**. "
+            "Not an approval exchange code. The same **guest_id** thread continues after approval."
+        ),
+    )
+    chat_expires_at: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC expiry for **chat_access_token** when present.",
+    )
 
 
 class AccessPermissionResponseEnvelope(BaseModel):
@@ -559,6 +570,14 @@ class AccessSessionPollData(BaseModel):
     )
     exchange_code: str | None = None
     exchange_expires_at: str | None = None
+    chat_access_token: str | None = Field(
+        default=None,
+        description=(
+            "Present while **status** is **PENDING** for a network-access guest. Opens the existing guest "
+            "chat with the network administrator. Omitted after approval (use **exchange_code** for full access)."
+        ),
+    )
+    chat_expires_at: str | None = None
 
 
 class AccessSessionPollEnvelope(BaseModel):

@@ -120,6 +120,108 @@ def test_guest_private_search_requires_coordinates(db):
     assert search["members"] == []
 
 
+def test_pending_network_guest_chats_with_admin_then_thread_continues(db):
+    from app.domain.message_types import CanonicalMessageType
+    from app.services import guest_api_service as gas_api
+
+    network = "NET-CHAT-PENDING"
+    admin = _admin(db, network)
+    member = Owner(
+        email="member@test.com",
+        zone_id=network,
+        first_name="M",
+        last_name="Member",
+        account_type=AccountType.PRIVATE,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        hashed_password="x",
+        api_key="key-member",
+        address="addr",
+        active=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(member)
+    db.flush()
+
+    result = gas.process_network_guest_arrival(
+        db,
+        network_id=network,
+        guest_name="Walk-in",
+        device_id="dev-1",
+        latitude=40.0,
+        longitude=-74.0,
+        qr_token_db_id=None,
+    )
+    db.commit()
+    guest_id = result["guest_response"]["guest_id"]
+    assert result["guest_response"].get("chat_access_token")
+    assert "exchange_code" not in result["guest_response"]
+
+    row = db.query(GuestAccessSession).filter(GuestAccessSession.guest_id == guest_id).first()
+    assert row is not None
+    gas.require_guest_bearer_session_active(db, guest_id=guest_id)
+
+    pending_peers = gas_api.list_zone_peers_for_guest(db, zone_id=network, guest_id=guest_id)
+    assert [p["owner_id"] for p in pending_peers] == [admin.id]
+
+    denied = gas_api.create_member_to_guest_zone_message(
+        db,
+        sender=member,
+        zone_id=network,
+        guest_id=guest_id,
+        text="Member hello",
+        msg_type="CHAT",
+    )
+    assert isinstance(denied, dict) and denied.get("__reject__") == "forbidden"
+
+    guest_line = gas_api.create_guest_zone_message(
+        db,
+        guest_id=guest_id,
+        guest_display_name="Walk-in",
+        zone_id=network,
+        msg_type="CHAT",
+        text="Hello admin",
+        to_owner_id=admin.id,
+        msg=None,
+    )
+    assert isinstance(guest_line, dict) and guest_line.get("type") == CanonicalMessageType.CHAT.value
+
+    admin_line = gas_api.create_member_to_guest_zone_message(
+        db,
+        sender=admin,
+        zone_id=network,
+        guest_id=guest_id,
+        text="Hello guest",
+        msg_type="CHAT",
+    )
+    assert not isinstance(admin_line, dict)
+
+    approved = gas.approve_guest(db, acting_owner=admin, zone_id=network, guest_id=guest_id)
+    assert approved.get("ok")
+    db.commit()
+    db.refresh(row)
+
+    assert gas.pending_network_chat_token_fields(row) == {}
+    later_peers = gas_api.list_zone_peers_for_guest(db, zone_id=network, guest_id=guest_id)
+    later_ids = {p["owner_id"] for p in later_peers}
+    assert admin.id in later_ids
+    assert member.id in later_ids
+
+    thread = gas_api.list_guest_zone_messages(
+        db,
+        guest_id=guest_id,
+        zone_id=network,
+        with_owner_id=admin.id,
+        limit=20,
+        before_id=None,
+        before_created_at=None,
+    )
+    texts = [event.text for event in thread[0]]
+    assert "Hello admin" in texts
+    assert "Hello guest" in texts
+
+
 def test_network_guest_session_poll_pending_until_approved(db):
     network = "NET-ACCESS-4"
     admin = _admin(db, network)

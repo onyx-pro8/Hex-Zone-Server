@@ -87,8 +87,8 @@ def require_guest_bearer_session_active(db: Session, *, guest_id: str) -> None:
     if row.kind == "network_access" and row.resolution == "rejected":
         _guest_access_invalidated_exc("Guest access was denied or revoked.")
 
-    if _network_access_pending(row):
-        _guest_access_invalidated_exc("Guest access is not active.")
+    # Pending network-access guests may use CHAT with the network administrator.
+    # Dashboard and geo routes stay closed until an administrator approves.
 
     gp = db.query(GuestPass).filter(GuestPass.used_by_guest_id == gid).first()
     if gp is not None:
@@ -102,6 +102,39 @@ def require_guest_bearer_session_active(db: Session, *, guest_id: str) -> None:
         tok = db.get(GuestAccessQrToken, row.qr_token_id)
         if tok is not None and tok.revoked_at is not None:
             _guest_access_invalidated_exc("Guest QR link has been revoked.")
+
+
+def pending_network_chat_admin_owner_id(row: GuestAccessSession) -> int | None:
+    """Network administrator the guest may CHAT with while access is still pending.
+
+    ``None`` once the session is approved, rejected, or is not a network-access request.
+    """
+    if not _network_access_pending(row):
+        return None
+    return row.admin_owner_id
+
+
+def pending_network_chat_token_fields(row: GuestAccessSession) -> dict:
+    """Short-lived guest JWT for the existing chat UI while network access is pending.
+
+    This is not an approval ``exchange_code``. The same ``guest_id`` thread continues
+    after an administrator approves.
+    """
+    if pending_network_chat_admin_owner_id(row) is None:
+        return {}
+    if row.access_revoked_at is not None:
+        return {}
+    from app.core.security import create_guest_access_token
+
+    token, _expires_in, expire = create_guest_access_token(
+        guest_id=row.guest_id,
+        zone_ids=[row.zone_id],
+        network_geo_messaging=False,
+    )
+    return {
+        "chat_access_token": token,
+        "chat_expires_at": expire.replace(microsecond=0).isoformat() + "Z",
+    }
 
 
 def mint_guest_exchange_for_session(row: GuestAccessSession) -> None:
@@ -244,13 +277,15 @@ def process_network_guest_arrival(
     db.add(perm_event)
     db.flush()
 
+    guest_response = {
+        "status": "UNEXPECTED",
+        "message": msg_guest,
+        "guest_id": guest_token,
+        "zone_id": nid,
+    }
+    guest_response.update(pending_network_chat_token_fields(session_row))
     return {
-        "guest_response": {
-            "status": "UNEXPECTED",
-            "message": msg_guest,
-            "guest_id": guest_token,
-            "zone_id": nid,
-        },
+        "guest_response": guest_response,
         "ws_guest_is_here": [],
         "ws_unexpected_guest": ws_unexpected,
     }
