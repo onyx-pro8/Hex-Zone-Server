@@ -823,6 +823,36 @@ async def notify_access_chat_inbox_ws(db: Session, row: ZoneMessageEvent) -> Non
             "GUEST_PRESENCE",
             {"guest_id": guest_sender, "online": True},
         )
+        # Background / other-tab admins need a device push; WS alone is easy to miss.
+        guest_name = ""
+        body = row.body_json if isinstance(row.body_json, dict) else {}
+        raw_name = body.get("guest_name") or body.get("guestName")
+        if isinstance(raw_name, str) and raw_name.strip():
+            guest_name = raw_name.strip()
+        if not guest_name:
+            meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+            raw_meta = meta.get("guest_name") or meta.get("broadcast_name")
+            if isinstance(raw_meta, str) and raw_meta.strip():
+                guest_name = raw_meta.strip()
+        if not guest_name:
+            guest_name = "Guest"
+        text = (row.text or "").strip() or "New guest message"
+        zone = (row.zone_id or "").strip()
+        from app.services import push_notification_service
+
+        await push_notification_service.send_plain_push_to_owners(
+            db,
+            deliver_to,
+            title=f"{guest_name} · Guest chat" if guest_name else "Guest chat",
+            body=text[:240],
+            data={
+                "event": "NEW_MESSAGE",
+                "type": str(row.type or "CHAT"),
+                "guest_id": guest_sender,
+                "zone_id": zone,
+                "id": str(row.id),
+            },
+        )
 
 
 def create_member_to_guest_zone_message(
@@ -1070,17 +1100,35 @@ def _load_active_network_zone_rows(
     db: Session,
     network_id: str,
 ) -> list[tuple[Zone, dict[str, Any] | None]]:
-    """All active acceptable zones for a network id (`zones.zone_id`)."""
+    """Active acceptable zones for a network id that belong to that network's owners.
+
+    Guest maps must match what network staff can own. Rows whose ``owner_id`` is not an
+    active owner on this network id are omitted (orphan / foreign geometry must not appear
+    when the network administrator's Zones list is empty).
+    """
     zid = network_id.strip()
+    network_owner_ids = guest_access_service.zone_staff_owner_ids(db, zid)
+    if not network_owner_ids:
+        return []
+
+    def _keep(z: Zone) -> bool:
+        return int(z.owner_id) in network_owner_ids
+
     try:
         rows = (
             db.query(Zone, func.ST_AsGeoJSON(Zone.geo_fence_polygon))
-            .filter(Zone.zone_id == zid, Zone.active.is_(True))
+            .filter(
+                Zone.zone_id == zid,
+                Zone.active.is_(True),
+                Zone.owner_id.in_(tuple(network_owner_ids)),
+            )
             .order_by(Zone.id.asc())
             .all()
         )
         out: list[tuple[Zone, dict[str, Any] | None]] = []
         for z, gj_raw in rows:
+            if not _keep(z):
+                continue
             geo_fence_geojson: dict[str, Any] | None = None
             if gj_raw:
                 try:
@@ -1100,11 +1148,15 @@ def _load_active_network_zone_rows(
         db.rollback()
     plain = (
         db.query(Zone)
-        .filter(Zone.zone_id == zid, Zone.active.is_(True))
+        .filter(
+            Zone.zone_id == zid,
+            Zone.active.is_(True),
+            Zone.owner_id.in_(tuple(network_owner_ids)),
+        )
         .order_by(Zone.id.asc())
         .all()
     )
-    return [(z, None) for z in plain]
+    return [(z, None) for z in plain if _keep(z)]
 
 
 def _geojson_as_feature(
