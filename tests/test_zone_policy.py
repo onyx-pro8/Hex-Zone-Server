@@ -140,17 +140,29 @@ def test_build_capabilities_member_depends_on_primary_count(policy_limits):
     assert with_two_primary.reason == "Maximum of 1 secondary zone for members reached."
 
 
-def test_build_capabilities_solo_individual_allows_three_secondary(policy_limits):
+def test_build_capabilities_solo_individual_allows_two_secondary(policy_limits):
     caps = build_capabilities(
         "user",
-        total_zones=2,
-        admin_primary_count=0,
+        total_zones=1,
+        admin_primary_count=1,
         account_type="exclusive",
         is_invited_member=False,
     )
-    assert caps.max_total == 3
+    assert caps.max_total == 2
+    assert caps.max_primary == 1
+    assert caps.can_create_primary is False
     assert caps.can_create_zone is True
     assert caps.remaining_total == 1
+
+    at_limit = build_capabilities(
+        "user",
+        total_zones=2,
+        admin_primary_count=1,
+        account_type="exclusive",
+        is_invited_member=False,
+    )
+    assert at_limit.can_create_zone is False
+    assert at_limit.remaining_total == 0
 
 
 def test_build_capabilities_invited_individual_uses_member_quota(policy_limits):

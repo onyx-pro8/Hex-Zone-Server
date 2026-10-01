@@ -1304,6 +1304,71 @@ async def test_exclusive_account_registers_as_user_and_rejects_members(
 ):
     """Individual (exclusive) is user-role only and cannot invite members."""
     from httpx import ASGITransport
+    from app.models.communal_id import CommunalIdRegistry
+    from app.models.owner import AccountType, Owner, OwnerRole
+    from app.core.security import get_password_hash
+
+    # Seed a public Communal ID with geometry so Individual signup can subscribe.
+    import json
+    from datetime import datetime
+
+    from sqlalchemy import text
+
+    mint_admin = Owner(
+        email="communal-mint@example.com",
+        zone_id="mint-network",
+        first_name="Mint",
+        last_name="Admin",
+        account_type=AccountType.PRIVATE_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+        hashed_password=get_password_hash("SecurePassword123"),
+        api_key="mint-key",
+        address="Mint Address",
+        active=True,
+    )
+    test_db.add(mint_admin)
+    test_db.flush()
+    mint_admin.account_owner_id = mint_admin.id
+    test_db.add(
+        CommunalIdRegistry(
+            reference_id="COMM-SEED01",
+            creator_id=mint_admin.id,
+            network_id="mint-network",
+        )
+    )
+    now = datetime.utcnow().isoformat()
+    params_json = json.dumps(
+        {
+            "contractType": "geofence",
+            "geometry": {},
+            "config": {
+                "communal_id": "COMM-SEED01",
+                "communal_ids": ["COMM-SEED01"],
+                "is_public": True,
+                "h3_cells": ["8a2a1072b59ffff"],
+            },
+        }
+    )
+    test_db.execute(
+        text(
+            "INSERT INTO zones (zone_id, owner_id, creator_id, zone_type, name, "
+            "h3_cells, parameters, active, is_primary, created_at, updated_at) "
+            "VALUES (:zone_id, :owner_id, :creator_id, :zone_type, :name, "
+            ":h3_cells, :parameters, 1, 1, :created_at, :updated_at)"
+        ),
+        {
+            "zone_id": "mint-network",
+            "owner_id": mint_admin.id,
+            "creator_id": mint_admin.id,
+            "zone_type": "GEOFENCE",
+            "name": "Seed Communal Zone",
+            "h3_cells": json.dumps(["8a2a1072b59ffff"]),
+            "parameters": params_json,
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+    test_db.commit()
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
@@ -1320,13 +1385,15 @@ async def test_exclusive_account_registers_as_user_and_rejects_members(
                 "password": "SecurePassword123",
                 "registration_code": "FREE",
                 "address": "Home Address",
+                "communal_id": "COMM-SEED01",
             },
         )
-        assert individual.status_code == 201
+        assert individual.status_code == 201, individual.text
         body = individual.json()
         assert body["role"] == "user"
         assert body["account_type"] == "exclusive"
         assert body["account_owner_id"] == body["id"]
+        assert body.get("communal_id") == "COMM-SEED01"
         individual_id = body["id"]
 
         invited = await client.post(

@@ -48,7 +48,7 @@ class GuestArrivalRequest(BaseModel):
         default=None,
         max_length=100,
         description=(
-            "Optional; matched against **access_schedules** and **guest_passes** for this zone. "
+            "Optional; matched against an active **guest_passes** Event ID for this zone. "
             "Send the same value as the invite **`eid`** (trimmed only). The server normalizes matching: "
             "Unicode case-insensitive for general ids; **`EVT-1234`**, **`evt_1234`**, **`EVT1234`**, and **`1234`** "
             "are equivalent when the suffix is all digits."
@@ -131,7 +131,7 @@ class GuestScanResponse(BaseModel):
     """Immediate response after POST /api/access/permission."""
 
     status: Literal["EXPECTED", "UNEXPECTED"] = Field(
-        description="EXPECTED: matched active schedule in window. UNEXPECTED: no matching schedule."
+        description="EXPECTED: matched an active Event ID guest pass. UNEXPECTED: no matching pass; awaits admin."
     )
     message: str = Field(
         description=(
@@ -434,10 +434,10 @@ class GuestSessionPollResponse(BaseModel):
     guest_id: str = Field(description="Same **guest_id** returned by **`POST /api/access/permission`**.")
     zone_id: str = Field(description="Session zone (echoed for display; poll may filter by **`zone_id`** query or omit it).")
     status: Literal["EXPECTED", "UNEXPECTED", "APPROVED", "REJECTED"] = Field(
-        description="EXPECTED: schedule-matched guest; UNEXPECTED: awaits admin; APPROVED/REJECTED: unexpected flow resolved."
+        description="EXPECTED: Event ID guest-pass match; UNEXPECTED: awaits admin; APPROVED/REJECTED: unexpected flow resolved."
     )
     approval_status: Literal["PENDING", "APPROVED", "REJECTED"] = Field(
-        description="PENDING = unexpected and still pending; APPROVED/REJECTED = decision taken. EXPECTED (scheduled) arrivals use APPROVED here."
+        description="PENDING = unexpected and still pending; APPROVED/REJECTED = decision taken. EXPECTED (guest pass) arrivals use APPROVED here."
     )
     message: str = Field(description="Guest-facing instruction string for the SPA.")
     exchange_code: str | None = Field(

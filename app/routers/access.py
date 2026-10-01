@@ -75,6 +75,7 @@ from app.services import (
     guest_api_service,
     guest_arrival_zone_messages as guest_arrival_zone_messages_service,
     guest_pass_service,
+    push_notification_service,
 )
 from app.websocket.manager import ws_manager
 
@@ -91,9 +92,9 @@ legacy **`/access?gt=…`** without **`zid`** is still accepted in the SPA, but 
 
 Validates that **zone_id** exists (explicit or resolved from token), then resolves the arrival in priority order:
 
-1. **Guest Pass match** (new): when **`event_id`** is submitted, the server looks up
+1. **Guest Pass match**: when **`event_id`** is submitted, the server looks up
    **`guest_passes`** where `zone_id` + **`event_id`** match an **ACCEPTED**,
-   non-expired, unconsumed pass. Matching uses the same **canonical event id** rules as schedules
+   non-expired, unconsumed pass. Matching uses **canonical event id** rules
    (trim; Unicode case-insensitive for general ids; **`EVT-1234`**, **`evt_1234`**, **`EVT1234`**, and **`1234`**
    are treated as the same numeric event when the suffix is all digits). If found, the pass is consumed
    (`used_by_guest_id` is set),
@@ -101,15 +102,13 @@ Validates that **zone_id** exists (explicit or resolved from token), then resolv
    broadcast to all zone members. Guest passes are created via **`POST /api/access/guest-passes`**
    (a new unique **`event_id`** is **ACCEPTED** immediately). An admin may revoke with
    **`POST /api/access/guest-passes/{id}/revoke`**.
-2. **Access Schedule match**: finds an active schedule whose time window contains server time
-   and matches **`event_id`** (canonical rules above) or **`guest_name`**.
-3. **No match → UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`**
+2. **No match → UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`**
    to all active owners sharing **zone_id**, and record a PERMISSION zone event.
 
 Outcomes:
 
-- **EXPECTED** (schedule or guest pass match): persist a guest session, write a PERMISSION zone event,
-  push WebSocket **`guest_is_here`** to the schedule creator / zone members.
+- **EXPECTED** (valid Event ID guest pass): persist a guest session, write a PERMISSION zone event,
+  push WebSocket **`guest_is_here`** to zone members.
 - **UNEXPECTED**: persist a pending session, push WebSocket **`unexpected_guest`** to all active owners
   sharing **zone_id**, and record a PERMISSION zone event for request/decision history.
 
@@ -902,6 +901,20 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
                 "status": "APPROVED",
             },
         )
+        guest_name = str(event_payload.get("guest_name") or "Guest").strip() or "Guest"
+        zone = str(event_payload.get("zone_id") or effective_zone_id or "").strip()
+        await push_notification_service.send_plain_push_to_owners(
+            db,
+            user_ids,
+            title=f"{zone} · Expected guest" if zone else "Expected guest arrived",
+            body=f"{guest_name} has arrived.",
+            data={
+                "event": "guest_is_here",
+                "type": "PERMISSION",
+                "guest_id": str(event_payload.get("guest_id") or ""),
+                "zone_id": zone,
+            },
+        )
     for user_ids, event_payload in result.get("ws_unexpected_guest") or []:
         await ws_manager.broadcast_to_users(user_ids, "unexpected_guest", event_payload)
         await ws_manager.broadcast_to_users(
@@ -911,6 +924,20 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
                 "guest_id": event_payload.get("guest_id"),
                 "zone_id": event_payload.get("zone_id") or effective_zone_id,
                 "status": "PENDING",
+            },
+        )
+        guest_name = str(event_payload.get("guest_name") or "Guest").strip() or "Guest"
+        zone = str(event_payload.get("zone_id") or effective_zone_id or "").strip()
+        await push_notification_service.send_plain_push_to_owners(
+            db,
+            user_ids,
+            title=f"{zone} · Guest access request" if zone else "Guest access request",
+            body=f"{guest_name} is requesting access and awaiting approval.",
+            data={
+                "event": "unexpected_guest",
+                "type": "PERMISSION",
+                "guest_id": str(event_payload.get("guest_id") or ""),
+                "zone_id": zone,
             },
         )
 

@@ -660,11 +660,12 @@ async def join_with_qr(
                 inherit_admin=False,
             ),
             phone=qr_data.phone,
+            communal_id=qr_data.communal_id,
         )
         new_owner = owner_crud.create_owner(
             db,
             new_owner_data,
-            communal_id=qr_crud.ensure_qr_communal_id(db, qr),
+            communal_id=qr_data.communal_id,
         )
 
         if not qr.is_reusable():
@@ -700,7 +701,8 @@ async def join_with_qr(
     new_owner = owner_crud.create_owner(
         db,
         new_owner_data,
-        communal_id=qr_crud.ensure_qr_communal_id(db, qr),
+        communal_id=None,
+        provision_communal_primary=False,
     )
 
     if not qr.is_reusable():

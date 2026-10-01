@@ -16,8 +16,9 @@ from app.services.account_type_policy import is_system_administrator
 ZONE_NAME_MIN_LENGTH = 1
 ZONE_NAME_MAX_LENGTH = 120
 
-# Individual (exclusive) accounts: up to 3 secondary zones, never primary.
-INDIVIDUAL_SECONDARY_ZONE_LIMIT = 3
+# Individual (exclusive) accounts: up to 2 secondary zones.
+# Primary comes from a subscribed Communal ID (calculated at signup), not user-created.
+INDIVIDUAL_SECONDARY_ZONE_LIMIT = 2
 
 
 @dataclass
@@ -133,6 +134,18 @@ def count_zones_for_creator(db: Session, creator_id: int) -> int:
     return int(total or 0)
 
 
+def count_secondary_zones_for_creator(db: Session, creator_id: int) -> int:
+    """Count active secondary zones created by this user (excludes primary)."""
+    total = db.execute(
+        select(func.count(Zone.id)).where(
+            Zone.creator_id == creator_id,
+            Zone.active.is_(True),
+            Zone.is_primary.is_(False),
+        )
+    ).scalar()
+    return int(total or 0)
+
+
 def count_primary_zones_for_creators(db: Session, creator_ids: Sequence[int]) -> int:
     """Count active primary zones (used for member secondary caps / visibility tier)."""
     if not creator_ids:
@@ -182,7 +195,8 @@ def build_capabilities(
     account_key = str(account_type or "").strip().lower()
 
     # Solo Individual = self sign-up OR provisioned by system admin (Private QR):
-    # account root, up to 3 secondary zones, no primary.
+    # account root; primary is provisioned from a Communal ID at signup;
+    # up to 2 user-created secondary zones.
     # Invited Individual = invited by another account holder (Family/Organization):
     # linked under that admin; secondary quota follows the prior member workflow
     # (typically up to 2 when the admin has 1 primary).
@@ -202,8 +216,9 @@ def build_capabilities(
             max_total=max_total,
             reserved_for_standard_users=0,
             reason=reason,
-            admin_primary_count=0,
-            max_primary=0,
+            # Communal-sourced primary exists; user cannot create another primary.
+            admin_primary_count=max(0, int(admin_primary_count)),
+            max_primary=1,
             next_zone_is_primary=False,
             member_secondary_limit=max_total,
             can_create_primary=False,
@@ -353,26 +368,37 @@ def prepare_create_zone_policy(db: Session, owner: Owner) -> ZoneCapabilities:
     root_id = account_root_id(owner)
     lock_account_for_zone_policy(db, root_id)
     lock_creator_for_zone_policy(db, owner.id)
-    total = count_zones_for_creator(db, owner.id)
+    invited = owner_is_invited_member(owner)
+    account_key = str(owner.account_type.value or "").strip().lower()
+    # Solo Individuals: Communal-sourced primary does not consume secondary quota.
+    if account_key == "exclusive" and not invited:
+        total = count_secondary_zones_for_creator(db, owner.id)
+    else:
+        total = count_zones_for_creator(db, owner.id)
     admin_primary = admin_primary_count_for_account(db, owner)
     return build_capabilities(
         owner.role.value,
         total_zones=total,
         admin_primary_count=admin_primary,
         account_type=owner.account_type.value,
-        is_invited_member=owner_is_invited_member(owner),
+        is_invited_member=invited,
     )
 
 
 def capabilities_for_owner(db: Session, owner: Owner) -> ZoneCapabilities:
-    total = count_zones_for_creator(db, owner.id)
+    invited = owner_is_invited_member(owner)
+    account_key = str(owner.account_type.value or "").strip().lower()
+    if account_key == "exclusive" and not invited:
+        total = count_secondary_zones_for_creator(db, owner.id)
+    else:
+        total = count_zones_for_creator(db, owner.id)
     admin_primary = admin_primary_count_for_account(db, owner)
     return build_capabilities(
         owner.role.value,
         total_zones=total,
         admin_primary_count=admin_primary,
         account_type=owner.account_type.value,
-        is_invited_member=owner_is_invited_member(owner),
+        is_invited_member=invited,
     )
 
 

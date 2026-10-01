@@ -11,8 +11,8 @@ from app.database import Base, get_db
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import AccessSchedule, GuestAccessSession
-from app.models.access_schedule import AccessScheduleStatus
+from app.models import GuestAccessSession
+from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.guest_access_zone_message import GuestAccessZoneMessage
 from app.services.guest_arrival_zone_messages import (
     DEFAULT_EXPECTED_ARRIVAL_MESSAGE,
@@ -91,7 +91,7 @@ async def test_admin_get_put_custom_messages_permission_and_poll(test_db, overri
 
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = "zone-ga-msg-custom"
-        _, token = await _register_admin(client, zone_id=zone_id)
+        owner_id, token = await _register_admin(client, zone_id=zone_id)
 
         g = await client.get(
             f"/api/access/zones/{zone_id}/guest-arrival-messages",
@@ -108,7 +108,11 @@ async def test_admin_get_put_custom_messages_permission_and_poll(test_db, overri
         p = await client.patch(
             f"/api/access/zones/{zone_id}/guest-arrival-messages",
             headers={"Authorization": f"Bearer {token}"},
-            json={"unexpected_arrival_message": custom_unexp, "expected_arrival_message": custom_exp},
+            json={
+                "unexpected_arrival_message": custom_unexp,
+                "expected_arrival_message": custom_exp,
+                "guest_pass_verified_message": custom_exp,
+            },
         )
         assert p.status_code == 200
         assert p.json()["data"]["unexpected_arrival_message"] == custom_unexp
@@ -124,22 +128,22 @@ async def test_admin_get_put_custom_messages_permission_and_poll(test_db, overri
         poll = await client.get(f"/api/access/session/{guest_id}", params={"zone_id": zone_id})
         assert poll.json()["data"]["message"] == custom_unexp
 
-        sched = AccessSchedule(
-            zone_id=zone_id,
-            guest_name="Sched Guest",
-            event_id=None,
-            starts_at=datetime.utcnow() - timedelta(hours=1),
-            ends_at=datetime.utcnow() + timedelta(hours=1),
-            active=True,
-            status=AccessScheduleStatus.ACCEPTED,
-            notify_member_assist=False,
+        test_db.add(
+            GuestPass(
+                zone_id=zone_id,
+                event_id="EVT-GA-MSG",
+                requested_by=owner_id,
+                reviewed_by=owner_id,
+                guest_name="Sched Guest",
+                status=GuestPassStatus.ACCEPTED,
+                expires_at=datetime.utcnow() + timedelta(days=1),
+            )
         )
-        test_db.add(sched)
         test_db.commit()
 
         perm2 = await client.post(
             "/api/access/permission",
-            json={"zone_id": zone_id, "guest_name": "Sched Guest"},
+            json={"zone_id": zone_id, "guest_name": "Sched Guest", "event_id": "EVT-GA-MSG"},
         )
         assert perm2.status_code == 200
         assert perm2.json()["data"]["message"] == custom_exp

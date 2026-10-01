@@ -49,9 +49,9 @@ class OwnerBase(BaseModel):
         None,
         max_length=32,
         description=(
-            "Server-assigned Communal ID for Individual accounts. "
-            "Read-only for clients; issued on registration, or pre-issued on "
-            "member-invite QR generate and applied at join."
+            "Communal ID selected by Individual (Exclusive) accounts at signup. "
+            "Must be a registered public Communal ID with at least one zone. "
+            "Network admins mint/manage IDs separately; this field is subscription only."
         ),
     )
     tier_level: Optional[int] = Field(
@@ -107,6 +107,15 @@ class OwnerCreate(BaseModel):
             "or tier code FREE (stateless; always accepted for admin signup). "
             "Not required for user role joining an existing account."
         ),
+    )
+    communal_id: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Required for Individual (exclusive) self-registration: public Communal ID "
+            "whose zones become the account's calculated primary zone."
+        ),
+        validation_alias=AliasChoices("communal_id", "communalId"),
     )
 
     @model_validator(mode="after")
@@ -534,8 +543,17 @@ class QRRegistrationUse(BaseModel):
         max_length=100,
         description=(
             "Required when redeeming a system-administrator invite: the new "
-            "Exclusive network administrator's network ID."
+            "Individual account's network ID."
         ),
+    )
+    communal_id: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Required for system-administrator Individual invites: public Communal ID "
+            "whose zones become the calculated primary zone."
+        ),
+        validation_alias=AliasChoices("communal_id", "communalId"),
     )
 
 

@@ -641,31 +641,30 @@ async def test_guest_messaging_includes_all_network_members(test_db, override_ge
 
 @pytest.mark.asyncio
 async def test_expected_schedule_guest_permission_poll_and_guest_session(test_db, override_get_db):
-    """EXPECTED (schedule) arrivals expose exchange on permission and poll; guest-session accepts."""
+    """EXPECTED (Event ID guest pass) arrivals expose exchange on permission and poll; guest-session accepts."""
     from datetime import datetime, timedelta
 
-    from app.models import AccessSchedule
-from app.models.access_schedule import AccessScheduleStatus
+    from app.models.guest_pass import GuestPass, GuestPassStatus
 
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = "zone-sched-exch-1"
-        await _register_admin(client, zone_id=zone_id)
-        sched = AccessSchedule(
-            zone_id=zone_id,
-            guest_name="Sched Pat",
-            event_id=None,
-            starts_at=datetime.utcnow() - timedelta(hours=1),
-            ends_at=datetime.utcnow() + timedelta(hours=1),
-            active=True,
-            status=AccessScheduleStatus.ACCEPTED,
-            notify_member_assist=False,
+        owner_id, _token = await _register_admin(client, zone_id=zone_id)
+        test_db.add(
+            GuestPass(
+                zone_id=zone_id,
+                event_id="EVT-SCHED-EXCH",
+                requested_by=owner_id,
+                reviewed_by=owner_id,
+                guest_name="Sched Pat",
+                status=GuestPassStatus.ACCEPTED,
+                expires_at=datetime.utcnow() + timedelta(days=1),
+            )
         )
-        test_db.add(sched)
         test_db.commit()
 
         perm = await client.post(
             "/api/access/permission",
-            json={"zone_id": zone_id, "guest_name": "Sched Pat"},
+            json={"zone_id": zone_id, "guest_name": "Sched Pat", "event_id": "EVT-SCHED-EXCH"},
         )
         assert perm.status_code == 200
         pj = perm.json()["data"]
@@ -696,26 +695,25 @@ from app.models.access_schedule import AccessScheduleStatus
 
 @pytest.mark.asyncio
 async def test_schedule_evt_event_id_matches_bare_digits_on_permission(test_db, override_get_db):
-    """Schedule stored as EVT-1234; guest sends event_id 1234 → same EXPECTED outcome."""
+    """Guest pass stored as EVT-1234; guest sends event_id 1234 → same EXPECTED outcome."""
     from datetime import datetime, timedelta
 
-    from app.models import AccessSchedule
-from app.models.access_schedule import AccessScheduleStatus
+    from app.models.guest_pass import GuestPass, GuestPassStatus
 
     async with AsyncClient(app=app, base_url="http://test") as client:
         zone_id = "zone-evt-canonical-1"
-        await _register_admin(client, zone_id=zone_id)
-        sched = AccessSchedule(
-            zone_id=zone_id,
-            guest_name="Other Person",
-            event_id="EVT-1234",
-            starts_at=datetime.utcnow() - timedelta(hours=1),
-            ends_at=datetime.utcnow() + timedelta(hours=1),
-            active=True,
-            status=AccessScheduleStatus.ACCEPTED,
-            notify_member_assist=False,
+        owner_id, _token = await _register_admin(client, zone_id=zone_id)
+        test_db.add(
+            GuestPass(
+                zone_id=zone_id,
+                event_id="EVT-1234",
+                requested_by=owner_id,
+                reviewed_by=owner_id,
+                guest_name="Other Person",
+                status=GuestPassStatus.ACCEPTED,
+                expires_at=datetime.utcnow() + timedelta(days=1),
+            )
         )
-        test_db.add(sched)
         test_db.commit()
 
         perm = await client.post(

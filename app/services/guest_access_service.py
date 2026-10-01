@@ -535,7 +535,8 @@ def process_guest_arrival(
                 "ws_unexpected_guest": [],
             }
 
-    schedule = find_matching_schedule_for_arrival(db, zone_id, guest_name=guest_name, event_id=event_id)
+    # Guest access is Event ID pass only. Calendar schedules are not used for auto-approval.
+    schedule = None
     guest_token = str(uuid.uuid4())
 
     ws_guest_is_here: list[tuple[list[int], dict]] = []

@@ -1421,6 +1421,86 @@ async def generate_zone_reference(
 
 
 @router.get(
+    "/communal-ids/public",
+    response_model=list[CommunalIdListItem],
+    summary="List public Communal IDs (no auth)",
+    description=(
+        "Unauthenticated list of registered Communal IDs for Individual signup. "
+        "Only IDs that already have at least one attached zone are returned."
+    ),
+)
+async def list_communal_ids_public(db: Session = Depends(get_db)):
+    rows = list_public_communal_ids(db, None)
+    usable = [row for row in rows if int(row.get("zone_count") or 0) > 0]
+    return [CommunalIdListItem.model_validate(row) for row in usable]
+
+
+@router.post(
+    "/validate-reference/public",
+    response_model=ZoneReferenceValidateResponse,
+    summary="Validate Communal ID (no auth)",
+    description="Unauthenticated Communal ID validation for Individual signup.",
+)
+async def validate_zone_reference_public(
+    body: ZoneReferenceValidateRequest,
+    db: Session = Depends(get_db),
+):
+    resolved_type = _resolve_reference_zone_type(body.zone_type)
+    if resolved_type != "communal_id":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Public validation only supports communal_id",
+        )
+    reference_id = normalize_reference_id(body.reference_id or "")
+    if not is_valid_reference_format(reference_id):
+        return ZoneReferenceValidateResponse(
+            valid=False,
+            zone_type=resolved_type,
+            reference_id=reference_id,
+            exists=False,
+            message="Reference ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
+        )
+    resolution = resolve_communal_reference(db, None, reference_id)
+    if not resolution:
+        return ZoneReferenceValidateResponse(
+            valid=False,
+            zone_type=resolved_type,
+            reference_id=reference_id,
+            exists=False,
+            message="Communal ID not found.",
+        )
+    payload = communal_resolution_to_response_payload(resolution)
+    matched_zones = resolution.get("zones") or []
+    summaries: list[CommunalZoneSummary] = []
+    if matched_zones:
+        serialized = _serialize_zones(db, matched_zones)
+        for row in serialized:
+            cfg = row.get("config") if isinstance(row.get("config"), dict) else {}
+            summaries.append(
+                CommunalZoneSummary(
+                    id=int(row["id"]),
+                    zone_id=str(row["zone_id"]),
+                    name=str(row["name"]),
+                    type=str(row["type"]),
+                    owner_id=int(row["owner_id"]),
+                    owner_name=row.get("owner_name"),
+                    communal_id=str(cfg.get("communal_id") or reference_id),
+                    is_public=cfg.get("is_public", True) is not False,
+                )
+            )
+    payload["zones"] = [s.model_dump() for s in summaries]
+    # Signup requires at least one zone under the ID.
+    if not summaries:
+        payload["valid"] = False
+        payload["exists"] = bool(resolution.get("exists"))
+        payload["message"] = (
+            resolution.get("message")
+            or "Communal ID has no zones yet. Choose one with zones attached."
+        )
+    return ZoneReferenceValidateResponse.model_validate(payload)
+
+
+@router.get(
     "/communal-ids",
     response_model=list[CommunalIdListItem],
     summary="List all public Communal IDs",

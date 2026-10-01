@@ -16,11 +16,16 @@ def create_owner(
     *,
     api_key: str | None = None,
     communal_id: str | None = None,
+    provision_communal_primary: bool = True,
 ) -> Owner:
     """Create a new owner.
 
-    ``communal_id`` may be a pre-issued ID from a member-invite QR. When set,
-    Individual accounts keep that value instead of minting a new one.
+    ``communal_id`` may be:
+    - A Communal ID selected by an Individual at signup (preferred), or
+    - A legacy pre-issued invite value.
+
+    For solo Exclusive accounts, when ``provision_communal_primary`` is True,
+    zones under that Communal ID are calculated into one owned primary zone.
     """
     api_key = api_key or generate_api_key()
     tier_level = getattr(owner, "tier_level", None)
@@ -35,7 +40,19 @@ def create_owner(
         tier_level = None
     from app.services.communal_zone_service import normalize_reference_id
 
-    reserved = normalize_reference_id(communal_id or "") or None
+    from_payload = normalize_reference_id(getattr(owner, "communal_id", None) or "") or None
+    reserved = normalize_reference_id(communal_id or "") or from_payload
+
+    # Validate Communal subscription before writing the owner row (solo Exclusive only).
+    if provision_communal_primary and account_key == "exclusive":
+        invited = owner.account_owner_id is not None
+        if not invited:
+            from app.services.individual_communal_signup import (
+                assert_exclusive_communal_id_selectable,
+            )
+
+            assert_exclusive_communal_id_selectable(db, reserved)
+
     db_owner = Owner(
         email=owner.email,
         zone_id=owner.zone_id,
@@ -57,10 +74,25 @@ def create_owner(
     if db_owner.account_owner_id is None:
         db_owner.account_owner_id = db_owner.id
         db.flush()
-    # Individual accounts always receive a unique server-assigned Communal ID.
-    from app.services.communal_zone_service import assign_owner_communal_id
 
-    assign_owner_communal_id(db, db_owner)
+    if provision_communal_primary and account_key == "exclusive":
+        from app.services.individual_communal_signup import (
+            apply_individual_communal_subscription,
+        )
+
+        # Solo Exclusive must select a Communal ID; invited members skip this.
+        is_solo = int(db_owner.account_owner_id or 0) == int(db_owner.id)
+        apply_individual_communal_subscription(
+            db,
+            db_owner,
+            reserved,
+            required=is_solo,
+        )
+    else:
+        from app.services.communal_zone_service import assign_owner_communal_id
+
+        assign_owner_communal_id(db, db_owner)
+
     db.refresh(db_owner)
     return db_owner
 

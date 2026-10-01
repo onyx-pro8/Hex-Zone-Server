@@ -266,7 +266,7 @@ def list_public_communal_ids(db: Session, owner=None) -> list[dict[str, Any]]:
         reference_id = normalize_reference_id(getattr(row, "reference_id", "") or "")
         if not reference_id:
             continue
-        matched = find_zones_by_communal_id(db, reference_id)
+        matched_count = count_zones_with_communal_id(db, reference_id)
         creator_id = int(getattr(row, "creator_id", 0) or 0) or None
         person = creators.get(int(creator_id)) if creator_id else None
         if person is not None:
@@ -281,7 +281,7 @@ def list_public_communal_ids(db: Session, owner=None) -> list[dict[str, Any]]:
                 "creator_id": creator_id,
                 "creator_name": creator_name,
                 "network_id": str(getattr(row, "network_id", "") or "").strip(),
-                "zone_count": len(matched),
+                "zone_count": matched_count,
                 "created_at": (
                     row.created_at.isoformat() if getattr(row, "created_at", None) else None
                 ),
@@ -347,6 +347,29 @@ def _load_zones_by_ids_with_geometry(db: Session, matched_ids: list[int]) -> lis
         if zone is not None:
             out.append(zone)
     return out
+
+
+def count_zones_with_communal_id(db: Session, reference_id: str) -> int:
+    """Count active zones tagged with a Communal ID without loading geometry."""
+    normalized = normalize_reference_id(reference_id)
+    if not normalized or db is None:
+        return 0
+    rows = (
+        db.query(Zone.id, Zone.parameters)
+        .filter(Zone.active.is_(True))
+        .all()
+    )
+    count = 0
+    for _, parameters in rows:
+        params = parameters if isinstance(parameters, dict) else {}
+        config = params.get("config") if isinstance(params.get("config"), dict) else {}
+        ids = _coerce_id_list(config.get("communal_ids") or config.get("communalIds"))
+        legacy = config.get("communal_id") or config.get("communalId")
+        if isinstance(legacy, str) and legacy.strip():
+            ids.append(normalize_reference_id(legacy))
+        if normalized in ids:
+            count += 1
+    return count
 
 
 def find_zones_by_communal_id(db: Session, reference_id: str) -> list[Zone]:

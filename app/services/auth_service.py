@@ -109,6 +109,15 @@ def register_user(db: Session, payload: dict) -> dict:
         zone_id=payload.get("zoneId") or f"user-{payload['email']}",
         account_type=account_type_value,
     )
+    if account_type_value == "exclusive" and account_owner_id is None:
+        from app.services.individual_communal_signup import (
+            assert_exclusive_communal_id_selectable,
+        )
+
+        assert_exclusive_communal_id_selectable(
+            db,
+            payload.get("communalId") or payload.get("communal_id"),
+        )
     owner_tier_level: int | None = None
     if account_type_value == "enhanced_plus":
         owner_tier_level = (
@@ -128,12 +137,24 @@ def register_user(db: Session, payload: dict) -> dict:
         hashed_password=get_password_hash(payload["password"]),
         api_key=preallocated_api_key or generate_api_key(),
         address=payload.get("address", "N/A"),
+        communal_id=None,
     )
     db.add(owner)
     db.flush()
     if owner.account_owner_id is None:
         owner.account_owner_id = owner.id
         db.flush()
+    if account_type_value == "exclusive":
+        from app.services.individual_communal_signup import (
+            apply_individual_communal_subscription,
+        )
+
+        apply_individual_communal_subscription(
+            db,
+            owner,
+            payload.get("communalId") or payload.get("communal_id"),
+            required=True,
+        )
     try:
         _try_geocode_owner_address(owner)
         db.flush()
@@ -157,6 +178,7 @@ def register_user(db: Session, payload: dict) -> dict:
         "created_at": owner.created_at,
         "updated_at": owner.updated_at,
         "api_key": owner.api_key,
+        "communal_id": getattr(owner, "communal_id", None),
         "mapCenter": _get_map_center(db, owner.id),
     }
 
