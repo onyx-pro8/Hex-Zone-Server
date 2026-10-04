@@ -127,14 +127,30 @@ def test_unknown_network_id_is_rejected(test_db):
     assert exc.value.detail == NETWORK_ADMIN_NOT_FOUND_DETAIL
 
 
-def test_plan_card_does_not_block_a_unique_network(test_db):
-    admin = _admin(
+def test_joinable_networks_match_the_selected_account_type(test_db):
+    _admin(test_db, email="ada@example.com", zone_id="Family-Net")
+    _admin(
+        test_db,
+        email="pro@example.com",
+        zone_id="Pro-Net",
+        account_type=AccountType.ENHANCED,
+    )
+    family = list_joinable_networks(test_db, account_type="PRIVATE_PLUS")
+    pro = list_joinable_networks(test_db, account_type="enhanced")
+    assert [row["network_id"] for row in family] == ["Family-Net"]
+    assert [row["network_id"] for row in pro] == ["Pro-Net"]
+
+
+def test_different_account_type_does_not_join_the_network(test_db):
+    _admin(
         test_db,
         email="ada@example.com",
         zone_id="Family-Net",
         account_type=AccountType.ENHANCED,
     )
-    assert _resolve(test_db, zone_id="Family-Net", account_type="private_plus") == admin.id
+    with pytest.raises(HTTPException) as exc:
+        _resolve(test_db, zone_id="Family-Net", account_type="private_plus")
+    assert exc.value.detail == NETWORK_ADMIN_NOT_FOUND_DETAIL
 
 
 def test_system_administrator_network_is_not_joinable(test_db):
@@ -191,7 +207,7 @@ def test_contract_join_inherits_the_administrator_plan(test_db, monkeypatch):
             "name": "Mia Member",
             "email": "mia-join@example.com",
             "password": "SecurePassword123",
-            "accountType": "PRIVATE_PLUS",
+            "accountType": "ENHANCED",
             "registrationType": "USER",
             "zoneId": "pro-net",
             "address": "2 Member St",

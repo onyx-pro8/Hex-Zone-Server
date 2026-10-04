@@ -1,5 +1,5 @@
 """Router for Owner/User endpoints."""
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -216,11 +216,18 @@ class JoinableNetworkItem(BaseModel):
     summary="List networks a new user can join",
     description=(
         "Unauthenticated list of Network IDs whose administrator can still accept "
-        "a member. Used by the signup picker. Does not include administrator emails."
+        "a member. Pass account_type to return only administrators on that same plan. "
+        "Does not include administrator emails."
     ),
 )
-async def list_public_joinable_networks(db: Session = Depends(get_db)):
-    return [JoinableNetworkItem.model_validate(row) for row in list_joinable_networks(db)]
+async def list_public_joinable_networks(
+    account_type: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    return [
+        JoinableNetworkItem.model_validate(row)
+        for row in list_joinable_networks(db, account_type=account_type)
+    ]
 
 
 @router.get(

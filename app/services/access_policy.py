@@ -135,7 +135,12 @@ def resolve_account_owner_id(
             detail=NETWORK_ID_REQUIRED_DETAIL,
         )
 
-    admins = _administrators_for_network(db, network)
+    requested = str(account_type).strip().lower()
+    admins = [
+        admin
+        for admin in _administrators_for_network(db, network)
+        if str(admin.account_type.value) == requested
+    ]
     email = (administrator_email or "").strip().lower()
 
     if email:
@@ -179,12 +184,14 @@ _JOINABLE_NETWORK_LABELS = {
 }
 
 
-def list_joinable_networks(db: Session) -> list[dict]:
+def list_joinable_networks(db: Session, *, account_type: str | None = None) -> list[dict]:
     """Active networks a new user can join, one row per Network ID.
 
-    System-administrator networks and accounts that are full or cannot invite
-    members are omitted. Email addresses are not included.
+    When ``account_type`` is set, only administrators of that same type are
+    included. System-administrator networks and full accounts are omitted.
+    Email addresses are not included.
     """
+    requested = (account_type or "").strip().lower().replace("-", "_").replace(" ", "_")
     admins = (
         db.query(Owner)
         .filter(Owner.role == OwnerRole.ADMINISTRATOR, Owner.active.is_(True))
@@ -195,8 +202,10 @@ def list_joinable_networks(db: Session) -> list[dict]:
     for admin in admins:
         if is_system_administrator(admin):
             continue
-        account_type = str(admin.account_type.value)
-        if not account_type_supports_member_invite(account_type):
+        admin_type = str(admin.account_type.value)
+        if requested and admin_type != requested:
+            continue
+        if not account_type_supports_member_invite(admin_type):
             continue
         if admin_user_members_at_capacity(db, admin):
             continue
@@ -209,8 +218,8 @@ def list_joinable_networks(db: Session) -> list[dict]:
             bucket = {"network_id": network_id, "account_types": [], "count": 0}
             grouped[key] = bucket
         bucket["count"] += 1
-        if account_type not in bucket["account_types"]:
-            bucket["account_types"].append(account_type)
+        if admin_type not in bucket["account_types"]:
+            bucket["account_types"].append(admin_type)
 
     rows: list[dict] = []
     for bucket in grouped.values():
