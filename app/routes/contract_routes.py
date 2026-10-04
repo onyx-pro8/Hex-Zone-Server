@@ -72,7 +72,18 @@ class RegisterRequest(BaseModel):
     accountOwnerId: int | None = Field(
         default=None,
         ge=1,
-        description="Required for USER registration when linking to an existing administrator account",
+        description=(
+            "Optional numeric administrator id. When omitted, USER registration "
+            "is linked by zoneId (Network ID)."
+        ),
+    )
+    administratorEmail: str | None = Field(
+        default=None,
+        description=(
+            "Administrator email. Required only when several administrators "
+            "share the Network ID."
+        ),
+        validation_alias=AliasChoices("administratorEmail", "administrator_email"),
     )
     zoneId: str | None = Field(
         default=None,
@@ -428,8 +439,9 @@ async def login(payload: LoginRequest, db: Session = Depends(get_db)):
     description=(
         "Mobile registration endpoint for administrator/user onboarding. Supports all "
         "5 account tiers, role-aware registration, and account owner linking for users. "
-        "Exclusive tier does not allow USER members. USER registrations must match the "
-        "administrator zone/account type. "
+        "Exclusive tier does not allow USER members. USER registrations join by "
+        "Network ID (zoneId) and must match the administrator account type. "
+        "administratorEmail is required only when several administrators share that Network ID. "
         "Administrators must submit registrationCode: either echo the single-use string "
         "from GET /utils/registration-code (or GET /owners/registration-code) or the "
         "stateless tier code FREE. User registrations do not require a registration code."

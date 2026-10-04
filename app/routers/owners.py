@@ -1,6 +1,7 @@
 """Router for Owner/User endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.schemas import (
@@ -16,7 +17,12 @@ from app.schemas.schemas import (
 )
 from app.crud import owner as owner_crud
 from app.core.security import get_current_user, verify_password, create_access_token
-from app.services.access_policy import resolve_account_owner_id, visible_owner_ids, messaging_visible_owner_ids
+from app.services.access_policy import (
+    list_joinable_networks,
+    messaging_visible_owner_ids,
+    resolve_account_owner_id,
+    visible_owner_ids,
+)
 from app.services.registration_code_service import (
     mint_registration_code,
     require_and_consume_admin_registration_code,
@@ -97,6 +103,7 @@ async def register_owner(
         requested_account_owner_id=owner.account_owner_id,
         zone_id=owner.zone_id,
         account_type=owner.account_type.value,
+        administrator_email=owner.administrator_email,
     )
 
     # Invited users inherit Family/Org type (or Individual under Pro).
@@ -194,6 +201,26 @@ async def issue_owners_registration_code(db: Session = Depends(get_db)):
     code = mint_registration_code(db)
     db.commit()
     return {"registration_code": code}
+
+
+class JoinableNetworkItem(BaseModel):
+    network_id: str
+    account_type: str = ""
+    label: str = ""
+    administrator_count: int = Field(ge=1)
+
+
+@router.get(
+    "/networks/public",
+    response_model=list[JoinableNetworkItem],
+    summary="List networks a new user can join",
+    description=(
+        "Unauthenticated list of Network IDs whose administrator can still accept "
+        "a member. Used by the signup picker. Does not include administrator emails."
+    ),
+)
+async def list_public_joinable_networks(db: Session = Depends(get_db)):
+    return [JoinableNetworkItem.model_validate(row) for row in list_joinable_networks(db)]
 
 
 @router.get(

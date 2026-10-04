@@ -108,8 +108,19 @@ def register_user(db: Session, payload: dict) -> dict:
         requested_account_owner_id=payload.get("accountOwnerId"),
         zone_id=payload.get("zoneId") or f"user-{payload['email']}",
         account_type=account_type_value,
+        administrator_email=payload.get("administratorEmail")
+        or payload.get("administrator_email"),
     )
-    if account_type_value == "exclusive" and account_owner_id is None:
+    # Linked members take the administrator's invited-member plan. The card
+    # selected during signup is only the caller's guess.
+    if role_value == OwnerRole.USER and account_owner_id is not None:
+        from app.services.account_type_policy import account_type_for_invited_member
+
+        administrator = db.get(Owner, account_owner_id)
+        if administrator is not None:
+            account_type_value = account_type_for_invited_member(administrator).value
+    solo_exclusive = account_type_value == "exclusive" and account_owner_id is None
+    if solo_exclusive:
         from app.services.individual_communal_signup import (
             assert_exclusive_communal_id_selectable,
         )
@@ -153,7 +164,7 @@ def register_user(db: Session, payload: dict) -> dict:
             db,
             owner,
             payload.get("communalId") or payload.get("communal_id"),
-            required=True,
+            required=solo_exclusive,
         )
     try:
         _try_geocode_owner_address(owner)

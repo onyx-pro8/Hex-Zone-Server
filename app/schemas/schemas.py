@@ -88,7 +88,20 @@ class OwnerCreate(BaseModel):
     account_owner_id: Optional[int] = Field(
         None,
         ge=1,
-        description="Required for user role when joining an existing administrator account.",
+        description=(
+            "Optional numeric administrator id. When omitted, a user is linked "
+            "by Network ID (zone_id). administrator_email is required only when "
+            "several administrators share that Network ID."
+        ),
+    )
+    administrator_email: Optional[str] = Field(
+        None,
+        max_length=255,
+        description=(
+            "Administrator email. Required only when several administrators "
+            "share the Network ID being joined."
+        ),
+        validation_alias=AliasChoices("administrator_email", "administratorEmail"),
     )
     address: str = Field(
         ...,
