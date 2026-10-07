@@ -39,7 +39,7 @@ Audience: backend team owning this repo. Frontend: Hex-Zone-Client (React/Vite).
 - Manual compose APIs reject `PERMISSION` with `PERMISSION_MANUAL_DISABLED`.
 - Guest write messaging is `CHAT` only; all non-`CHAT` types return `GUEST_MESSAGE_TYPE_NOT_ALLOWED`.
 - Guest may send `CHAT` only to the network administrator peer returned by `GET /api/guest/zones/{zone_id}/peers` (pending and approved).
-- Pending network-access CHAT uses a FIFO queue: only the oldest pending guest receives `chat_access_token` / may send; after approve/reject the next pending guest becomes eligible.
+- Pending network-access CHAT uses a FIFO queue: the oldest pending guest may send first. Later pending guests may send only after the admin messages them first, or after earlier guests are approved/rejected.
 - For primary-token mode, `expires_at` / `expires_in_hours` are not accepted (`PRIMARY_TOKEN_EXPIRY_NOT_ALLOWED`).
 - Legacy `POST /api/access/qr-tokens` + `GET /api/access/qr-tokens` remain supported.
   - For primary mode (`is_primary=true`), token never expires (`expires_at=null`).

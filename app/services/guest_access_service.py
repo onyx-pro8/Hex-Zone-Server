@@ -137,21 +137,63 @@ def pending_network_chat_queue_head(
     )
 
 
+def _zone_event_guest_id(event: ZoneMessageEvent) -> str | None:
+    if event.sender_guest_id:
+        s = str(event.sender_guest_id).strip()
+        return s or None
+    body = event.body_json if isinstance(event.body_json, dict) else {}
+    g = str(body.get("guest_id") or "").strip()
+    if g:
+        return g
+    meta = event.metadata_json if isinstance(event.metadata_json, dict) else {}
+    g = str(meta.get("guest_id") or "").strip()
+    return g or None
+
+
+def admin_has_initiated_pending_chat(db: Session, row: GuestAccessSession) -> bool:
+    """True when the network admin already sent CHAT to this pending guest.
+
+    Later queue guests may not send first; they may reply after the admin opens the thread.
+    """
+    admin_id = row.admin_owner_id
+    gid = (row.guest_id or "").strip()
+    zid = (row.zone_id or "").strip()
+    if admin_id is None or not gid or not zid:
+        return False
+    rows = (
+        db.query(ZoneMessageEvent)
+        .filter(
+            ZoneMessageEvent.zone_id == zid,
+            ZoneMessageEvent.type == CanonicalMessageType.CHAT.value,
+            ZoneMessageEvent.sender_id == admin_id,
+        )
+        .order_by(ZoneMessageEvent.created_at.desc())
+        .limit(300)
+        .all()
+    )
+    for event in rows:
+        if _zone_event_guest_id(event) == gid:
+            return True
+    return False
+
+
 def guest_is_pending_chat_eligible(db: Session, row: GuestAccessSession) -> bool:
-    """Only the oldest pending network-access guest may open/send pending CHAT."""
+    """Pending guest may open/send CHAT when first in queue, or after admin messages them."""
     if pending_network_chat_admin_owner_id(row) is None:
         return False
     if row.access_revoked_at is not None:
         return False
     head = pending_network_chat_queue_head(db, zone_id=row.zone_id)
-    return head is not None and head.guest_id == row.guest_id
+    if head is not None and head.guest_id == row.guest_id:
+        return True
+    return admin_has_initiated_pending_chat(db, row)
 
 
 def pending_network_chat_token_fields(db: Session, row: GuestAccessSession) -> dict:
     """Short-lived guest JWT for the existing chat UI while network access is pending.
 
-    Only the FIFO queue head receives a token. Later pending guests wait until the
-    head is approved or rejected. This is not an approval ``exchange_code``.
+    Queue head may chat immediately. Later pending guests wait until either the admin
+    sends them CHAT first, or earlier guests are approved/rejected. Not an exchange code.
     """
     if pending_network_chat_admin_owner_id(row) is None:
         return {}

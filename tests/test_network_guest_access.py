@@ -270,6 +270,72 @@ def test_pending_chat_queue_only_oldest_gets_token(db):
     assert fields.get("chat_queue_waiting") is False
 
 
+def test_later_pending_guest_unlocked_when_admin_messages_first(db):
+    from app.domain.message_types import CanonicalMessageType
+    from app.services import guest_api_service as gas_api
+
+    network = "NET-ACCESS-QUEUE-ADMIN"
+    admin = _admin(db, network)
+    first = gas.process_network_guest_arrival(
+        db,
+        network_id=network,
+        guest_name="First",
+        device_id="dev-a",
+        latitude=40.0,
+        longitude=-74.0,
+        qr_token_db_id=None,
+    )
+    db.commit()
+    second = gas.process_network_guest_arrival(
+        db,
+        network_id=network,
+        guest_name="Second",
+        device_id="dev-b",
+        latitude=40.0,
+        longitude=-74.0,
+        qr_token_db_id=None,
+    )
+    db.commit()
+
+    second_id = second["guest_response"]["guest_id"]
+    second_row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == second_id)
+        .first()
+    )
+    assert gas.guest_is_pending_chat_eligible(db, second_row) is False
+    assert first["guest_response"].get("chat_access_token")
+
+    admin_line = gas_api.create_member_to_guest_zone_message(
+        db,
+        sender=admin,
+        zone_id=network,
+        guest_id=second_id,
+        text="Admin reaches out to second guest",
+        msg_type="CHAT",
+    )
+    assert not isinstance(admin_line, dict)
+    db.commit()
+    db.refresh(second_row)
+
+    assert gas.guest_is_pending_chat_eligible(db, second_row) is True
+    fields = gas.pending_network_chat_token_fields(db, second_row)
+    assert fields.get("chat_access_token")
+    assert fields.get("chat_queue_waiting") is False
+
+    guest_reply = gas_api.create_guest_zone_message(
+        db,
+        guest_id=second_id,
+        guest_display_name="Second",
+        zone_id=network,
+        msg_type="CHAT",
+        text="Thanks admin",
+        to_owner_id=admin.id,
+        msg=None,
+    )
+    assert isinstance(guest_reply, dict) and guest_reply.get("type") == CanonicalMessageType.CHAT.value
+
+
 def test_network_guest_session_poll_pending_until_approved(db):
     network = "NET-ACCESS-4"
     admin = _admin(db, network)

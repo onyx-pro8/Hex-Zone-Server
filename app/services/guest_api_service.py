@@ -742,7 +742,10 @@ def create_guest_zone_message(
     ):
         return {
             "__reject__": "chat_queue_waiting",
-            "message": "Another guest is chatting with the administrator. Please wait your turn.",
+            "message": (
+                "Wait for the administrator to message you first, "
+                "or for earlier guests to be approved or rejected."
+            ),
         }
 
     try:

@@ -496,7 +496,10 @@ async def guest_post_message(
     if created and created.get("__reject__") == "chat_queue_waiting":
         msg = str(
             created.get("message")
-            or "Another guest is chatting with the administrator. Please wait your turn."
+            or (
+                "Wait for the administrator to message you first, "
+                "or for earlier guests to be approved or rejected."
+            )
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
