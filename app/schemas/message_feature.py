@@ -54,11 +54,40 @@ class PropagationMessageCreate(BaseModel):
         ge=1,
         description=(
             "When the sender is inside multiple acceptable zones, limit delivery "
-            "to this ``zones.id`` geometry. Omitted means all overlapping zones. "
+            "to this ``zones.id`` geometry. Prefer ``zone_record_ids`` for multi-select. "
+            "Omitted (with no ``zone_record_ids``) means all overlapping zones. "
             "System administrators may select any active zone without being inside it; "
-            "omitting this field sends to every active zone."
+            "omitting both fields sends to every active zone."
         ),
     )
+    zone_record_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Limit delivery to one or more ``zones.id`` geometries (multi-select). "
+            "Merged with ``zone_record_id`` when both are sent. Empty/omitted with no "
+            "``zone_record_id`` means all matched zones (or every active zone for "
+            "system administrators)."
+        ),
+    )
+
+    @field_validator("zone_record_ids", mode="before")
+    @classmethod
+    def normalize_zone_record_ids(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError("zone_record_ids must be a list of integers")
+        cleaned: list[int] = []
+        for item in value:
+            try:
+                n = int(item)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("zone_record_ids entries must be integers") from exc
+            if n < 1:
+                raise ValueError("zone_record_ids entries must be >= 1")
+            if n not in cleaned:
+                cleaned.append(n)
+        return cleaned or None
 
     @model_validator(mode="before")
     @classmethod

@@ -1134,6 +1134,19 @@ def test_system_admin_lists_and_sends_to_any_zone_without_location(net_db, monke
     assert set(selected["delivered_owner_ids"]) == {admin_a.id, member_a.id}
     assert selected["fanout"]["admin_virtual_location"] is True
 
+    multi = mfs.create_geo_propagated_message(
+        net_db,
+        system_admin,
+        PropagationMessageCreate(
+            type=MessageFeatureType.PANIC,
+            hid="admin-device-multi",
+            msg={"description": "hello A+B"},
+            zone_record_ids=[501, 502],
+        ),
+    )
+    assert set(multi["delivered_owner_ids"]) == {admin_a.id, member_a.id, admin_b.id}
+    assert multi["fanout"]["admin_selected_zones"] is True
+
     all_zones = mfs.create_geo_propagated_message(
         net_db,
         system_admin,

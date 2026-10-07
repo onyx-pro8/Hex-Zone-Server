@@ -50,6 +50,7 @@ from app.services.network_zone_propagation import (
     expand_primary_zone_gps_alert_recipients,
     list_all_compose_zones,
     list_matched_compose_zones,
+    normalize_target_zone_record_ids,
 )
 from app.services.private_plus_messaging import (
     apply_private_plus_network_shared_recipients,
@@ -283,13 +284,18 @@ def resolve_geo_propagation_recipient_owner_ids(
     sender: Owner | None = None,
     network_zone_id: str | None = None,
     target_zone_record_id: int | None = None,
+    target_zone_record_ids: list[int] | None = None,
 ) -> tuple[list[str], list[int], list[int], dict]:
     """Resolve geo alarm/alert recipients from acceptable-zone rules."""
     if sender is None:
         zone_record_ids = evaluate_zone_records_containing_point(db, float(latitude), float(longitude))
-        if target_zone_record_id is not None:
-            selected_id = int(target_zone_record_id)
-            zone_record_ids = [rid for rid in zone_record_ids if int(rid) == selected_id]
+        selected_ids = normalize_target_zone_record_ids(
+            target_zone_record_id=target_zone_record_id,
+            target_zone_record_ids=target_zone_record_ids,
+        )
+        if selected_ids is not None:
+            selected_set = set(selected_ids)
+            zone_record_ids = [rid for rid in zone_record_ids if int(rid) in selected_set]
         zone_ids = zone_ids_for_zone_records(db, zone_record_ids)
         return zone_ids, zone_record_ids, [], {
             "strategy": "network_no_acceptable_zone",
@@ -306,6 +312,7 @@ def resolve_geo_propagation_recipient_owner_ids(
         exclude_owner_id=exclude_owner_id,
         network_zone_id=network_zone_id,
         target_zone_record_id=target_zone_record_id,
+        target_zone_record_ids=target_zone_record_ids,
     )
 
 
@@ -319,6 +326,7 @@ def _assert_private_receiver_reachable(
     sender_zone_record_ids: list[int],
     network_zone_id: str | None = None,
     target_zone_record_id: int | None = None,
+    target_zone_record_ids: list[int] | None = None,
 ) -> None:
     """PRIVATE: sender must be inside a zone; receiver must be in the PANIC/PA pool."""
     receiver = db.get(Owner, receiver_owner_id)
@@ -344,6 +352,7 @@ def _assert_private_receiver_reachable(
         sender=sender,
         network_zone_id=network_zone_id,
         target_zone_record_id=target_zone_record_id,
+        target_zone_record_ids=target_zone_record_ids,
     )
     if is_private_plus_network_account(db, sender):
         pool = sorted(
@@ -370,6 +379,7 @@ def _resolve_private_location_status(
     longitude: float | None,
     network_zone_id: str | None = None,
     target_zone_record_id: int | None = None,
+    target_zone_record_ids: list[int] | None = None,
 ) -> str:
     """Location gate for PRIVATE compose: coordinates, then acceptable-zone geometry."""
     if latitude is None or longitude is None:
@@ -382,6 +392,7 @@ def _resolve_private_location_status(
         sender=sender,
         network_zone_id=network_zone_id,
         target_zone_record_id=target_zone_record_id,
+        target_zone_record_ids=target_zone_record_ids,
     )
     if not zone_record_ids:
         return "outside_zone"
@@ -647,8 +658,11 @@ def _zone_based_recipients(
     Secondary acceptable zone → zone creator only.
     Outside both → no recipients.
     """
-    target_zone_record_id = (
-        int(payload.zone_record_id) if payload.zone_record_id is not None else None
+    selected_zone_record_ids = normalize_target_zone_record_ids(
+        target_zone_record_id=(
+            int(payload.zone_record_id) if payload.zone_record_id is not None else None
+        ),
+        target_zone_record_ids=list(payload.zone_record_ids or []) or None,
     )
     exclude_id = sender.id if exclude_sender_from_recipients else None
 
@@ -657,15 +671,17 @@ def _zone_based_recipients(
             resolve_admin_selected_zone_recipients(
                 db,
                 sender,
-                target_zone_record_id=target_zone_record_id,
+                target_zone_record_ids=selected_zone_record_ids,
                 exclude_owner_id=exclude_id,
             )
         )
-        if target_zone_record_id is not None and target_zone_record_id not in {
-            int(rid) for rid in sender_zone_record_ids
-        }:
+        if selected_zone_record_ids is not None and not set(
+            selected_zone_record_ids
+        ).issubset({int(rid) for rid in sender_zone_record_ids}):
             raise SelectedZoneNotContainingError(
                 "Selected zone was not found or is inactive."
+                if len(selected_zone_record_ids) == 1
+                else "One or more selected zones were not found or are inactive."
             )
         zone_meta = {**zone_meta, "geo_evaluation_source": "system_admin_selected_zone"}
         eval_lat, eval_lon = None, None
@@ -681,14 +697,16 @@ def _zone_based_recipients(
                 exclude_owner_id=exclude_id,
                 sender=sender,
                 network_zone_id=network_zone_id,
-                target_zone_record_id=target_zone_record_id,
+                target_zone_record_ids=selected_zone_record_ids,
             )
         )
-        if target_zone_record_id is not None and target_zone_record_id not in {
-            int(rid) for rid in sender_zone_record_ids
-        }:
+        if selected_zone_record_ids is not None and not set(
+            selected_zone_record_ids
+        ).issubset({int(rid) for rid in sender_zone_record_ids}):
             raise SelectedZoneNotContainingError(
                 "You are not currently inside the selected zone."
+                if len(selected_zone_record_ids) == 1
+                else "You are not currently inside one or more of the selected zones."
             )
         zone_meta = {**zone_meta, "geo_evaluation_source": geo_source}
 
@@ -727,7 +745,7 @@ def _zone_based_recipients(
                 longitude=eval_lon,
                 sender_zone_record_ids=sender_zone_record_ids,
                 network_zone_id=network_zone_id,
-                target_zone_record_id=target_zone_record_id,
+                target_zone_record_ids=selected_zone_record_ids,
             )
         return (
             sender_zone_ids,
@@ -783,13 +801,16 @@ def preview_compose_recipients(
     latitude: float | None,
     longitude: float | None,
     target_zone_record_id: int | None = None,
+    target_zone_record_ids: list[int] | None = None,
     query: str = "",
     network_zone_id: str | None = None,
 ) -> dict:
     """Who would receive a geo message for one overlapping zone, or all matched zones."""
-    selected_id = (
-        int(target_zone_record_id) if target_zone_record_id is not None else None
+    selected_ids = normalize_target_zone_record_ids(
+        target_zone_record_id=target_zone_record_id,
+        target_zone_record_ids=target_zone_record_ids,
     )
+    selected_id = selected_ids[0] if selected_ids and len(selected_ids) == 1 else None
     live = get_owner_live_coordinates(db, sender.id)
     lat = latitude if latitude is not None else (live[0] if live else None)
     lon = longitude if longitude is not None else (live[1] if live else None)
@@ -799,16 +820,17 @@ def preview_compose_recipients(
             resolve_admin_selected_zone_recipients(
                 db,
                 sender,
-                target_zone_record_id=selected_id,
+                target_zone_record_ids=selected_ids,
                 exclude_owner_id=sender.id,
             )
         )
-        if selected_id is not None and selected_id not in {
-            int(rid) for rid in zone_record_ids
-        }:
+        if selected_ids is not None and not set(selected_ids).issubset(
+            {int(rid) for rid in zone_record_ids}
+        ):
             return {
                 "zone_ids": [],
                 "zone_record_id": selected_id,
+                "zone_record_ids": selected_ids,
                 "members": [],
                 "location_status": "outside_zone",
                 "strategy": zone_meta.get("strategy"),
@@ -819,6 +841,7 @@ def preview_compose_recipients(
             return {
                 "zone_ids": [],
                 "zone_record_id": selected_id,
+                "zone_record_ids": selected_ids,
                 "members": [],
                 "location_status": "no_coordinates",
                 "strategy": None,
@@ -832,15 +855,16 @@ def preview_compose_recipients(
                 exclude_owner_id=sender.id,
                 sender=sender,
                 network_zone_id=network_zone_id,
-                target_zone_record_id=selected_id,
+                target_zone_record_ids=selected_ids,
             )
         )
-        if selected_id is not None and selected_id not in {
-            int(rid) for rid in zone_record_ids
-        }:
+        if selected_ids is not None and not set(selected_ids).issubset(
+            {int(rid) for rid in zone_record_ids}
+        ):
             return {
                 "zone_ids": [],
                 "zone_record_id": selected_id,
+                "zone_record_ids": selected_ids,
                 "members": [],
                 "location_status": "outside_zone",
                 "strategy": zone_meta.get("strategy"),
@@ -875,6 +899,7 @@ def preview_compose_recipients(
     return {
         "zone_ids": zone_ids,
         "zone_record_id": selected_id,
+        "zone_record_ids": selected_ids,
         "members": members,
         "location_status": location_status,
         "strategy": zone_meta.get("strategy"),

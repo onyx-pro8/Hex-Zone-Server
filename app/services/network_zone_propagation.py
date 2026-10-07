@@ -205,39 +205,88 @@ def list_matched_compose_zones(
     return options
 
 
+def normalize_target_zone_record_ids(
+    *,
+    target_zone_record_id: int | None = None,
+    target_zone_record_ids: list[int] | None = None,
+) -> list[int] | None:
+    """Merge singular/plural zone targeting into a deduped id list (or None = all)."""
+    cleaned: list[int] = []
+    if target_zone_record_ids:
+        for value in target_zone_record_ids:
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                continue
+            if n >= 1 and n not in cleaned:
+                cleaned.append(n)
+    if target_zone_record_id is not None:
+        try:
+            n = int(target_zone_record_id)
+        except (TypeError, ValueError):
+            n = None
+        if n is not None and n >= 1 and n not in cleaned:
+            cleaned.append(n)
+    return cleaned or None
+
+
 def resolve_admin_selected_zone_recipients(
     db: Session,
     sender: Owner,
     *,
     target_zone_record_id: int | None = None,
+    target_zone_record_ids: list[int] | None = None,
     exclude_owner_id: int | None = None,
 ) -> tuple[list[str], list[int], list[int], dict]:
     """Fan-out as if the sender were inside the selected zone(s).
 
-    Used by the system administrator: they may pick any active zone, or omit
-    ``target_zone_record_id`` to reach every network's zones at once.
+    Used by the system administrator: they may pick one or more active zones, or
+    omit targeting to reach every network's zones at once.
     Primary vs secondary rules are the same as live geo-propagation.
     """
     all_rows = list_active_compose_zone_rows(db)
-    if target_zone_record_id is not None:
-        selected_id = int(target_zone_record_id)
-        zone_rows = [z for z in all_rows if int(z.id) == selected_id]
+    selected_ids = normalize_target_zone_record_ids(
+        target_zone_record_id=target_zone_record_id,
+        target_zone_record_ids=target_zone_record_ids,
+    )
+    if selected_ids is not None:
+        selected_set = set(selected_ids)
+        zone_rows = [z for z in all_rows if int(z.id) in selected_set]
         if not zone_rows:
             return [], [], [], _empty_propagation_meta()
-        selected = zone_rows[0]
-        result = _recipients_for_network_zone_rows(
-            db,
-            network_id=(selected.zone_id or "").strip(),
-            network_rows=zone_rows,
-            sender=sender,
-            exclude_owner_id=exclude_owner_id,
-        )
-        if result is None:
-            return [], [], [], _empty_propagation_meta(
-                network_zone_id=(selected.zone_id or "").strip()
+
+        by_network: dict[str, list[Zone]] = {}
+        for zone_row in zone_rows:
+            nid = (zone_row.zone_id or "").strip()
+            if nid:
+                by_network.setdefault(nid, []).append(zone_row)
+
+        partial_results: list[tuple[list[str], list[int], list[int], dict]] = []
+        for network_id, network_rows in by_network.items():
+            partial = _recipients_for_network_zone_rows(
+                db,
+                network_id=network_id,
+                network_rows=network_rows,
+                sender=sender,
+                exclude_owner_id=None,
             )
-        zone_ids, record_ids, recipients, meta = result
-        return zone_ids, record_ids, recipients, {**meta, "admin_virtual_location": True}
+            if partial is not None:
+                partial_results.append(partial)
+
+        if not partial_results:
+            return [], [], [], _empty_propagation_meta(
+                network_zone_id=(zone_rows[0].zone_id or "").strip()
+            )
+
+        zone_ids, record_ids, recipients, meta = _merge_propagation_results(partial_results)
+        if exclude_owner_id is not None:
+            recipients = [oid for oid in recipients if oid != int(exclude_owner_id)]
+            meta = {**meta, "recipient_owner_ids": recipients}
+        return zone_ids, record_ids, recipients, {
+            **meta,
+            "admin_virtual_location": True,
+            **({"admin_selected_zones": True} if len(selected_ids) > 1 else {}),
+        }
 
     by_network: dict[str, list[Zone]] = {}
     for zone_row in all_rows:
@@ -398,6 +447,7 @@ def resolve_network_geo_propagation_recipients(
     exclude_owner_id: int | None = None,
     network_zone_id: str | None = None,
     target_zone_record_id: int | None = None,
+    target_zone_record_ids: list[int] | None = None,
 ) -> tuple[list[str], list[int], list[int], dict]:
     """Resolve geo-propagation recipients using primary vs secondary zone rules.
 
@@ -417,16 +467,20 @@ def resolve_network_geo_propagation_recipients(
   creator). Recipients across networks are merged; ``matched_network_zone_ids`` in
   the returned meta lists every network reached.
 
-  When ``target_zone_record_id`` is set, only that acceptable-zone geometry is
-  used (it must contain the point). Primary-vs-secondary is evaluated for that
-  row alone, so overlapping zones are not unioned.
+  When ``target_zone_record_id`` / ``target_zone_record_ids`` is set, only those
+  acceptable-zone geometries are used (each must contain the point).
+  Primary-vs-secondary is evaluated per selected row / network.
     """
     zone_record_ids = evaluate_zone_records_containing_point(db, float(latitude), float(longitude))
     zone_rows = _zone_rows_for_records(db, zone_record_ids)
 
-    if target_zone_record_id is not None:
-        selected_id = int(target_zone_record_id)
-        selected_rows = [z for z in zone_rows if int(z.id) == selected_id]
+    selected_ids = normalize_target_zone_record_ids(
+        target_zone_record_id=target_zone_record_id,
+        target_zone_record_ids=target_zone_record_ids,
+    )
+    if selected_ids is not None:
+        selected_set = set(selected_ids)
+        selected_rows = [z for z in zone_rows if int(z.id) in selected_set]
         if network_zone_id is not None:
             network_id = (network_zone_id or "").strip()
             selected_rows = [
@@ -439,19 +493,35 @@ def resolve_network_geo_propagation_recipients(
                 else (sender.zone_id or "").strip()
             )
             return [], [], [], _empty_propagation_meta(network_zone_id=empty_network)
-        selected = selected_rows[0]
-        result = _recipients_for_network_zone_rows(
-            db,
-            network_id=(selected.zone_id or "").strip(),
-            network_rows=selected_rows,
-            sender=sender,
-            exclude_owner_id=exclude_owner_id,
-        )
-        if result is None:
-            return [], [], [], _empty_propagation_meta(
-                network_zone_id=(selected.zone_id or "").strip()
+
+        by_network: dict[str, list[Zone]] = {}
+        for zone_row in selected_rows:
+            nid = (zone_row.zone_id or "").strip()
+            if nid:
+                by_network.setdefault(nid, []).append(zone_row)
+
+        partial_results: list[tuple[list[str], list[int], list[int], dict]] = []
+        for network_id, network_rows in by_network.items():
+            partial = _recipients_for_network_zone_rows(
+                db,
+                network_id=network_id,
+                network_rows=network_rows,
+                sender=sender,
+                exclude_owner_id=None,
             )
-        return result
+            if partial is not None:
+                partial_results.append(partial)
+
+        if not partial_results:
+            return [], [], [], _empty_propagation_meta(
+                network_zone_id=(selected_rows[0].zone_id or "").strip()
+            )
+
+        zone_ids, record_ids, recipients, meta = _merge_propagation_results(partial_results)
+        if exclude_owner_id is not None:
+            recipients = [oid for oid in recipients if oid != int(exclude_owner_id)]
+            meta = {**meta, "recipient_owner_ids": recipients}
+        return zone_ids, record_ids, recipients, meta
 
     if network_zone_id is not None:
         network_id = (network_zone_id or "").strip()
