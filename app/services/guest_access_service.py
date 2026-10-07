@@ -114,16 +114,51 @@ def pending_network_chat_admin_owner_id(row: GuestAccessSession) -> int | None:
     return row.admin_owner_id
 
 
-def pending_network_chat_token_fields(row: GuestAccessSession) -> dict:
+def pending_network_chat_queue_head(
+    db: Session, *, zone_id: str
+) -> GuestAccessSession | None:
+    """Oldest pending network-access guest for this zone (FIFO chat queue)."""
+    zid = (zone_id or "").strip()
+    if not zid:
+        return None
+    return (
+        db.query(GuestAccessSession)
+        .filter(
+            GuestAccessSession.zone_id == zid,
+            GuestAccessSession.kind == "network_access",
+            or_(
+                GuestAccessSession.resolution == "pending",
+                GuestAccessSession.resolution.is_(None),
+            ),
+            GuestAccessSession.access_revoked_at.is_(None),
+        )
+        .order_by(GuestAccessSession.created_at.asc(), GuestAccessSession.id.asc())
+        .first()
+    )
+
+
+def guest_is_pending_chat_eligible(db: Session, row: GuestAccessSession) -> bool:
+    """Only the oldest pending network-access guest may open/send pending CHAT."""
+    if pending_network_chat_admin_owner_id(row) is None:
+        return False
+    if row.access_revoked_at is not None:
+        return False
+    head = pending_network_chat_queue_head(db, zone_id=row.zone_id)
+    return head is not None and head.guest_id == row.guest_id
+
+
+def pending_network_chat_token_fields(db: Session, row: GuestAccessSession) -> dict:
     """Short-lived guest JWT for the existing chat UI while network access is pending.
 
-    This is not an approval ``exchange_code``. The same ``guest_id`` thread continues
-    after an administrator approves.
+    Only the FIFO queue head receives a token. Later pending guests wait until the
+    head is approved or rejected. This is not an approval ``exchange_code``.
     """
     if pending_network_chat_admin_owner_id(row) is None:
         return {}
     if row.access_revoked_at is not None:
         return {}
+    if not guest_is_pending_chat_eligible(db, row):
+        return {"chat_queue_waiting": True}
     from app.core.security import create_guest_access_token
 
     token, _expires_in, expire = create_guest_access_token(
@@ -134,6 +169,7 @@ def pending_network_chat_token_fields(row: GuestAccessSession) -> dict:
     return {
         "chat_access_token": token,
         "chat_expires_at": expire.replace(microsecond=0).isoformat() + "Z",
+        "chat_queue_waiting": False,
     }
 
 
@@ -283,7 +319,7 @@ def process_network_guest_arrival(
         "guest_id": guest_token,
         "zone_id": nid,
     }
-    guest_response.update(pending_network_chat_token_fields(session_row))
+    guest_response.update(pending_network_chat_token_fields(db, session_row))
     return {
         "guest_response": guest_response,
         "ws_guest_is_here": [],

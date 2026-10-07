@@ -1379,7 +1379,7 @@ async def guest_session_status(
         mapped_status = "APPROVED"
     else:
         mapped_status = view["status"]
-    chat_fields = guest_access_service.pending_network_chat_token_fields(row)
+    chat_fields = guest_access_service.pending_network_chat_token_fields(db, row)
     data = AccessSessionPollData(
         status=mapped_status,
         message=view.get("message"),
@@ -1387,6 +1387,7 @@ async def guest_session_status(
         exchange_expires_at=view.get("exchange_expires_at"),
         chat_access_token=chat_fields.get("chat_access_token"),
         chat_expires_at=chat_fields.get("chat_expires_at"),
+        chat_queue_waiting=bool(chat_fields.get("chat_queue_waiting")),
     )
     return AccessSessionPollEnvelope(data=data)
 

@@ -202,11 +202,11 @@ def test_pending_network_guest_chats_with_admin_then_thread_continues(db):
     db.commit()
     db.refresh(row)
 
-    assert gas.pending_network_chat_token_fields(row) == {}
+    assert gas.pending_network_chat_token_fields(db, row) == {}
     later_peers = gas_api.list_zone_peers_for_guest(db, zone_id=network, guest_id=guest_id)
     later_ids = {p["owner_id"] for p in later_peers}
-    assert admin.id in later_ids
-    assert member.id in later_ids
+    assert later_ids == {admin.id}
+    assert member.id not in later_ids
 
     thread = gas_api.list_guest_zone_messages(
         db,
@@ -220,6 +220,54 @@ def test_pending_network_guest_chats_with_admin_then_thread_continues(db):
     texts = [event.text for event in thread[0]]
     assert "Hello admin" in texts
     assert "Hello guest" in texts
+
+
+def test_pending_chat_queue_only_oldest_gets_token(db):
+    network = "NET-ACCESS-QUEUE"
+    admin = _admin(db, network)
+    first = gas.process_network_guest_arrival(
+        db,
+        network_id=network,
+        guest_name="First",
+        device_id="dev-a",
+        latitude=40.0,
+        longitude=-74.0,
+        qr_token_db_id=None,
+    )
+    db.commit()
+    second = gas.process_network_guest_arrival(
+        db,
+        network_id=network,
+        guest_name="Second",
+        device_id="dev-b",
+        latitude=40.0,
+        longitude=-74.0,
+        qr_token_db_id=None,
+    )
+    db.commit()
+
+    assert first["guest_response"].get("chat_access_token")
+    assert first["guest_response"].get("chat_queue_waiting") is False
+    assert not second["guest_response"].get("chat_access_token")
+    assert second["guest_response"].get("chat_queue_waiting") is True
+
+    first_id = first["guest_response"]["guest_id"]
+    second_id = second["guest_response"]["guest_id"]
+    second_row = (
+        db.query(GuestAccessSession)
+        .filter(GuestAccessSession.guest_id == second_id)
+        .first()
+    )
+    assert gas.guest_is_pending_chat_eligible(db, second_row) is False
+
+    approved = gas.approve_guest(db, acting_owner=admin, zone_id=network, guest_id=first_id)
+    assert approved.get("ok")
+    db.commit()
+    db.refresh(second_row)
+
+    fields = gas.pending_network_chat_token_fields(db, second_row)
+    assert fields.get("chat_access_token")
+    assert fields.get("chat_queue_waiting") is False
 
 
 def test_network_guest_session_poll_pending_until_approved(db):

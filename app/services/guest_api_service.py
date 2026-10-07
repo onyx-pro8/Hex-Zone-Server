@@ -48,14 +48,10 @@ def _guest_messaging_peer_owner_ids(
     zone_id: str,
     guest_id: str | None = None,
 ) -> set[int]:
-    """Network-level CHAT peers: every active member/admin on this network id.
+    """Guest CHAT peers: network administrator only (pending and approved).
 
-    Uses the same cohort as guest arrival notifications (**`zone_staff_owner_ids`**):
-    all **`owners.zone_id`** matches plus active **`zones.owner_id`** rows. Not GPS-bound.
-
-    While a network-access request is still pending, the only peer is the network
-    administrator. After approval the full network cohort is restored and earlier
-    CHAT rows stay on the same ``guest_id``.
+    Guests never message ordinary members. Without a guest session context, falls
+    back to the full staff cohort (admin tooling / tests).
     """
     ids = guest_access_service.zone_staff_owner_ids(db, zone_id)
     gid = (guest_id or "").strip()
@@ -64,12 +60,16 @@ def _guest_messaging_peer_owner_ids(
     row = guest_access_service.get_guest_access_session_by_guest_id(db, gid)
     if row is None or (row.zone_id or "").strip() != (zone_id or "").strip():
         return ids
-    admin_id = guest_access_service.pending_network_chat_admin_owner_id(row)
+
+    admin_id = row.admin_owner_id
     if admin_id is None:
-        return ids
-    if admin_id in ids:
-        return {admin_id}
-    return set()
+        from app.services.network_zone_propagation import resolve_network_administrator
+
+        admin = resolve_network_administrator(db, zone_id)
+        admin_id = admin.id if admin is not None else None
+    if admin_id is None:
+        return set()
+    return {int(admin_id)}
 
 
 def guest_type_blocked(db: Session, recipient_owner_id: int, message_type: str) -> bool:
@@ -733,6 +733,17 @@ def create_guest_zone_message(
 
     if guest_type_blocked(db, receiver.id, msg_type):
         return {"__reject__": "blocked"}
+
+    session_row = guest_access_service.get_guest_access_session_by_guest_id(db, guest_id)
+    if (
+        session_row is not None
+        and guest_access_service.pending_network_chat_admin_owner_id(session_row) is not None
+        and not guest_access_service.guest_is_pending_chat_eligible(db, session_row)
+    ):
+        return {
+            "__reject__": "chat_queue_waiting",
+            "message": "Another guest is chatting with the administrator. Please wait your turn.",
+        }
 
     try:
         canonical = normalize_message_type(msg_type)

@@ -542,13 +542,19 @@ class AccessPermissionResponseData(BaseModel):
     chat_access_token: str | None = Field(
         default=None,
         description=(
-            "Guest JWT for the existing chat UI while a **network access** request is still **pending**. "
-            "Not an approval exchange code. The same **guest_id** thread continues after approval."
+            "Guest JWT for the existing chat UI while a **network access** request is still **pending** "
+            "and this guest is first in the FIFO chat queue. Not an approval exchange code."
         ),
     )
     chat_expires_at: str | None = Field(
         default=None,
         description="ISO-8601 UTC expiry for **chat_access_token** when present.",
+    )
+    chat_queue_waiting: bool | None = Field(
+        default=None,
+        description=(
+            "True when this guest is pending but another earlier guest currently holds the chat slot."
+        ),
     )
 
 
@@ -573,11 +579,17 @@ class AccessSessionPollData(BaseModel):
     chat_access_token: str | None = Field(
         default=None,
         description=(
-            "Present while **status** is **PENDING** for a network-access guest. Opens the existing guest "
-            "chat with the network administrator. Omitted after approval (use **exchange_code** for full access)."
+            "Present while **status** is **PENDING** for the FIFO chat-queue head. Opens guest chat with "
+            "the network administrator. Omitted for later pending guests and after approval."
         ),
     )
     chat_expires_at: str | None = None
+    chat_queue_waiting: bool = Field(
+        default=False,
+        description=(
+            "True when **status** is **PENDING** but this guest is not yet first in the chat queue."
+        ),
+    )
 
 
 class AccessSessionPollEnvelope(BaseModel):

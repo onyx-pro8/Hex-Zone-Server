@@ -493,6 +493,19 @@ async def guest_post_message(
                 "error": {"message": msg},
             },
         )
+    if created and created.get("__reject__") == "chat_queue_waiting":
+        msg = str(
+            created.get("message")
+            or "Another guest is chatting with the administrator. Please wait your turn."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": msg,
+                "error_code": "GUEST_CHAT_QUEUE_WAITING",
+                "error": {"message": msg},
+            },
+        )
     if created and created.get("__reject__") == "validation":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
