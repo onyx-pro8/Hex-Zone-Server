@@ -202,18 +202,73 @@ def _resolve_broadcast_name(
     return str(getattr(sender, "message_display_name", None) or "Unknown").strip() or "Unknown"
 
 
+def _clean_zone_heading(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _compose_zone_heading(name: object, network_id: object) -> str | None:
+    clean_name = _clean_zone_heading(name)
+    clean_net = _clean_zone_heading(network_id)
+    if clean_name and clean_net:
+        return f"{clean_name} ({clean_net})"
+    return clean_name or clean_net
+
+
 def _resolve_zone_name(
     metadata: dict[str, Any],
     *,
     recipient_owner_id: int,
+    sender_id: int | None = None,
+    db: Session | None = None,
 ) -> str:
-    """Prefer the hub owner's delivery zone name, else the sender zone name."""
+    """Same zone heading the inbox bubble uses for this delivery.
+
+    1. Embedded recipient/sender zone label (or name + network id)
+    2. ``resolve_relevant_zone_for_viewer`` (DB / fanout record-id fallback)
+    """
     recipient_zones = _as_dict(metadata.get("recipient_relevant_zones"))
     recip = _as_dict(recipient_zones.get(str(recipient_owner_id)))
     sender_zone = _as_dict(metadata.get("sender_relevant_zone"))
-    for candidate in (recip.get("name"), sender_zone.get("name")):
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+    sender_net = _clean_zone_heading(metadata.get("sender_network_id"))
+
+    for bag in (recip, sender_zone):
+        if not bag:
+            continue
+        label = _clean_zone_heading(bag.get("label"))
+        if label:
+            return label
+        name = _clean_zone_heading(bag.get("name"))
+        if name:
+            heading = _compose_zone_heading(
+                name,
+                sender_net or bag.get("sender_network_id") or bag.get("network_id"),
+            )
+            if heading:
+                return heading
+
+    if db is not None:
+        from app.services.message_relevant_zone_service import (
+            resolve_relevant_zone_for_viewer,
+        )
+
+        fields = resolve_relevant_zone_for_viewer(
+            db,
+            metadata=metadata,
+            viewer_owner_id=int(recipient_owner_id),
+            sender_id=sender_id,
+        )
+        for key in (
+            "relevant_zone_label",
+            "relevant_zone_name",
+            "relevant_zone_network_id",
+        ):
+            heading = _clean_zone_heading(fields.get(key))
+            if heading:
+                return heading
+
     return "Unknown zone"
 
 
@@ -265,7 +320,17 @@ def build_smart_home_webhook_payload(
         ).strip()
 
     broadcast_name = _resolve_broadcast_name(db, alarm_payload)
-    zone_name = _resolve_zone_name(metadata, recipient_owner_id=recipient_owner_id)
+    sender_id_raw = alarm_payload.get("sender_id")
+    try:
+        sender_id = int(sender_id_raw) if sender_id_raw is not None else None
+    except (TypeError, ValueError):
+        sender_id = None
+    zone_name = _resolve_zone_name(
+        metadata,
+        recipient_owner_id=recipient_owner_id,
+        sender_id=sender_id,
+        db=db,
+    )
     location = _format_location(metadata)
 
     title = f"{broadcast_name} · {zone_name}"

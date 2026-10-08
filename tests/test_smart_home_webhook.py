@@ -163,6 +163,56 @@ def test_build_smart_home_webhook_payload_fallbacks():
         "message": "PANIC: Help\nLocation: unknown",
     }
 
+
+def test_build_smart_home_webhook_payload_uses_inbox_zone_label():
+    """Hub title matches the inbox bubble heading (name + sender network id)."""
+    sender = SimpleNamespace(id=7, message_display_name="Gary Peart")
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = sender
+
+    body = build_smart_home_webhook_payload(
+        {
+            "type": "SENSOR",
+            "text": "Sensor message",
+            "sender_id": 7,
+            "metadata": {
+                "sender_network_id": "PEART",
+                "position": {"latitude": 43.73114, "longitude": -79.52283},
+                "recipient_relevant_zones": {
+                    "9": {
+                        "name": "Oklahoma Drive Neighbourhood",
+                        "network_id": "PEART",
+                        "sender_network_id": "PEART",
+                        "label": "Oklahoma Drive Neighbourhood (PEART)",
+                    },
+                },
+            },
+        },
+        recipient_owner_id=9,
+        db=db,
+    )
+    assert body["title"] == "Gary Peart · Oklahoma Drive Neighbourhood (PEART)"
+    assert "Location: 43.73114, -79.52283" in body["message"]
+
+
+def test_build_smart_home_webhook_payload_label_without_name_field():
+    """Prefer embedded label when name is missing (same string the bubble shows)."""
+    body = build_smart_home_webhook_payload(
+        {
+            "type": "SENSOR",
+            "text": "Sensor message",
+            "sender_id": None,
+            "metadata": {
+                "sender_relevant_zone": {
+                    "label": "Oklahoma Drive Neighbourhood (PEART)",
+                },
+                "position": {"latitude": 1.0, "longitude": 2.0},
+            },
+        },
+        recipient_owner_id=9,
+    )
+    assert body["title"] == "Guest · Oklahoma Drive Neighbourhood (PEART)"
+
 @pytest.mark.asyncio
 async def test_send_smart_home_webhooks_posts_to_same_network_owners():
     owner = SimpleNamespace(
@@ -216,7 +266,7 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
     args, kwargs = mock_client.post.await_args
     assert args[0] == "https://hub.example.com/hooks/hex"
     assert kwargs["json"] == {
-        "title": "Pat · Lobby",
+        "title": "Pat · Lobby (ZONE-ABC)",
         "message": "PANIC: Help\nLocation: 10.5, 20.25",
     }
 
