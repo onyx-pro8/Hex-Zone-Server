@@ -380,6 +380,8 @@ async def send_smart_home_webhooks(
     db: Session,
     owner_ids: list[int],
     alarm_payload: dict[str, Any],
+    *,
+    require_pushable: bool = True,
 ) -> dict[str, Any]:
     """POST the alarm to each eligible hub owner's webhook URL.
 
@@ -388,11 +390,16 @@ async def send_smart_home_webhooks(
     - has a registered smart-home HID (``DEV-`` device)
     - has a valid ``sn_webhook``
 
+    When ``require_pushable`` is True (default), non-geo types such as
+    ``PERMISSION`` are skipped. Guest-pass auto-approval may pass
+    ``require_pushable=False`` so hubs still get the arrival notice while
+    mobile alarm-push rules stay unchanged.
+
     Returns aggregate counts plus ``webhook_owner_results`` for per-user toasts.
     Never raises.
     """
     msg_type = str(alarm_payload.get("type") or "")
-    if not is_pushable_geo_type(msg_type):
+    if require_pushable and not is_pushable_geo_type(msg_type):
         logger.info("Smart-home webhook type=%s skipped: not a pushable geo type", msg_type)
         return {
             "webhook_sent": 0,

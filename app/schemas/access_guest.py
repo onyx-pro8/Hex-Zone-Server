@@ -556,6 +556,17 @@ class AccessPermissionResponseData(BaseModel):
             "True when this guest is pending but another earlier guest currently holds the chat slot."
         ),
     )
+    call_fullscreen: bool | None = Field(
+        default=None,
+        description=(
+            "True when this pending arrival is escalated after three prior access rejects "
+            "for the same guest name (fullscreen call card)."
+        ),
+    )
+    access_reject_count: int | None = Field(
+        default=None,
+        description="Prior access rejects for this zone + guest name (not call rejects).",
+    )
 
 
 class AccessPermissionResponseEnvelope(BaseModel):

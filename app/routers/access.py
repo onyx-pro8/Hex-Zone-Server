@@ -74,8 +74,10 @@ from app.services import (
     guest_access_service,
     guest_api_service,
     guest_arrival_zone_messages as guest_arrival_zone_messages_service,
+    guest_call_service,
     guest_pass_service,
     push_notification_service,
+    smart_home_webhook_service,
 )
 from app.websocket.manager import ws_manager
 
@@ -924,6 +926,8 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
                 "guest_id": event_payload.get("guest_id"),
                 "zone_id": event_payload.get("zone_id") or effective_zone_id,
                 "status": "PENDING",
+                "call_fullscreen": bool(event_payload.get("call_fullscreen")),
+                "access_reject_count": event_payload.get("access_reject_count"),
             },
         )
         guest_name = str(event_payload.get("guest_name") or "Guest").strip() or "Guest"
@@ -940,6 +944,64 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
                 "zone_id": zone,
             },
         )
+
+    # Valid event-id / expected arrival: keep PERMISSION history and notify hubs
+    # through the same smart-home webhook workflow (without enabling alarm push).
+    sh = result.get("smart_home_notify")
+    if isinstance(sh, dict):
+        owner_ids = [int(oid) for oid in (sh.get("owner_ids") or []) if oid is not None]
+        lat = sh.get("latitude")
+        lng = sh.get("longitude")
+        zone = str(sh.get("zone_id") or effective_zone_id or "").strip()
+        webhook_payload = {
+            "type": str(sh.get("type") or "PERMISSION"),
+            "text": str(sh.get("text") or "Guest arrived."),
+            "sender_id": sh.get("sender_id"),
+            "zone_id": zone,
+            "delivered_owner_ids": owner_ids,
+            "metadata": {
+                "sender_network_id": zone,
+                "position": {"latitude": lat, "longitude": lng},
+                "flow": "guest_pass_arrival",
+            },
+        }
+        webhook_stats = await smart_home_webhook_service.send_smart_home_webhooks(
+            db,
+            owner_ids,
+            webhook_payload,
+            require_pushable=False,
+        )
+        await smart_home_webhook_service.notify_smart_home_webhook_owners(
+            list(webhook_stats.get("webhook_owner_results") or [])
+        )
+
+    # After 3 access rejects for the same name, the 4th request opens a
+    # fullscreen call for admin + guest. Call volume itself is unlimited.
+    auto_invite = result.get("auto_call_invite")
+    if isinstance(auto_invite, dict):
+        try:
+            admin_oid = int(auto_invite["admin_owner_id"])
+            call, err = await guest_call_service.create_call(
+                zone_id=str(auto_invite.get("zone_id") or effective_zone_id),
+                guest_id=str(auto_invite.get("guest_id") or ""),
+                guest_name=str(auto_invite.get("guest_name") or "Guest"),
+                admin_owner_id=admin_oid,
+                caller_role="admin",
+                fullscreen=True,
+                access_reject_escalation=True,
+                ring_timeout_seconds=int(auto_invite.get("ring_timeout_seconds") or 30),
+            )
+            if call and not err:
+                payload = guest_call_service.public_call_payload(call)
+                await guest_call_service.broadcast_call_event("CALL_INVITE", call, payload)
+            elif err:
+                logger.info(
+                    "auto_call_invite skipped guest_id=%s err=%s",
+                    auto_invite.get("guest_id"),
+                    err,
+                )
+        except Exception:
+            logger.exception("auto_call_invite failed for guest_id=%s", auto_invite.get("guest_id"))
 
     return AccessPermissionResponseEnvelope(data=AccessPermissionResponseData.model_validate(gr))
 

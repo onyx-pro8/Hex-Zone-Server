@@ -27,6 +27,42 @@ from app.services.network_zone_propagation import resolve_network_administrator
 
 logger = logging.getLogger(__name__)
 
+# After this many access rejects for the same guest name in a zone, the next
+# pending arrival opens a fullscreen call for admin + guest. Call invites themselves
+# are not rate-limited.
+ACCESS_REJECT_ESCALATION_THRESHOLD = 3
+
+
+def normalize_guest_name_key(name: str | None) -> str:
+    """Trim + casefold so the same display name counts as one guest."""
+    return (name or "").strip().casefold()
+
+
+def count_access_rejects_for_guest_name(db: Session, *, zone_id: str, guest_name: str) -> int:
+    """How many prior access requests for this zone+name ended rejected."""
+    zid = zone_id.strip()
+    key = normalize_guest_name_key(guest_name)
+    if not zid or not key:
+        return 0
+    rows = (
+        db.query(GuestAccessSession)
+        .filter(
+            GuestAccessSession.zone_id == zid,
+            GuestAccessSession.resolution == "rejected",
+            GuestAccessSession.kind.in_(("unexpected", "network_access")),
+        )
+        .all()
+    )
+    return sum(1 for row in rows if normalize_guest_name_key(row.guest_name) == key)
+
+
+def access_reject_escalation_active(db: Session, *, zone_id: str, guest_name: str) -> bool:
+    """True when the next/current request is the 4th after 3 access rejects."""
+    return (
+        count_access_rejects_for_guest_name(db, zone_id=zone_id, guest_name=guest_name)
+        >= ACCESS_REJECT_ESCALATION_THRESHOLD
+    )
+
 
 def _network_access_pending(row: GuestAccessSession) -> bool:
     return row.kind == "network_access" and row.resolution in (None, "pending")
@@ -105,19 +141,24 @@ def require_guest_bearer_session_active(db: Session, *, guest_id: str) -> None:
 
 
 def pending_network_chat_admin_owner_id(row: GuestAccessSession) -> int | None:
-    """Network administrator the guest may CHAT with while access is still pending.
+    """Administrator the guest may CHAT/CALL with while access is still pending.
 
-    ``None`` once the session is approved, rejected, or is not a network-access request.
+    Covers **network_access** and **unexpected** (invalid event id) pending sessions.
+    ``None`` once the session is approved, rejected, or is not a pending request.
     """
-    if not _network_access_pending(row):
+    if row.access_revoked_at is not None:
         return None
-    return row.admin_owner_id
+    if _network_access_pending(row):
+        return row.admin_owner_id
+    if row.kind == "unexpected" and row.resolution == "pending":
+        return row.admin_owner_id
+    return None
 
 
 def pending_network_chat_queue_head(
     db: Session, *, zone_id: str
 ) -> GuestAccessSession | None:
-    """Oldest pending network-access guest for this zone (FIFO chat queue)."""
+    """Oldest pending network-access or unexpected guest for this zone (FIFO chat queue)."""
     zid = (zone_id or "").strip()
     if not zid:
         return None
@@ -125,7 +166,7 @@ def pending_network_chat_queue_head(
         db.query(GuestAccessSession)
         .filter(
             GuestAccessSession.zone_id == zid,
-            GuestAccessSession.kind == "network_access",
+            GuestAccessSession.kind.in_(("network_access", "unexpected")),
             or_(
                 GuestAccessSession.resolution == "pending",
                 GuestAccessSession.resolution.is_(None),
@@ -288,6 +329,10 @@ def process_network_guest_arrival(
     msgs = resolve_guest_arrival_messages(db, nid)
     msg_guest = msgs.unexpected_arrival_message
     guest_token = str(uuid.uuid4())
+    prior_rejects = count_access_rejects_for_guest_name(
+        db, zone_id=nid, guest_name=guest_name.strip()
+    )
+    escalate_fullscreen_call = prior_rejects >= ACCESS_REJECT_ESCALATION_THRESHOLD
 
     session_row = GuestAccessSession(
         guest_id=guest_token,
@@ -318,11 +363,19 @@ def process_network_guest_arrival(
                     "guest_name": guest_name.strip(),
                     "zone_id": nid,
                     "guest_id": guest_token,
+                    "access_reject_count": prior_rejects,
+                    "call_fullscreen": escalate_fullscreen_call,
                 },
             )
         )
 
     permission_receiver_owner_id = pick_co_owner_for_direct_permission(db, nid, admin.id)
+    perm_line = f"Network guest access requested for {guest_name.strip()}. Awaiting approval."
+    if escalate_fullscreen_call:
+        perm_line = (
+            f"Network guest access requested for {guest_name.strip()} "
+            f"(escalated after {prior_rejects} prior denials). Fullscreen call required."
+        )
     perm_event = ZoneMessageEvent(
         zone_id=nid,
         sender_id=admin.id,
@@ -331,7 +384,7 @@ def process_network_guest_arrival(
         type=CanonicalMessageType.PERMISSION.value,
         category=type_category(CanonicalMessageType.PERMISSION),
         scope=type_scope(CanonicalMessageType.PERMISSION),
-        text=f"Network guest access requested for {guest_name.strip()}. Awaiting approval.",
+        text=perm_line,
         body_json={
             "guest_name": guest_name.strip(),
             "zone_id": nid,
@@ -349,6 +402,8 @@ def process_network_guest_arrival(
             "websocket_events": [{"name": "unexpected_guest", "targets": "zone_members"}],
             "domain_event": "guest_request_created",
             "permission_visibility": PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST,
+            "access_reject_count": prior_rejects,
+            "call_fullscreen": escalate_fullscreen_call,
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         },
     )
@@ -361,12 +416,26 @@ def process_network_guest_arrival(
         "guest_id": guest_token,
         "zone_id": nid,
     }
+    if escalate_fullscreen_call:
+        guest_response["call_fullscreen"] = True
+        guest_response["access_reject_count"] = prior_rejects
     guest_response.update(pending_network_chat_token_fields(db, session_row))
-    return {
+    out: dict = {
         "guest_response": guest_response,
         "ws_guest_is_here": [],
         "ws_unexpected_guest": ws_unexpected,
     }
+    if escalate_fullscreen_call:
+        out["auto_call_invite"] = {
+            "zone_id": nid,
+            "guest_id": guest_token,
+            "guest_name": guest_name.strip(),
+            "admin_owner_id": int(admin.id),
+            "fullscreen": True,
+            "access_reject_escalation": True,
+            "ring_timeout_seconds": 30,
+        }
+    return out
 
 
 def session_allows_network_geo_messaging(session: GuestAccessSession) -> bool:
@@ -646,6 +715,15 @@ def process_guest_arrival(
                 },
                 "ws_guest_is_here": ws_guest_is_here,
                 "ws_unexpected_guest": [],
+                "smart_home_notify": {
+                    "owner_ids": list(broadcast_ids),
+                    "type": CanonicalMessageType.PERMISSION.value,
+                    "text": perm_event.text,
+                    "sender_id": permission_sender_owner_id,
+                    "zone_id": zone_id,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                },
             }
 
     # Guest access is Event ID pass only. Calendar schedules are not used for auto-approval.
@@ -749,6 +827,10 @@ def process_guest_arrival(
         permission_receiver_owner_id = admin.id
 
         msg_guest = msgs.unexpected_arrival_message
+        prior_rejects = count_access_rejects_for_guest_name(
+            db, zone_id=zone_id, guest_name=guest_name.strip()
+        )
+        escalate_fullscreen_call = prior_rejects >= ACCESS_REJECT_ESCALATION_THRESHOLD
 
         session_row = GuestAccessSession(
             guest_id=guest_token,
@@ -777,6 +859,8 @@ def process_guest_arrival(
                     "guest_name": guest_name.strip(),
                     "zone_id": zone_id,
                     "guest_id": guest_token,
+                    "access_reject_count": prior_rejects,
+                    "call_fullscreen": escalate_fullscreen_call,
                 },
             )
         )
@@ -789,10 +873,17 @@ def process_guest_arrival(
             "websocket_events": [{"name": "unexpected_guest", "targets": "zone_members"}],
             "domain_event": "guest_request_created",
             "permission_visibility": PERMISSION_VISIBILITY_ZONE_PENDING_BROADCAST,
+            "access_reject_count": prior_rejects,
+            "call_fullscreen": escalate_fullscreen_call,
             **({"guest_access_qr_token_db_id": qr_token_db_id} if qr_token_db_id is not None else {}),
         }
         decision = "UNEXPECTED"
         perm_line = f"Guest access requested for {guest_name.strip()}. Awaiting approval."
+        if escalate_fullscreen_call:
+            perm_line = (
+                f"Guest access requested for {guest_name.strip()} "
+                f"(escalated after {prior_rejects} prior denials). Fullscreen call required."
+            )
 
     if permission_sender_owner_id is None:
         return {"error": "NO_ZONE_ADMIN", "message": "No administrator found for this zone.", "http_status": 422}
@@ -834,17 +925,59 @@ def process_guest_arrival(
     if decision == "EXPECTED":
         guest_response["exchange_code"] = session_row.exchange_code
         guest_response["exchange_expires_at"] = guest_exchange_expires_at_iso(session_row)
+    if decision == "UNEXPECTED":
+        guest_response.update(pending_network_chat_token_fields(db, session_row))
 
-    return {
+    escalate_fullscreen_call = bool(
+        decision == "UNEXPECTED" and (perm_meta or {}).get("call_fullscreen")
+    )
+    if escalate_fullscreen_call:
+        guest_response["call_fullscreen"] = True
+        guest_response["access_reject_count"] = int(
+            (perm_meta or {}).get("access_reject_count") or 0
+        )
+
+    out: dict = {
         "guest_response": guest_response,
         "ws_guest_is_here": ws_guest_is_here,
         "ws_unexpected_guest": ws_unexpected,
     }
+    if decision == "EXPECTED" and permission_sender_owner_id is not None:
+        out["smart_home_notify"] = {
+            "owner_ids": zone_member_owner_ids(db, zone_id),
+            "type": CanonicalMessageType.PERMISSION.value,
+            "text": perm_line,
+            "sender_id": permission_sender_owner_id,
+            "zone_id": zone_id,
+            "latitude": latitude,
+            "longitude": longitude,
+        }
+    if escalate_fullscreen_call:
+        admin_oid = session_row.admin_owner_id or permission_receiver_owner_id
+        if admin_oid is not None:
+            # 4th access request after 3 rejects: force a fullscreen call invite.
+            out["auto_call_invite"] = {
+                "zone_id": zone_id,
+                "guest_id": guest_token,
+                "guest_name": guest_name.strip(),
+                "admin_owner_id": int(admin_oid),
+                "fullscreen": True,
+                "access_reject_escalation": True,
+                "ring_timeout_seconds": 30,
+            }
+    return out
 
 
 def serialize_guest_session_row(db: Session, row: GuestAccessSession) -> dict:
     """Member/API list shape for dashboard polling."""
     base = guest_session_public_view(db, row)
+    reject_count = count_access_rejects_for_guest_name(
+        db, zone_id=row.zone_id, guest_name=row.guest_name or ""
+    )
+    call_fullscreen = (
+        _guest_row_client_status(row) == "PENDING"
+        and reject_count >= ACCESS_REJECT_ESCALATION_THRESHOLD
+    )
     return {
         "id": row.id,
         "guest_id": row.guest_id,
@@ -866,6 +999,8 @@ def serialize_guest_session_row(db: Session, row: GuestAccessSession) -> dict:
         "expectation": "expected" if row.kind == "expected" else "unexpected",
         "online": guest_session_is_online(row),
         "last_seen_at": row.last_seen_at,
+        "access_reject_count": reject_count,
+        "call_fullscreen": call_fullscreen,
     }
 
 

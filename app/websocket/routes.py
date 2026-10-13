@@ -18,11 +18,16 @@ Server sends **`type`** + **`data`** envelopes. Common **`type`** values:
 - **`LOCATION_UPDATE_ACK`** — ack after a successful **`LOCATION_UPDATE`**
 - **`guest_zone_message`** — guest-thread CHAT push (member or guest clients)
 - **`GUEST_PRESENCE`** — `{ guest_id, online }` when a guest connects/disconnects WS or hits `/api/guest/*`
+- **`CALL_INVITE`**, **`CALL_ACCEPT`**, **`CALL_REJECT`**, **`CALL_CANCEL`**,
+  **`CALL_TIMEOUT`**, **`CALL_END`**, **`CALL_SIGNAL`** — guest↔admin voice call signaling
 
-Auth: member JWT (**`sub`** = owner id) or guest JWT (**`token_use=guest_access`**, **`sub=guest:{guest_id}`**).
+Clients may also **send** call frames (same type names) after auth; the server relays
+them to the other party. Auth: member JWT (**`sub`** = owner id) or guest JWT
+(**`token_use=guest_access`**, **`sub=guest:{guest_id}`**).
 """
 import json
 import logging
+from typing import Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi import HTTPException
@@ -30,6 +35,7 @@ from fastapi import HTTPException
 from app.core.security import verify_token
 from app.crud import owner as owner_crud
 from app.database import session_maker
+from app.services import guest_call_service
 from app.services.member_service import upsert_member_location
 from app.websocket.manager import ws_manager
 
@@ -77,6 +83,226 @@ async def _publish_guest_ws_presence(guest_id: str, *, online: bool) -> None:
         sorted(staff),
         "GUEST_PRESENCE",
         {"guest_id": gid, "online": bool(online)},
+    )
+
+
+async def _resolve_call_admin_for_guest(guest_id: str) -> tuple[str | None, str | None, int | None]:
+    """Return (zone_id, guest_name, admin_owner_id) for a pending/active guest session."""
+    from app.services import guest_access_service as gas
+
+    db = session_maker()
+    try:
+        row = gas.get_guest_access_session_by_guest_id(db, guest_id)
+        if not row:
+            return None, None, None
+        admin_id = row.admin_owner_id
+        if admin_id is None:
+            admin = gas.resolve_primary_zone_admin_owner(db, row.zone_id)
+            admin_id = admin.id if admin else None
+        return row.zone_id, (row.guest_name or "").strip() or "Guest", int(admin_id) if admin_id else None
+    finally:
+        db.close()
+
+
+async def _finish_call_end(
+    call: guest_call_service.GuestCallSession,
+    payload: dict[str, Any],
+    *,
+    event_type: str,
+) -> None:
+    await guest_call_service.broadcast_call_event(event_type, call, payload)
+    if payload.get("auto_close_access"):
+        await guest_call_service.auto_close_escalated_access(
+            zone_id=call.zone_id,
+            guest_id=call.guest_id,
+        )
+
+
+async def _handle_call_frame(
+    websocket: WebSocket,
+    *,
+    is_guest: bool,
+    guest_id: str | None,
+    user_id: str,
+    data: dict,
+) -> None:
+    message_type = str(data.get("type") or "").strip().upper()
+    body = data.get("data") if isinstance(data.get("data"), dict) else data
+    role: Literal["guest", "admin"] = "guest" if is_guest else "admin"
+
+    if message_type == "CALL_INVITE":
+        if is_guest:
+            if not guest_id:
+                await websocket.send_json(
+                    {"type": "ERROR", "error": {"message": "Guest identity required"}}
+                )
+                return
+            zone_id, guest_name, admin_oid = await _resolve_call_admin_for_guest(guest_id)
+            if not zone_id or not admin_oid:
+                await websocket.send_json(
+                    {
+                        "type": "ERROR",
+                        "error": {"message": "No administrator available for call"},
+                    }
+                )
+                return
+            call, err = await guest_call_service.create_call(
+                zone_id=zone_id,
+                guest_id=guest_id,
+                guest_name=guest_name or "Guest",
+                admin_owner_id=admin_oid,
+                caller_role="guest",
+                fullscreen=bool(body.get("fullscreen")),
+                access_reject_escalation=bool(body.get("access_reject_escalation")),
+            )
+        else:
+            try:
+                admin_oid = int(user_id)
+            except (TypeError, ValueError):
+                await websocket.send_json(
+                    {"type": "ERROR", "error": {"message": "Invalid admin identity"}}
+                )
+                return
+            target_guest = str(body.get("guest_id") or "").strip()
+            zone_id = str(body.get("zone_id") or "").strip()
+            guest_name = str(body.get("guest_name") or "").strip() or "Guest"
+            if not target_guest or not zone_id:
+                await websocket.send_json(
+                    {
+                        "type": "ERROR",
+                        "error": {"message": "guest_id and zone_id are required"},
+                    }
+                )
+                return
+            call, err = await guest_call_service.create_call(
+                zone_id=zone_id,
+                guest_id=target_guest,
+                guest_name=guest_name,
+                admin_owner_id=admin_oid,
+                caller_role="admin",
+                fullscreen=bool(body.get("fullscreen")),
+                access_reject_escalation=bool(body.get("access_reject_escalation")),
+            )
+        if err or call is None:
+            await websocket.send_json(
+                {
+                    "type": "ERROR",
+                    "error": {
+                        "message": "Call could not be started",
+                        "error_code": err or "CALL_FAILED",
+                    },
+                }
+            )
+            return
+        payload = guest_call_service.public_call_payload(call)
+        await guest_call_service.broadcast_call_event("CALL_INVITE", call, payload)
+        return
+
+    call_id = str(body.get("call_id") or "").strip()
+    if not call_id:
+        await websocket.send_json(
+            {"type": "ERROR", "error": {"message": "call_id is required"}}
+        )
+        return
+    call = guest_call_service.get_call(call_id)
+    if not call:
+        await websocket.send_json(
+            {
+                "type": "ERROR",
+                "error": {"message": "Call not found", "error_code": "CALL_NOT_FOUND"},
+            }
+        )
+        return
+
+    # Authorization: only the two parties may act on the call.
+    if is_guest:
+        if not guest_id or guest_id != call.guest_id:
+            await websocket.send_json(
+                {"type": "ERROR", "error": {"message": "Forbidden", "error_code": "FORBIDDEN"}}
+            )
+            return
+    else:
+        try:
+            if int(user_id) != call.admin_owner_id:
+                await websocket.send_json(
+                    {
+                        "type": "ERROR",
+                        "error": {"message": "Forbidden", "error_code": "FORBIDDEN"},
+                    }
+                )
+                return
+        except (TypeError, ValueError):
+            await websocket.send_json(
+                {"type": "ERROR", "error": {"message": "Forbidden", "error_code": "FORBIDDEN"}}
+            )
+            return
+
+    if message_type == "CALL_ACCEPT":
+        accepted, err = await guest_call_service.accept_call(call_id, accepter_role=role)
+        if err or accepted is None:
+            await websocket.send_json(
+                {
+                    "type": "ERROR",
+                    "error": {"message": "Call accept failed", "error_code": err or "CALL_FAILED"},
+                }
+            )
+            return
+        payload = guest_call_service.public_call_payload(accepted)
+        await guest_call_service.broadcast_call_event("CALL_ACCEPT", accepted, payload)
+        return
+
+    if message_type == "CALL_SIGNAL":
+        signal = body.get("signal")
+        if not isinstance(signal, dict):
+            await websocket.send_json(
+                {"type": "ERROR", "error": {"message": "signal object is required"}}
+            )
+            return
+        payload = guest_call_service.public_call_payload(
+            call,
+            signal=signal,
+            from_role=role,
+        )
+        # Relay only to the other party.
+        other = (
+            [str(call.admin_owner_id)]
+            if is_guest
+            else [f"guest:{call.guest_id}"]
+        )
+        await ws_manager.broadcast_to_users(other, "CALL_SIGNAL", payload)
+        return
+
+    if message_type in ("CALL_REJECT", "CALL_CANCEL", "CALL_END"):
+        reason_map = {
+            "CALL_REJECT": "reject",
+            "CALL_CANCEL": "cancel",
+            "CALL_END": "hangup",
+        }
+        reason = reason_map[message_type]
+        # Reject is for the callee while ringing; cancel is for the caller.
+        if message_type == "CALL_REJECT" and call.caller_role == role:
+            reason = "cancel"
+            message_type = "CALL_CANCEL"
+        if message_type == "CALL_CANCEL" and call.caller_role != role:
+            reason = "reject"
+            message_type = "CALL_REJECT"
+        ended, payload = await guest_call_service.end_call(
+            call_id, reason=reason, closer_role=role  # type: ignore[arg-type]
+        )
+        if ended is None or payload is None:
+            return
+        event = (
+            "CALL_TIMEOUT"
+            if reason == "timeout"
+            else message_type
+            if message_type in ("CALL_REJECT", "CALL_CANCEL", "CALL_END")
+            else "CALL_END"
+        )
+        await _finish_call_end(ended, payload, event_type=event)
+        return
+
+    await websocket.send_json(
+        {"type": "ERROR", "error": {"message": f"Unsupported call type {message_type}"}}
     )
 
 
@@ -200,6 +426,37 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
                 await publish_member_presence(int(user_id), True)
         except Exception:
             logger.exception("Failed to publish online presence: user_id=%s", user_id)
+    # Replay an in-flight call so late-joining guests/admins still see the card.
+    try:
+        if is_guest and guest_id:
+            active = guest_call_service.active_call_for_guest(guest_id)
+            if active and active.state in ("ringing", "connected"):
+                await websocket.send_json(
+                    {
+                        "type": "CALL_INVITE" if active.state == "ringing" else "CALL_ACCEPT",
+                        "data": guest_call_service.public_call_payload(active),
+                    }
+                )
+        elif not is_guest:
+            try:
+                oid = int(user_id)
+            except (TypeError, ValueError):
+                oid = None
+            if oid is not None:
+                active_admin = guest_call_service.active_call_for_admin(oid)
+                if active_admin and active_admin.state in ("ringing", "connected"):
+                    await websocket.send_json(
+                        {
+                            "type": (
+                                "CALL_INVITE"
+                                if active_admin.state == "ringing"
+                                else "CALL_ACCEPT"
+                            ),
+                            "data": guest_call_service.public_call_payload(active_admin),
+                        }
+                    )
+    except Exception:
+        logger.exception("Failed to replay active call on connect: user_id=%s", user_id)
     try:
         while True:
             raw_message = await websocket.receive_text()
@@ -232,6 +489,16 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
                     )
                     continue
                 await _handle_location_update(websocket, user_id, data)
+                continue
+
+            if isinstance(message_type, str) and message_type.upper().startswith("CALL_"):
+                await _handle_call_frame(
+                    websocket,
+                    is_guest=is_guest,
+                    guest_id=guest_id,
+                    user_id=user_id,
+                    data=data,
+                )
                 continue
 
             if message_type != "SUBSCRIBE":
