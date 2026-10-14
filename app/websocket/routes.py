@@ -122,6 +122,23 @@ async def _resolve_call_admin_for_guest(guest_id: str) -> tuple[str | None, str 
         db.close()
 
 
+async def _announce_queued(item: guest_call_service.QueuedCallRequest) -> None:
+    """Tell only the waiting caller. The other party is invited when the line frees."""
+    payload = guest_call_service.public_queue_payload(item)
+    target = (
+        [f"guest:{item.guest_id}"]
+        if item.caller_role == "guest"
+        else [str(item.admin_owner_id)]
+    )
+    await ws_manager.broadcast_to_users(target, "CALL_QUEUED", payload)
+
+
+async def _broadcast_promoted(started: list[guest_call_service.GuestCallSession]) -> None:
+    for call in started:
+        payload = guest_call_service.public_call_payload(call, from_queue=True)
+        await guest_call_service.broadcast_call_event("CALL_INVITE", call, payload)
+
+
 async def _finish_call_end(
     call: guest_call_service.GuestCallSession,
     payload: dict[str, Any],
@@ -134,6 +151,8 @@ async def _finish_call_end(
             zone_id=call.zone_id,
             guest_id=call.guest_id,
         )
+    started = await guest_call_service.promote_ready_queues()
+    await _broadcast_promoted(started)
 
 
 async def _handle_call_frame(
@@ -164,7 +183,7 @@ async def _handle_call_frame(
                     }
                 )
                 return
-            call, err = await guest_call_service.create_call(
+            call, queued, err = await guest_call_service.enqueue_or_start(
                 zone_id=zone_id,
                 guest_id=guest_id,
                 guest_name=guest_name or "Guest",
@@ -175,6 +194,9 @@ async def _handle_call_frame(
                 admin_avatar_url=admin_avatar,
                 guest_avatar_url=str(body.get("guest_avatar_url") or "").strip() or None,
             )
+            if queued is not None and err is None:
+                await _announce_queued(queued)
+                return
         else:
             try:
                 admin_oid = int(user_id)
@@ -199,7 +221,7 @@ async def _handle_call_frame(
                 admin_avatar = _owner_avatar_url(db, admin_oid)
             finally:
                 db.close()
-            call, err = await guest_call_service.create_call(
+            call, queued, err = await guest_call_service.enqueue_or_start(
                 zone_id=zone_id,
                 guest_id=target_guest,
                 guest_name=guest_name,
@@ -210,6 +232,9 @@ async def _handle_call_frame(
                 admin_avatar_url=admin_avatar,
                 guest_avatar_url=str(body.get("guest_avatar_url") or "").strip() or None,
             )
+            if queued is not None and err is None:
+                await _announce_queued(queued)
+                return
         if err or call is None:
             await websocket.send_json(
                 {
@@ -232,6 +257,21 @@ async def _handle_call_frame(
         )
         return
     call = guest_call_service.get_call(call_id)
+    if not call and message_type in ("CALL_CANCEL", "CALL_REJECT", "CALL_END"):
+        removed = await guest_call_service.cancel_queued_call(
+            call_id,
+            guest_id=guest_id if is_guest else None,
+            admin_owner_id=int(user_id) if not is_guest and str(user_id).isdigit() else None,
+        )
+        if removed is not None:
+            payload = guest_call_service.public_queue_payload(removed, position=0)
+            payload["reason"] = "cancel"
+            await ws_manager.broadcast_to_users(
+                [f"guest:{removed.guest_id}", str(removed.admin_owner_id)],
+                "CALL_CANCEL",
+                payload,
+            )
+            return
     if not call:
         await websocket.send_json(
             {
@@ -464,6 +504,15 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
                         "data": guest_call_service.public_call_payload(active),
                     }
                 )
+            else:
+                waiting = guest_call_service.queued_call_for_guest(guest_id)
+                if waiting is not None:
+                    await websocket.send_json(
+                        {
+                            "type": "CALL_QUEUED",
+                            "data": guest_call_service.public_queue_payload(waiting),
+                        }
+                    )
         elif not is_guest:
             try:
                 oid = int(user_id)
@@ -482,6 +531,15 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
                             "data": guest_call_service.public_call_payload(active_admin),
                         }
                     )
+                else:
+                    waiting_admin = guest_call_service.queued_call_for_admin(oid)
+                    if waiting_admin is not None:
+                        await websocket.send_json(
+                            {
+                                "type": "CALL_QUEUED",
+                                "data": guest_call_service.public_queue_payload(waiting_admin),
+                            }
+                        )
     except Exception:
         logger.exception("Failed to replay active call on connect: user_id=%s", user_id)
     try:

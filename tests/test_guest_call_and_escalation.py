@@ -128,3 +128,50 @@ async def test_create_call_blocks_second_active():
     await guest_call_service.end_call(
         call.call_id, reason="hangup", closer_role="admin"
     )
+
+
+@pytest.mark.asyncio
+async def test_second_call_waits_then_starts_when_first_ends():
+    first, queued, err = await guest_call_service.enqueue_or_start(
+        zone_id="Z-QUEUE",
+        guest_id="guest-queue-a",
+        guest_name="A",
+        admin_owner_id=41,
+        caller_role="guest",
+    )
+    assert err is None and first is not None and queued is None
+
+    second, waiting, err2 = await guest_call_service.enqueue_or_start(
+        zone_id="Z-QUEUE",
+        guest_id="guest-queue-b",
+        guest_name="B",
+        admin_owner_id=41,
+        caller_role="guest",
+        fullscreen=True,
+    )
+    assert err2 is None and second is None and waiting is not None
+    assert waiting.guest_id == "guest-queue-b"
+    assert guest_call_service.queue_position(waiting) == 1
+
+    third, waiting2, err3 = await guest_call_service.enqueue_or_start(
+        zone_id="Z-QUEUE",
+        guest_id="guest-queue-c",
+        guest_name="C",
+        admin_owner_id=41,
+        caller_role="admin",
+    )
+    assert err3 is None and third is None and waiting2 is not None
+    assert guest_call_service.queue_position(waiting2) == 2
+
+    await guest_call_service.end_call(first.call_id, reason="hangup", closer_role="admin")
+    started = await guest_call_service.promote_ready_queues()
+    assert len(started) == 1
+    assert started[0].guest_id == "guest-queue-b"
+    assert started[0].fullscreen is True
+    assert started[0].state == "ringing"
+
+    await guest_call_service.end_call(started[0].call_id, reason="reject", closer_role="admin")
+    started2 = await guest_call_service.promote_ready_queues()
+    assert len(started2) == 1
+    assert started2[0].guest_id == "guest-queue-c"
+    await guest_call_service.end_call(started2[0].call_id, reason="cancel", closer_role="admin")

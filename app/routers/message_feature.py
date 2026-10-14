@@ -49,6 +49,7 @@ from app.domain.message_types import (
 from app.services import (
     access_schedule_service,
     guest_access_service,
+    guest_call_service,
     message_block_service,
     message_feature_service,
     permission_service,
@@ -1174,6 +1175,8 @@ async def reject_guest_request_message_feature(
         )
     db.commit()
     guest_id = session_row.guest_id.strip()
+    removed_calls = guest_call_service.remove_queued_for_guest(guest_id)
+    await guest_call_service.notify_removed_queue(removed_calls)
     notify_ids = guest_access_service.zone_member_owner_ids(db, effective_zone_id)
     if notify_ids:
         await ws_manager.broadcast_to_users(

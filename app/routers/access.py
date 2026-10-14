@@ -992,7 +992,7 @@ async def guest_permission(
             admin_oid = int(auto_invite["admin_owner_id"])
             admin_row = db.get(Owner, admin_oid)
             admin_avatar = str(getattr(admin_row, "avatar_url", "") or "").strip() or None
-            call, err = await guest_call_service.create_call(
+            call, queued, err = await guest_call_service.enqueue_or_start(
                 zone_id=str(auto_invite.get("zone_id") or effective_zone_id),
                 guest_id=str(auto_invite.get("guest_id") or ""),
                 guest_name=str(auto_invite.get("guest_name") or "Guest"),
@@ -1017,6 +1017,28 @@ async def guest_permission(
                     )
 
                 background_tasks.add_task(_broadcast_auto_call_invite)
+            elif queued is not None and not err:
+                # Line is busy. Guest stays queued; CALL_INVITE fires when the
+                # current call ends. Tell the guest as soon as their socket is up.
+                queue_id = queued.queue_id
+
+                async def _broadcast_auto_call_queued(qid: str = queue_id) -> None:
+                    await asyncio.sleep(0.4)
+                    item = guest_call_service.queued_call_for_guest(
+                        str(auto_invite.get("guest_id") or "")
+                    )
+                    if item is None or item.queue_id != qid:
+                        return
+                    payload = guest_call_service.public_queue_payload(item)
+                    from app.websocket.manager import ws_manager
+
+                    await ws_manager.broadcast_to_users(
+                        [f"guest:{item.guest_id}"],
+                        "CALL_QUEUED",
+                        payload,
+                    )
+
+                background_tasks.add_task(_broadcast_auto_call_queued)
             elif err:
                 logger.info(
                     "auto_call_invite skipped guest_id=%s err=%s",
@@ -2016,6 +2038,8 @@ async def reject_guest(
     db.commit()
     zone_id = payload.zone_id.strip()
     guest_id = payload.guest_id.strip()
+    removed_calls = guest_call_service.remove_queued_for_guest(guest_id)
+    await guest_call_service.notify_removed_queue(removed_calls)
     notify_ids = guest_access_service.zone_member_owner_ids(db, zone_id)
     if notify_ids:
         await ws_manager.broadcast_to_users(
