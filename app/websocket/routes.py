@@ -191,6 +191,26 @@ async def _handle_call_frame(
                     }
                 )
                 return
+            from app.services import guest_access_service as gas
+
+            db = session_maker()
+            try:
+                member_ids = [str(item) for item in gas.zone_member_owner_ids(db, zone_id)]
+            finally:
+                db.close()
+            if str(admin_oid) not in member_ids:
+                member_ids.append(str(admin_oid))
+            if not any(ws_manager.is_user_connected(item) for item in member_ids):
+                await websocket.send_json(
+                    {
+                        "type": "ERROR",
+                        "error": {
+                            "message": "The administrator is offline.",
+                            "error_code": "RECEIVER_OFFLINE",
+                        },
+                    }
+                )
+                return
             call, queued, err, promoted = await guest_call_service.enqueue_or_start(
                 zone_id=zone_id,
                 guest_id=guest_id,
@@ -208,13 +228,6 @@ async def _handle_call_frame(
                 await _announce_queued(queued)
                 return
             if call is not None and err is None:
-                from app.services import guest_access_service as gas
-
-                db = session_maker()
-                try:
-                    member_ids = gas.zone_member_owner_ids(db, call.zone_id)
-                finally:
-                    db.close()
                 guest_call_service.remember_watchers(call, member_ids)
                 await guest_call_service.deliver_live_call(call)
                 return
@@ -237,6 +250,17 @@ async def _handle_call_frame(
                     {
                         "type": "ERROR",
                         "error": {"message": "guest_id and zone_id are required"},
+                    }
+                )
+                return
+            if not ws_manager.is_user_connected(f"guest:{target_guest}"):
+                await websocket.send_json(
+                    {
+                        "type": "ERROR",
+                        "error": {
+                            "message": "The guest is offline.",
+                            "error_code": "RECEIVER_OFFLINE",
+                        },
                     }
                 )
                 return
