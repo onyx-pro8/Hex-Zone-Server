@@ -248,7 +248,8 @@ def test_pending_chat_queue_only_oldest_gets_token(db):
 
     assert first["guest_response"].get("chat_access_token")
     assert first["guest_response"].get("chat_queue_waiting") is False
-    assert not second["guest_response"].get("chat_access_token")
+    # Queued guests still get a JWT so they can open the call WebSocket.
+    assert second["guest_response"].get("chat_access_token")
     assert second["guest_response"].get("chat_queue_waiting") is True
 
     first_id = first["guest_response"]["guest_id"]

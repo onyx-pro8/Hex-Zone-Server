@@ -231,19 +231,19 @@ def guest_is_pending_chat_eligible(db: Session, row: GuestAccessSession) -> bool
 
 
 def pending_network_chat_token_fields(db: Session, row: GuestAccessSession) -> dict:
-    """Short-lived guest JWT for the existing chat UI while network access is pending.
+    """Short-lived guest JWT while access is pending.
 
-    Queue head may chat immediately. Later pending guests wait until either the admin
-    sends them CHAT first, or earlier guests are approved/rejected. Not an exchange code.
+    Always mint a token so queued guests can open WebSocket for voice calls even when
+    CHAT is still blocked (``chat_queue_waiting``). Queue head may chat immediately;
+    later guests wait until an admin messages them or earlier guests clear.
     """
     if pending_network_chat_admin_owner_id(row) is None:
         return {}
     if row.access_revoked_at is not None:
         return {}
-    if not guest_is_pending_chat_eligible(db, row):
-        return {"chat_queue_waiting": True}
     from app.core.security import create_guest_access_token
 
+    chat_ready = guest_is_pending_chat_eligible(db, row)
     token, _expires_in, expire = create_guest_access_token(
         guest_id=row.guest_id,
         zone_ids=[row.zone_id],
@@ -252,7 +252,7 @@ def pending_network_chat_token_fields(db: Session, row: GuestAccessSession) -> d
     return {
         "chat_access_token": token,
         "chat_expires_at": expire.replace(microsecond=0).isoformat() + "Z",
-        "chat_queue_waiting": False,
+        "chat_queue_waiting": not chat_ready,
     }
 
 

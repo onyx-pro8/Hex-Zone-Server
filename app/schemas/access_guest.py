@@ -590,8 +590,8 @@ class AccessSessionPollData(BaseModel):
     chat_access_token: str | None = Field(
         default=None,
         description=(
-            "Present while **status** is **PENDING** for the FIFO chat-queue head. Opens guest chat with "
-            "the network administrator. Omitted for later pending guests and after approval."
+            "Present while **status** is **PENDING** so the guest can open a WebSocket for voice "
+            "calls (and chat when not queue-blocked). Omitted after approval/reject."
         ),
     )
     chat_expires_at: str | None = None
@@ -599,6 +599,13 @@ class AccessSessionPollData(BaseModel):
         default=False,
         description=(
             "True when **status** is **PENDING** but this guest is not yet first in the chat queue."
+        ),
+    )
+    call_fullscreen: bool = Field(
+        default=False,
+        description=(
+            "True when this pending arrival is escalated after three prior access rejects "
+            "for the same guest name (fullscreen call card on the guest device)."
         ),
     )
 

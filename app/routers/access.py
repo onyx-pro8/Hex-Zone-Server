@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -741,7 +742,12 @@ async def rotate_network_access_qr_token(
         },
     },
 )
-async def guest_permission(request: Request, payload: GuestArrivalRequest, db: Session = Depends(get_db)):
+async def guest_permission(
+    request: Request,
+    payload: GuestArrivalRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     ip_key = _client_ip(request)
     if not allow_request(
         f"guest_perm:{ip_key}",
@@ -977,6 +983,9 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
 
     # After 3 access rejects for the same name, the 4th request opens a
     # fullscreen call for admin + guest. Call volume itself is unlimited.
+    # Create the call before the HTTP response so the guest can attach, but
+    # delay CALL_INVITE broadcast until after the response so the sender
+    # (guest) can paint their outgoing card first.
     auto_invite = result.get("auto_call_invite")
     if isinstance(auto_invite, dict):
         try:
@@ -995,8 +1004,19 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
                 ring_timeout_seconds=int(auto_invite.get("ring_timeout_seconds") or 60),
             )
             if call and not err:
-                payload = guest_call_service.public_call_payload(call)
-                await guest_call_service.broadcast_call_event("CALL_INVITE", call, payload)
+                call_id = str(call.call_id)
+
+                async def _broadcast_auto_call_invite(cid: str = call_id) -> None:
+                    await asyncio.sleep(0.4)
+                    active = guest_call_service.get_call(cid)
+                    if not active or active.state != "ringing":
+                        return
+                    payload = guest_call_service.public_call_payload(active)
+                    await guest_call_service.broadcast_call_event(
+                        "CALL_INVITE", active, payload
+                    )
+
+                background_tasks.add_task(_broadcast_auto_call_invite)
             elif err:
                 logger.info(
                     "auto_call_invite skipped guest_id=%s err=%s",
@@ -1445,6 +1465,13 @@ async def guest_session_status(
     else:
         mapped_status = view["status"]
     chat_fields = guest_access_service.pending_network_chat_token_fields(db, row)
+    reject_count = guest_access_service.count_access_rejects_for_guest_name(
+        db, zone_id=row.zone_id, guest_name=row.guest_name or ""
+    )
+    call_fullscreen = (
+        mapped_status == "PENDING"
+        and reject_count >= guest_access_service.ACCESS_REJECT_ESCALATION_THRESHOLD
+    )
     data = AccessSessionPollData(
         status=mapped_status,
         message=view.get("message"),
@@ -1453,6 +1480,7 @@ async def guest_session_status(
         chat_access_token=chat_fields.get("chat_access_token"),
         chat_expires_at=chat_fields.get("chat_expires_at"),
         chat_queue_waiting=bool(chat_fields.get("chat_queue_waiting")),
+        call_fullscreen=call_fullscreen,
     )
     return AccessSessionPollEnvelope(data=data)
 
