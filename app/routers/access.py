@@ -1004,19 +1004,22 @@ async def guest_permission(
                 ring_timeout_seconds=int(auto_invite.get("ring_timeout_seconds") or 60),
             )
             if call and not err:
+                # Guest is the sender. Their card (after the avatar loads) comes
+                # from the socket replay. Admins are invited only after that, or
+                # a few seconds later if the guest never signals.
+                member_ids = guest_access_service.zone_member_owner_ids(
+                    db, str(call.zone_id)
+                )
+                guest_call_service.remember_watchers(call, member_ids)
                 call_id = str(call.call_id)
 
-                async def _broadcast_auto_call_invite(cid: str = call_id) -> None:
-                    await asyncio.sleep(0.4)
+                async def _release_admin_later(cid: str = call_id) -> None:
+                    await asyncio.sleep(3.2)
                     active = guest_call_service.get_call(cid)
-                    if not active or active.state != "ringing":
-                        return
-                    payload = guest_call_service.public_call_payload(active)
-                    await guest_call_service.broadcast_call_event(
-                        "CALL_INVITE", active, payload
-                    )
+                    if active is not None:
+                        await guest_call_service.release_admin_invite(active)
 
-                background_tasks.add_task(_broadcast_auto_call_invite)
+                background_tasks.add_task(_release_admin_later)
             elif queued is not None and not err:
                 # Line is busy. Guest stays queued; CALL_INVITE fires when the
                 # current call ends. Tell the guest as soon as their socket is up.

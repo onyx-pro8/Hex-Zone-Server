@@ -26,6 +26,7 @@ them to the other party. Auth: member JWT (**`sub`** = owner id) or guest JWT
 (**`token_use=guest_access`**, **`sub=guest:{guest_id}`**).
 """
 import json
+import asyncio
 import logging
 from typing import Any, Literal
 
@@ -197,6 +198,35 @@ async def _handle_call_frame(
             if queued is not None and err is None:
                 await _announce_queued(queued)
                 return
+            if call is not None and err is None:
+                # Sender (guest) gets the invite now. Admins wait until the
+                # guest card is actually on screen (CALL_ARM) or the fallback.
+                from app.database import session_maker
+                from app.services import guest_access_service as gas
+
+                db = session_maker()
+                try:
+                    guest_call_service.remember_watchers(
+                        call, gas.zone_member_owner_ids(db, call.zone_id)
+                    )
+                finally:
+                    db.close()
+                await websocket.send_json(
+                    {
+                        "type": "CALL_INVITE",
+                        "data": guest_call_service.public_call_payload(call),
+                    }
+                )
+                armed_id = call.call_id
+
+                async def _release_admin_later(cid: str = armed_id) -> None:
+                    await asyncio.sleep(3.2)
+                    active = guest_call_service.get_call(cid)
+                    if active is not None:
+                        await guest_call_service.release_admin_invite(active)
+
+                asyncio.create_task(_release_admin_later())
+                return
         else:
             try:
                 admin_oid = int(user_id)
@@ -257,6 +287,25 @@ async def _handle_call_frame(
         )
         return
     call = guest_call_service.get_call(call_id)
+    if (
+        not call
+        and is_guest
+        and guest_id
+        and message_type in ("CALL_CANCEL", "CALL_REJECT", "CALL_END")
+    ):
+        # Optimistic guest cards use a local pending id. Cancel the real call.
+        call = guest_call_service.active_call_for_guest(guest_id)
+        if call is not None:
+            call_id = call.call_id
+    if message_type == "CALL_ARM":
+        target = call or (
+            guest_call_service.active_call_for_guest(guest_id)
+            if is_guest and guest_id
+            else None
+        )
+        if target is not None and is_guest and guest_id == target.guest_id:
+            await guest_call_service.release_admin_invite(target)
+        return
     if not call and message_type in ("CALL_CANCEL", "CALL_REJECT", "CALL_END"):
         removed = await guest_call_service.cancel_queued_call(
             call_id,
@@ -290,19 +339,15 @@ async def _handle_call_frame(
             return
     else:
         try:
-            if int(user_id) != call.admin_owner_id:
-                await websocket.send_json(
-                    {
-                        "type": "ERROR",
-                        "error": {"message": "Forbidden", "error_code": "FORBIDDEN"},
-                    }
-                )
-                return
+            oid = int(user_id)
         except (TypeError, ValueError):
             await websocket.send_json(
                 {"type": "ERROR", "error": {"message": "Forbidden", "error_code": "FORBIDDEN"}}
             )
             return
+        # Zone colleagues also receive the invite. The one who answers owns the call.
+        if oid != call.admin_owner_id:
+            call.admin_owner_id = oid
 
     if message_type == "CALL_ACCEPT":
         accepted, err = await guest_call_service.accept_call(call_id, accepter_role=role)
@@ -520,7 +565,11 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
                 oid = None
             if oid is not None:
                 active_admin = guest_call_service.active_call_for_admin(oid)
-                if active_admin and active_admin.state in ("ringing", "connected"):
+                if (
+                    active_admin
+                    and active_admin.state in ("ringing", "connected")
+                    and (active_admin.caller_role == "admin" or active_admin.admin_invited)
+                ):
                     await websocket.send_json(
                         {
                             "type": (

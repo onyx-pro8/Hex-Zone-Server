@@ -37,6 +37,9 @@ class GuestCallSession:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     accepted_at: datetime | None = None
     timeout_handle: asyncio.TimerHandle | None = None
+    # Guest-originated calls stay hidden from admins until the guest card is up.
+    admin_invited: bool = False
+    watcher_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -142,7 +145,12 @@ def _drop_call(call: GuestCallSession) -> None:
 
 
 def party_user_ids(call: GuestCallSession) -> list[str]:
-    return [str(call.admin_owner_id), f"guest:{call.guest_id}"]
+    ids = [str(call.admin_owner_id), f"guest:{call.guest_id}"]
+    for watcher in call.watcher_ids:
+        token = str(watcher).strip()
+        if token and token not in ids:
+            ids.append(token)
+    return ids
 
 
 async def create_call(
@@ -180,6 +188,7 @@ async def create_call(
         guest_avatar_url=(guest_avatar_url or "").strip() or None,
         ring_timeout_seconds=max(15, min(45, int(ring_timeout_seconds or RING_TIMEOUT_SECONDS))),
     )
+    call.admin_invited = caller_role == "admin"
     _calls_by_id[call.call_id] = call
     _active_by_guest[gid] = call.call_id
 
@@ -255,10 +264,43 @@ async def end_call(
     return call, payload
 
 
-async def broadcast_call_event(event_type: str, call: GuestCallSession, payload: dict[str, Any]) -> None:
+def remember_watchers(call: GuestCallSession, user_ids: list[int | str]) -> None:
+    for raw in user_ids:
+        token = str(raw).strip()
+        if token and token not in call.watcher_ids:
+            call.watcher_ids.append(token)
+
+
+async def release_admin_invite(call: GuestCallSession) -> None:
+    """Show the call to admins only after the guest (sender) already has the card."""
+    if call.admin_invited or call.state != "ringing" or call.caller_role != "guest":
+        return
+    call.admin_invited = True
     from app.websocket.manager import ws_manager
 
-    await ws_manager.broadcast_to_users(party_user_ids(call), event_type, payload)
+    ids = [token for token in call.watcher_ids if token and not token.startswith("guest:")]
+    admin_id = str(call.admin_owner_id)
+    if admin_id not in ids:
+        ids.append(admin_id)
+    if not ids:
+        return
+    await ws_manager.broadcast_to_users(ids, "CALL_INVITE", public_call_payload(call))
+
+
+async def broadcast_call_event(
+    event_type: str,
+    call: GuestCallSession,
+    payload: dict[str, Any],
+    extra_user_ids: list[int | str] | None = None,
+) -> None:
+    from app.websocket.manager import ws_manager
+
+    ids = party_user_ids(call)
+    for extra in extra_user_ids or []:
+        token = str(extra).strip()
+        if token and token not in ids:
+            ids.append(token)
+    await ws_manager.broadcast_to_users(ids, event_type, payload)
 
 
 def _queue_for(zone_id: str) -> list[QueuedCallRequest]:
