@@ -63,6 +63,8 @@ class QueuedCallRequest:
 _calls_by_id: dict[str, GuestCallSession] = {}
 _active_by_guest: dict[str, str] = {}  # guest_id -> call_id
 _queue_by_zone: dict[str, list[QueuedCallRequest]] = {}
+# Client pending ids the sender already cancelled, so a late CALL_INVITE is ignored.
+_cancelled_client_call_ids: set[str] = set()
 _call_lock = asyncio.Lock()
 
 
@@ -519,6 +521,20 @@ async def promote_ready_queues() -> list[GuestCallSession]:
         return await _promote_holding_lock()
 
 
+def remember_cancelled_client_call(call_id: str) -> None:
+    token = (call_id or "").strip()
+    if token.startswith("pending-") or token.startswith("queue-"):
+        _cancelled_client_call_ids.add(token)
+
+
+def consume_cancelled_client_call(call_id: str) -> bool:
+    token = (call_id or "").strip()
+    if token and token in _cancelled_client_call_ids:
+        _cancelled_client_call_ids.discard(token)
+        return True
+    return False
+
+
 async def cancel_queued_call(
     queue_id: str,
     *,
@@ -537,6 +553,32 @@ async def cancel_queued_call(
                 if item.caller_role == "guest":
                     if (guest_id or "").strip() != item.guest_id:
                         return None
+                elif admin_owner_id is None or int(admin_owner_id) != item.admin_owner_id:
+                    return None
+                bucket.pop(index)
+                if not bucket:
+                    _queue_by_zone.pop(zone_id, None)
+                return item
+    return None
+
+
+async def cancel_queued_for_guest(
+    guest_id: str,
+    *,
+    admin_owner_id: int | None = None,
+    as_guest: bool,
+) -> QueuedCallRequest | None:
+    """Drop a waiting call addressed by guest, when the client id is still pending."""
+    gid = (guest_id or "").strip()
+    if not gid:
+        return None
+    async with _call_lock:
+        for zone_id, bucket in list(_queue_by_zone.items()):
+            for index, item in enumerate(bucket):
+                if item.guest_id != gid:
+                    continue
+                if as_guest:
+                    pass
                 elif admin_owner_id is None or int(admin_owner_id) != item.admin_owner_id:
                     return None
                 bucket.pop(index)

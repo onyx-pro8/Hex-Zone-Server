@@ -131,6 +131,41 @@ async def test_create_call_blocks_second_active():
 
 
 @pytest.mark.asyncio
+async def test_escalated_cancel_and_decline_close_access():
+    guest_call, err = await guest_call_service.create_call(
+        zone_id="Z-ESC",
+        guest_id="guest-esc",
+        guest_name="Escalated",
+        admin_owner_id=7,
+        caller_role="guest",
+        fullscreen=True,
+        access_reject_escalation=True,
+    )
+    assert err is None and guest_call is not None
+    _ended, payload = await guest_call_service.end_call(
+        guest_call.call_id, reason="cancel", closer_role="guest"
+    )
+    assert payload is not None
+    assert payload["auto_close_access"] is True
+
+    admin_call, err2 = await guest_call_service.create_call(
+        zone_id="Z-ESC",
+        guest_id="guest-esc-2",
+        guest_name="Escalated",
+        admin_owner_id=7,
+        caller_role="guest",
+        fullscreen=True,
+        access_reject_escalation=True,
+    )
+    assert err2 is None and admin_call is not None
+    _ended2, payload2 = await guest_call_service.end_call(
+        admin_call.call_id, reason="reject", closer_role="admin"
+    )
+    assert payload2 is not None
+    assert payload2["auto_close_access"] is True
+
+
+@pytest.mark.asyncio
 async def test_second_call_waits_then_starts_when_first_ends():
     first, queued, err, _promoted = await guest_call_service.enqueue_or_start(
         zone_id="Z-QUEUE",

@@ -175,6 +175,14 @@ async def _handle_call_frame(
                 )
                 return
             zone_id, guest_name, admin_oid, admin_avatar = await _resolve_call_admin_for_guest(guest_id)
+            client_call_id = str(body.get("call_id") or "").strip()
+            if guest_call_service.consume_cancelled_client_call(client_call_id):
+                if bool(body.get("access_reject_escalation")) and zone_id:
+                    await guest_call_service.auto_close_escalated_access(
+                        zone_id=zone_id,
+                        guest_id=guest_id,
+                    )
+                return
             if not zone_id or not admin_oid:
                 await websocket.send_json(
                     {
@@ -221,6 +229,9 @@ async def _handle_call_frame(
             target_guest = str(body.get("guest_id") or "").strip()
             zone_id = str(body.get("zone_id") or "").strip()
             guest_name = str(body.get("guest_name") or "").strip() or "Guest"
+            client_call_id = str(body.get("call_id") or "").strip()
+            if guest_call_service.consume_cancelled_client_call(client_call_id):
+                return
             if not target_guest or not zone_id:
                 await websocket.send_json(
                     {
@@ -288,19 +299,50 @@ async def _handle_call_frame(
             await guest_call_service.release_admin_invite(target)
         return
     if not call and message_type in ("CALL_CANCEL", "CALL_REJECT", "CALL_END"):
+        guest_call_service.remember_cancelled_client_call(call_id)
+        lookup_guest = guest_id if is_guest else str(body.get("guest_id") or "").strip()
         removed = await guest_call_service.cancel_queued_call(
             call_id,
             guest_id=guest_id if is_guest else None,
             admin_owner_id=int(user_id) if not is_guest and str(user_id).isdigit() else None,
         )
+        if removed is None and lookup_guest and message_type != "CALL_END":
+            try:
+                admin_lookup = int(user_id) if not is_guest else None
+            except (TypeError, ValueError):
+                admin_lookup = None
+            removed = await guest_call_service.cancel_queued_for_guest(
+                lookup_guest,
+                admin_owner_id=admin_lookup,
+                as_guest=is_guest,
+            )
         if removed is not None:
             payload = guest_call_service.public_queue_payload(removed, position=0)
             payload["reason"] = "cancel"
+            if removed.access_reject_escalation or bool(body.get("access_reject_escalation")):
+                payload["auto_close_access"] = True
             await ws_manager.broadcast_to_users(
                 [f"guest:{removed.guest_id}", str(removed.admin_owner_id)],
                 "CALL_CANCEL",
                 payload,
             )
+            if payload.get("auto_close_access"):
+                await guest_call_service.auto_close_escalated_access(
+                    zone_id=removed.zone_id,
+                    guest_id=removed.guest_id,
+                )
+            return
+        if (
+            message_type in ("CALL_CANCEL", "CALL_REJECT")
+            and lookup_guest
+            and bool(body.get("access_reject_escalation"))
+        ):
+            zone_for_close = str(body.get("zone_id") or "").strip()
+            if zone_for_close:
+                await guest_call_service.auto_close_escalated_access(
+                    zone_id=zone_for_close,
+                    guest_id=lookup_guest,
+                )
             return
     if not call:
         await websocket.send_json(
