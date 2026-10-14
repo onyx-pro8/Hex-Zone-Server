@@ -102,6 +102,7 @@ def test_fourth_arrival_sets_fullscreen_auto_call(db):
     assert "error" not in result
     assert result["guest_response"].get("call_fullscreen") is True
     assert result.get("auto_call_invite", {}).get("fullscreen") is True
+    assert result["auto_call_invite"].get("caller_role") == "guest"
     assert result["auto_call_invite"].get("access_reject_escalation") is True
 
 

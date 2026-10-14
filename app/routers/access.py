@@ -986,7 +986,7 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
                 guest_id=str(auto_invite.get("guest_id") or ""),
                 guest_name=str(auto_invite.get("guest_name") or "Guest"),
                 admin_owner_id=admin_oid,
-                caller_role="admin",
+                caller_role="guest",
                 fullscreen=True,
                 access_reject_escalation=True,
                 ring_timeout_seconds=int(auto_invite.get("ring_timeout_seconds") or 30),
