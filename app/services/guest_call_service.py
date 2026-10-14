@@ -33,6 +33,7 @@ class GuestCallSession:
     admin_avatar_url: str | None = None
     guest_avatar_url: str | None = None
     state: CallState = "ringing"
+    ring_timeout_seconds: int = RING_TIMEOUT_SECONDS
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     accepted_at: datetime | None = None
     timeout_handle: asyncio.TimerHandle | None = None
@@ -85,7 +86,7 @@ def public_call_payload(call: GuestCallSession, **extra: Any) -> dict[str, Any]:
         "state": call.state,
         "created_at": _utc_iso(call.created_at),
         "accepted_at": _utc_iso(call.accepted_at),
-        "ring_timeout_seconds": RING_TIMEOUT_SECONDS,
+        "ring_timeout_seconds": int(call.ring_timeout_seconds or RING_TIMEOUT_SECONDS),
     }
     body.update(extra)
     return body
@@ -177,12 +178,13 @@ async def create_call(
         access_reject_escalation=bool(access_reject_escalation),
         admin_avatar_url=(admin_avatar_url or "").strip() or None,
         guest_avatar_url=(guest_avatar_url or "").strip() or None,
+        ring_timeout_seconds=max(15, min(45, int(ring_timeout_seconds or RING_TIMEOUT_SECONDS))),
     )
     _calls_by_id[call.call_id] = call
     _active_by_guest[gid] = call.call_id
 
     loop = asyncio.get_running_loop()
-    delay = max(5, int(ring_timeout_seconds or RING_TIMEOUT_SECONDS))
+    delay = call.ring_timeout_seconds
 
     def _fire_timeout() -> None:
         asyncio.create_task(_timeout_call(call.call_id))
