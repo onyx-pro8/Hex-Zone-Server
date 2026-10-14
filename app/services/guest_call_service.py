@@ -214,9 +214,7 @@ async def _timeout_call(call_id: str) -> None:
         await auto_close_escalated_access(zone_id=ended.zone_id, guest_id=ended.guest_id)
     started = await promote_ready_queues()
     for nxt in started:
-        await broadcast_call_event(
-            "CALL_INVITE", nxt, public_call_payload(nxt, from_queue=True)
-        )
+        await deliver_live_call(nxt, from_queue=True)
 
 
 async def accept_call(call_id: str, *, accepter_role: Literal["guest", "admin"]) -> tuple[GuestCallSession | None, str | None]:
@@ -392,27 +390,29 @@ async def enqueue_or_start(
     admin_avatar_url: str | None = None,
     guest_avatar_url: str | None = None,
     ring_timeout_seconds: int = RING_TIMEOUT_SECONDS,
-) -> tuple[GuestCallSession | None, QueuedCallRequest | None, str | None]:
+) -> tuple[GuestCallSession | None, QueuedCallRequest | None, str | None, list[GuestCallSession]]:
     """Start a call, or park it until the current zone call ends.
 
-    Returns ``(active_call, queued_request, error)``. Exactly one of the first
-    two is set when ``error`` is ``None``.
+    Returns ``(active_call, queued_request, error, promoted)``. Exactly one of
+    the first two is set when ``error`` is ``None``. ``promoted`` holds calls
+    that were waiting and started because the line was free.
     """
     async with _call_lock:
         gid = (guest_id or "").strip()
         zid = (zone_id or "").strip()
+        promoted: list[GuestCallSession] = []
         if not gid or not zid or not admin_owner_id:
-            return None, None, "INVALID_CALL"
+            return None, None, "INVALID_CALL", promoted
         existing = active_call_for_guest(gid)
         if existing and existing.state in ("ringing", "connected"):
-            return None, None, "CALL_ALREADY_ACTIVE"
+            return None, None, "CALL_ALREADY_ACTIVE", promoted
         already = _find_queued(gid, zid)
         if already is not None:
-            return None, already, None
+            return None, already, None, promoted
         if not _line_busy(zid, int(admin_owner_id)):
-            await _promote_holding_lock()
+            promoted = await _promote_holding_lock()
         if _find_queued(gid, zid) is not None:
-            return None, _find_queued(gid, zid), None
+            return None, _find_queued(gid, zid), None, promoted
         if _line_busy(zid, int(admin_owner_id)) or _queue_for(zid):
             item = QueuedCallRequest(
                 queue_id=f"queue-{uuid.uuid4().hex}",
@@ -428,7 +428,7 @@ async def enqueue_or_start(
                 ring_timeout_seconds=max(5, int(ring_timeout_seconds or RING_TIMEOUT_SECONDS)),
             )
             _queue_for(zid).append(item)
-            return None, item, None
+            return None, item, None, promoted
         call, err = await create_call(
             zone_id=zid,
             guest_id=gid,
@@ -441,7 +441,39 @@ async def enqueue_or_start(
             guest_avatar_url=guest_avatar_url,
             ring_timeout_seconds=ring_timeout_seconds,
         )
-        return call, None, err
+        return call, None, err, promoted
+
+
+async def deliver_live_call(call: GuestCallSession, *, from_queue: bool = False) -> None:
+    """One event for the caller, one invite for the receiver.
+
+    The caller already has the card open. ``CALL_STARTED`` only swaps in the
+    server id. ``CALL_INVITE`` is what shows the card on the other side.
+    """
+    from app.database import session_maker
+    from app.services import guest_access_service as gas
+    from app.websocket.manager import ws_manager
+
+    if call.caller_role == "guest":
+        has_admin = any(not str(item).startswith("guest:") for item in call.watcher_ids)
+        if not has_admin:
+            db = session_maker()
+            try:
+                remember_watchers(call, gas.zone_member_owner_ids(db, call.zone_id))
+            finally:
+                db.close()
+    call.admin_invited = True
+    payload = public_call_payload(call, **({"from_queue": True} if from_queue else {}))
+    if call.caller_role == "guest":
+        receiver_ids = [token for token in call.watcher_ids if token and not token.startswith("guest:")]
+        admin_id = str(call.admin_owner_id)
+        if admin_id not in receiver_ids:
+            receiver_ids.append(admin_id)
+        await ws_manager.broadcast_to_users(receiver_ids, "CALL_INVITE", payload)
+        await ws_manager.broadcast_to_users([f"guest:{call.guest_id}"], "CALL_STARTED", payload)
+        return
+    await ws_manager.broadcast_to_users([f"guest:{call.guest_id}"], "CALL_INVITE", payload)
+    await ws_manager.broadcast_to_users([str(call.admin_owner_id)], "CALL_STARTED", payload)
 
 
 async def _promote_holding_lock() -> list[GuestCallSession]:

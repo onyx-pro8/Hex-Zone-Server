@@ -136,8 +136,7 @@ async def _announce_queued(item: guest_call_service.QueuedCallRequest) -> None:
 
 async def _broadcast_promoted(started: list[guest_call_service.GuestCallSession]) -> None:
     for call in started:
-        payload = guest_call_service.public_call_payload(call, from_queue=True)
-        await guest_call_service.broadcast_call_event("CALL_INVITE", call, payload)
+        await guest_call_service.deliver_live_call(call, from_queue=True)
 
 
 async def _finish_call_end(
@@ -184,7 +183,7 @@ async def _handle_call_frame(
                     }
                 )
                 return
-            call, queued, err = await guest_call_service.enqueue_or_start(
+            call, queued, err, promoted = await guest_call_service.enqueue_or_start(
                 zone_id=zone_id,
                 guest_id=guest_id,
                 guest_name=guest_name or "Guest",
@@ -195,37 +194,21 @@ async def _handle_call_frame(
                 admin_avatar_url=admin_avatar,
                 guest_avatar_url=str(body.get("guest_avatar_url") or "").strip() or None,
             )
+            if promoted:
+                await _broadcast_promoted(promoted)
             if queued is not None and err is None:
                 await _announce_queued(queued)
                 return
             if call is not None and err is None:
-                # Sender (guest) gets the invite now. Admins wait until the
-                # guest card is actually on screen (CALL_ARM) or the fallback.
-                from app.database import session_maker
                 from app.services import guest_access_service as gas
 
                 db = session_maker()
                 try:
-                    guest_call_service.remember_watchers(
-                        call, gas.zone_member_owner_ids(db, call.zone_id)
-                    )
+                    member_ids = gas.zone_member_owner_ids(db, call.zone_id)
                 finally:
                     db.close()
-                await websocket.send_json(
-                    {
-                        "type": "CALL_INVITE",
-                        "data": guest_call_service.public_call_payload(call),
-                    }
-                )
-                armed_id = call.call_id
-
-                async def _release_admin_later(cid: str = armed_id) -> None:
-                    await asyncio.sleep(3.2)
-                    active = guest_call_service.get_call(cid)
-                    if active is not None:
-                        await guest_call_service.release_admin_invite(active)
-
-                asyncio.create_task(_release_admin_later())
+                guest_call_service.remember_watchers(call, member_ids)
+                await guest_call_service.deliver_live_call(call)
                 return
         else:
             try:
@@ -251,7 +234,7 @@ async def _handle_call_frame(
                 admin_avatar = _owner_avatar_url(db, admin_oid)
             finally:
                 db.close()
-            call, queued, err = await guest_call_service.enqueue_or_start(
+            call, queued, err, promoted = await guest_call_service.enqueue_or_start(
                 zone_id=zone_id,
                 guest_id=target_guest,
                 guest_name=guest_name,
@@ -262,6 +245,8 @@ async def _handle_call_frame(
                 admin_avatar_url=admin_avatar,
                 guest_avatar_url=str(body.get("guest_avatar_url") or "").strip() or None,
             )
+            if promoted:
+                await _broadcast_promoted(promoted)
             if queued is not None and err is None:
                 await _announce_queued(queued)
                 return
@@ -276,8 +261,7 @@ async def _handle_call_frame(
                 }
             )
             return
-        payload = guest_call_service.public_call_payload(call)
-        await guest_call_service.broadcast_call_event("CALL_INVITE", call, payload)
+        await guest_call_service.deliver_live_call(call)
         return
 
     call_id = str(body.get("call_id") or "").strip()
@@ -287,16 +271,13 @@ async def _handle_call_frame(
         )
         return
     call = guest_call_service.get_call(call_id)
-    if (
-        not call
-        and is_guest
-        and guest_id
-        and message_type in ("CALL_CANCEL", "CALL_REJECT", "CALL_END")
-    ):
-        # Optimistic guest cards use a local pending id. Cancel the real call.
-        call = guest_call_service.active_call_for_guest(guest_id)
-        if call is not None:
-            call_id = call.call_id
+    if not call and message_type in ("CALL_CANCEL", "CALL_REJECT", "CALL_END"):
+        # Optimistic cards use a local pending id. End the real call for that guest.
+        lookup_guest = guest_id if is_guest else str(body.get("guest_id") or "").strip()
+        if lookup_guest:
+            call = guest_call_service.active_call_for_guest(lookup_guest)
+            if call is not None:
+                call_id = call.call_id
     if message_type == "CALL_ARM":
         target = call or (
             guest_call_service.active_call_for_guest(guest_id)
@@ -543,9 +524,17 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
         if is_guest and guest_id:
             active = guest_call_service.active_call_for_guest(guest_id)
             if active and active.state in ("ringing", "connected"):
+                # The caller already opened the card. Restore with CALL_STARTED
+                # so a reconnect is not a second invite.
+                if active.state == "connected":
+                    replay_type = "CALL_ACCEPT"
+                elif active.caller_role == "guest":
+                    replay_type = "CALL_STARTED"
+                else:
+                    replay_type = "CALL_INVITE"
                 await websocket.send_json(
                     {
-                        "type": "CALL_INVITE" if active.state == "ringing" else "CALL_ACCEPT",
+                        "type": replay_type,
                         "data": guest_call_service.public_call_payload(active),
                     }
                 )
@@ -570,13 +559,15 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
                     and active_admin.state in ("ringing", "connected")
                     and (active_admin.caller_role == "admin" or active_admin.admin_invited)
                 ):
+                    if active_admin.state == "connected":
+                        admin_replay = "CALL_ACCEPT"
+                    elif active_admin.caller_role == "admin":
+                        admin_replay = "CALL_STARTED"
+                    else:
+                        admin_replay = "CALL_INVITE"
                     await websocket.send_json(
                         {
-                            "type": (
-                                "CALL_INVITE"
-                                if active_admin.state == "ringing"
-                                else "CALL_ACCEPT"
-                            ),
+                            "type": admin_replay,
                             "data": guest_call_service.public_call_payload(active_admin),
                         }
                     )

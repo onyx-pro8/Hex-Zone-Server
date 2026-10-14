@@ -132,7 +132,7 @@ async def test_create_call_blocks_second_active():
 
 @pytest.mark.asyncio
 async def test_second_call_waits_then_starts_when_first_ends():
-    first, queued, err = await guest_call_service.enqueue_or_start(
+    first, queued, err, _promoted = await guest_call_service.enqueue_or_start(
         zone_id="Z-QUEUE",
         guest_id="guest-queue-a",
         guest_name="A",
@@ -141,7 +141,7 @@ async def test_second_call_waits_then_starts_when_first_ends():
     )
     assert err is None and first is not None and queued is None
 
-    second, waiting, err2 = await guest_call_service.enqueue_or_start(
+    second, waiting, err2, _promoted = await guest_call_service.enqueue_or_start(
         zone_id="Z-QUEUE",
         guest_id="guest-queue-b",
         guest_name="B",
@@ -153,7 +153,7 @@ async def test_second_call_waits_then_starts_when_first_ends():
     assert waiting.guest_id == "guest-queue-b"
     assert guest_call_service.queue_position(waiting) == 1
 
-    third, waiting2, err3 = await guest_call_service.enqueue_or_start(
+    third, waiting2, err3, _promoted = await guest_call_service.enqueue_or_start(
         zone_id="Z-QUEUE",
         guest_id="guest-queue-c",
         guest_name="C",

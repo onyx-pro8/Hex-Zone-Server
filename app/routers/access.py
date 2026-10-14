@@ -981,75 +981,21 @@ async def guest_permission(
             list(webhook_stats.get("webhook_owner_results") or [])
         )
 
-    # After 3 access rejects for the same name, the 4th request opens a
-    # fullscreen call for admin + guest. Call volume itself is unlimited.
-    # Create the call before the HTTP response so the guest can attach, but
-    # delay CALL_INVITE broadcast until after the response so the sender
-    # (guest) can paint their outgoing card first.
-    auto_invite = result.get("auto_call_invite")
-    if isinstance(auto_invite, dict):
-        try:
-            admin_oid = int(auto_invite["admin_owner_id"])
+    # The 4th request only tells the guest to open the call. The guest's card
+    # sends the one CALL_INVITE; the server then forwards that to the admin.
+    if gr.get("call_fullscreen"):
+        admin_oid = None
+        invite = result.get("auto_call_invite")
+        if isinstance(invite, dict):
+            try:
+                admin_oid = int(invite.get("admin_owner_id") or 0) or None
+            except (TypeError, ValueError):
+                admin_oid = None
+        if admin_oid is not None:
             admin_row = db.get(Owner, admin_oid)
-            admin_avatar = str(getattr(admin_row, "avatar_url", "") or "").strip() or None
-            call, queued, err = await guest_call_service.enqueue_or_start(
-                zone_id=str(auto_invite.get("zone_id") or effective_zone_id),
-                guest_id=str(auto_invite.get("guest_id") or ""),
-                guest_name=str(auto_invite.get("guest_name") or "Guest"),
-                admin_owner_id=admin_oid,
-                caller_role="guest",
-                fullscreen=True,
-                access_reject_escalation=True,
-                admin_avatar_url=admin_avatar,
-                ring_timeout_seconds=int(auto_invite.get("ring_timeout_seconds") or 60),
-            )
-            if call and not err:
-                # Guest is the sender. Their card (after the avatar loads) comes
-                # from the socket replay. Admins are invited only after that, or
-                # a few seconds later if the guest never signals.
-                member_ids = guest_access_service.zone_member_owner_ids(
-                    db, str(call.zone_id)
-                )
-                guest_call_service.remember_watchers(call, member_ids)
-                call_id = str(call.call_id)
-
-                async def _release_admin_later(cid: str = call_id) -> None:
-                    await asyncio.sleep(3.2)
-                    active = guest_call_service.get_call(cid)
-                    if active is not None:
-                        await guest_call_service.release_admin_invite(active)
-
-                background_tasks.add_task(_release_admin_later)
-            elif queued is not None and not err:
-                # Line is busy. Guest stays queued; CALL_INVITE fires when the
-                # current call ends. Tell the guest as soon as their socket is up.
-                queue_id = queued.queue_id
-
-                async def _broadcast_auto_call_queued(qid: str = queue_id) -> None:
-                    await asyncio.sleep(0.4)
-                    item = guest_call_service.queued_call_for_guest(
-                        str(auto_invite.get("guest_id") or "")
-                    )
-                    if item is None or item.queue_id != qid:
-                        return
-                    payload = guest_call_service.public_queue_payload(item)
-                    from app.websocket.manager import ws_manager
-
-                    await ws_manager.broadcast_to_users(
-                        [f"guest:{item.guest_id}"],
-                        "CALL_QUEUED",
-                        payload,
-                    )
-
-                background_tasks.add_task(_broadcast_auto_call_queued)
-            elif err:
-                logger.info(
-                    "auto_call_invite skipped guest_id=%s err=%s",
-                    auto_invite.get("guest_id"),
-                    err,
-                )
-        except Exception:
-            logger.exception("auto_call_invite failed for guest_id=%s", auto_invite.get("guest_id"))
+            avatar = str(getattr(admin_row, "avatar_url", "") or "").strip()
+            if avatar:
+                gr["admin_avatar_url"] = avatar
 
     return AccessPermissionResponseEnvelope(data=AccessPermissionResponseData.model_validate(gr))
 

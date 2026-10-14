@@ -556,6 +556,10 @@ class AccessPermissionResponseData(BaseModel):
             "True when this guest is pending but another earlier guest currently holds the chat slot."
         ),
     )
+    admin_avatar_url: str | None = Field(
+        default=None,
+        description="Administrator photo for the escalated fullscreen call card.",
+    )
     call_fullscreen: bool | None = Field(
         default=None,
         description=(
