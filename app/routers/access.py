@@ -981,6 +981,8 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
     if isinstance(auto_invite, dict):
         try:
             admin_oid = int(auto_invite["admin_owner_id"])
+            admin_row = db.get(Owner, admin_oid)
+            admin_avatar = str(getattr(admin_row, "avatar_url", "") or "").strip() or None
             call, err = await guest_call_service.create_call(
                 zone_id=str(auto_invite.get("zone_id") or effective_zone_id),
                 guest_id=str(auto_invite.get("guest_id") or ""),
@@ -989,7 +991,8 @@ async def guest_permission(request: Request, payload: GuestArrivalRequest, db: S
                 caller_role="guest",
                 fullscreen=True,
                 access_reject_escalation=True,
-                ring_timeout_seconds=int(auto_invite.get("ring_timeout_seconds") or 30),
+                admin_avatar_url=admin_avatar,
+                ring_timeout_seconds=int(auto_invite.get("ring_timeout_seconds") or 60),
             )
             if call and not err:
                 payload = guest_call_service.public_call_payload(call)

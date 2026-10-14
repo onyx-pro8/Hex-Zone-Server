@@ -86,20 +86,38 @@ async def _publish_guest_ws_presence(guest_id: str, *, online: bool) -> None:
     )
 
 
-async def _resolve_call_admin_for_guest(guest_id: str) -> tuple[str | None, str | None, int | None]:
-    """Return (zone_id, guest_name, admin_owner_id) for a pending/active guest session."""
+def _owner_avatar_url(db, owner_id: int | None) -> str | None:
+    if not owner_id:
+        return None
+    from app.models.owner import Owner
+
+    owner = db.get(Owner, int(owner_id))
+    if owner is None:
+        return None
+    url = str(getattr(owner, "avatar_url", "") or "").strip()
+    return url or None
+
+
+async def _resolve_call_admin_for_guest(guest_id: str) -> tuple[str | None, str | None, int | None, str | None]:
+    """Return (zone_id, guest_name, admin_owner_id, admin_avatar_url)."""
     from app.services import guest_access_service as gas
 
     db = session_maker()
     try:
         row = gas.get_guest_access_session_by_guest_id(db, guest_id)
         if not row:
-            return None, None, None
+            return None, None, None, None
         admin_id = row.admin_owner_id
         if admin_id is None:
             admin = gas.resolve_primary_zone_admin_owner(db, row.zone_id)
             admin_id = admin.id if admin else None
-        return row.zone_id, (row.guest_name or "").strip() or "Guest", int(admin_id) if admin_id else None
+        avatar = _owner_avatar_url(db, int(admin_id) if admin_id else None)
+        return (
+            row.zone_id,
+            (row.guest_name or "").strip() or "Guest",
+            int(admin_id) if admin_id else None,
+            avatar,
+        )
     finally:
         db.close()
 
@@ -137,7 +155,7 @@ async def _handle_call_frame(
                     {"type": "ERROR", "error": {"message": "Guest identity required"}}
                 )
                 return
-            zone_id, guest_name, admin_oid = await _resolve_call_admin_for_guest(guest_id)
+            zone_id, guest_name, admin_oid, admin_avatar = await _resolve_call_admin_for_guest(guest_id)
             if not zone_id or not admin_oid:
                 await websocket.send_json(
                     {
@@ -154,6 +172,8 @@ async def _handle_call_frame(
                 caller_role="guest",
                 fullscreen=bool(body.get("fullscreen")),
                 access_reject_escalation=bool(body.get("access_reject_escalation")),
+                admin_avatar_url=admin_avatar,
+                guest_avatar_url=str(body.get("guest_avatar_url") or "").strip() or None,
             )
         else:
             try:
@@ -174,6 +194,11 @@ async def _handle_call_frame(
                     }
                 )
                 return
+            db = session_maker()
+            try:
+                admin_avatar = _owner_avatar_url(db, admin_oid)
+            finally:
+                db.close()
             call, err = await guest_call_service.create_call(
                 zone_id=zone_id,
                 guest_id=target_guest,
@@ -182,6 +207,8 @@ async def _handle_call_frame(
                 caller_role="admin",
                 fullscreen=bool(body.get("fullscreen")),
                 access_reject_escalation=bool(body.get("access_reject_escalation")),
+                admin_avatar_url=admin_avatar,
+                guest_avatar_url=str(body.get("guest_avatar_url") or "").strip() or None,
             )
         if err or call is None:
             await websocket.send_json(

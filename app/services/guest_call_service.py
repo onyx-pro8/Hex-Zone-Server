@@ -30,6 +30,8 @@ class GuestCallSession:
     caller_role: Literal["guest", "admin"]
     fullscreen: bool = False
     access_reject_escalation: bool = False
+    admin_avatar_url: str | None = None
+    guest_avatar_url: str | None = None
     state: CallState = "ringing"
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     accepted_at: datetime | None = None
@@ -58,6 +60,8 @@ def public_call_payload(call: GuestCallSession, **extra: Any) -> dict[str, Any]:
         "caller_role": call.caller_role,
         "fullscreen": bool(call.fullscreen),
         "access_reject_escalation": bool(call.access_reject_escalation),
+        "admin_avatar_url": call.admin_avatar_url,
+        "guest_avatar_url": call.guest_avatar_url,
         "state": call.state,
         "created_at": _utc_iso(call.created_at),
         "accepted_at": _utc_iso(call.accepted_at),
@@ -119,6 +123,8 @@ async def create_call(
     caller_role: Literal["guest", "admin"],
     fullscreen: bool = False,
     access_reject_escalation: bool = False,
+    admin_avatar_url: str | None = None,
+    guest_avatar_url: str | None = None,
     ring_timeout_seconds: int = RING_TIMEOUT_SECONDS,
 ) -> tuple[GuestCallSession | None, str | None]:
     """Create a ringing call. Returns (call, error_code)."""
@@ -139,6 +145,8 @@ async def create_call(
         caller_role=caller_role,
         fullscreen=bool(fullscreen),
         access_reject_escalation=bool(access_reject_escalation),
+        admin_avatar_url=(admin_avatar_url or "").strip() or None,
+        guest_avatar_url=(guest_avatar_url or "").strip() or None,
     )
     _calls_by_id[call.call_id] = call
     _active_by_guest[gid] = call.call_id

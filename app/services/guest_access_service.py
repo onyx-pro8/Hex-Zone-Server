@@ -434,7 +434,7 @@ def process_network_guest_arrival(
             "caller_role": "guest",
             "fullscreen": True,
             "access_reject_escalation": True,
-            "ring_timeout_seconds": 30,
+            "ring_timeout_seconds": 60,
         }
     return out
 
@@ -965,7 +965,7 @@ def process_guest_arrival(
                 "caller_role": "guest",
                 "fullscreen": True,
                 "access_reject_escalation": True,
-                "ring_timeout_seconds": 30,
+                "ring_timeout_seconds": 60,
             }
     return out
 
