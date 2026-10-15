@@ -227,9 +227,26 @@ async def _handle_call_frame(
             if queued is not None and err is None:
                 await _announce_queued(queued)
                 return
+            if err == "CALL_ALREADY_ACTIVE":
+                existing = guest_call_service.active_call_for_guest(guest_id)
+                if existing is not None and existing.state in ("ringing", "connected"):
+                    replay = "CALL_ACCEPT" if existing.state == "connected" else "CALL_STARTED"
+                    await websocket.send_json(
+                        {
+                            "type": replay,
+                            "data": guest_call_service.public_call_payload(existing),
+                        }
+                    )
+                    return
             if call is not None and err is None:
                 guest_call_service.remember_watchers(call, member_ids)
                 await guest_call_service.deliver_live_call(call)
+                await websocket.send_json(
+                    {
+                        "type": "CALL_STARTED",
+                        "data": guest_call_service.public_call_payload(call),
+                    }
+                )
                 return
         else:
             try:
@@ -297,6 +314,12 @@ async def _handle_call_frame(
             )
             return
         await guest_call_service.deliver_live_call(call)
+        await websocket.send_json(
+            {
+                "type": "CALL_STARTED",
+                "data": guest_call_service.public_call_payload(call),
+            }
+        )
         return
 
     call_id = str(body.get("call_id") or "").strip()
