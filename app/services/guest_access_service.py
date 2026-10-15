@@ -101,8 +101,17 @@ def _guest_access_invalidated_exc(message: str) -> None:
     )
 
 
-def require_guest_bearer_session_active(db: Session, *, guest_id: str) -> None:
-    """Ensure **guest_access_sessions** (and linked guest pass / QR token) still authorize this JWT."""
+def require_guest_bearer_session_active(
+    db: Session,
+    *,
+    guest_id: str,
+    for_call: bool = False,
+) -> None:
+    """Ensure **guest_access_sessions** (and linked guest pass / QR token) still authorize this JWT.
+
+    ``for_call`` keeps the voice socket open while an unexpected arrival is still
+    waiting for approval. HTTP guest routes stay closed until an admin approves.
+    """
     gid = (guest_id or "").strip()
     if not gid:
         _guest_access_invalidated_exc("Guest session is no longer valid.")
@@ -117,7 +126,7 @@ def require_guest_bearer_session_active(db: Session, *, guest_id: str) -> None:
     if row.kind == "unexpected" and row.resolution == "rejected":
         _guest_access_invalidated_exc("Guest access was denied or revoked.")
 
-    if row.kind == "unexpected" and row.resolution == "pending":
+    if row.kind == "unexpected" and row.resolution == "pending" and not for_call:
         _guest_access_invalidated_exc("Guest access is not active.")
 
     if row.kind == "network_access" and row.resolution == "rejected":

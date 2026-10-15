@@ -368,6 +368,13 @@ async def _handle_call_frame(
                     guest_id=lookup_guest,
                 )
             return
+    if not call and message_type == "CALL_SYNC":
+        if is_guest and guest_id:
+            call = guest_call_service.active_call_for_guest(guest_id)
+        elif not is_guest and str(user_id).isdigit():
+            call = guest_call_service.active_call_for_admin(int(user_id))
+        if call is None:
+            return
     if not call:
         await websocket.send_json(
             {
@@ -395,6 +402,35 @@ async def _handle_call_frame(
         # Zone colleagues also receive the invite. The one who answers owns the call.
         if oid != call.admin_owner_id:
             call.admin_owner_id = oid
+
+    if message_type == "CALL_SYNC":
+        synced = call or (
+            guest_call_service.active_call_for_guest(guest_id)
+            if is_guest and guest_id
+            else None
+        )
+        if synced is None and not is_guest:
+            try:
+                synced = guest_call_service.active_call_for_admin(int(user_id))
+            except (TypeError, ValueError):
+                synced = None
+        if synced is None or synced.state not in ("ringing", "connected"):
+            return
+        if synced.state == "connected":
+            sync_type = "CALL_ACCEPT"
+        elif (is_guest and synced.caller_role == "guest") or (
+            not is_guest and synced.caller_role == "admin"
+        ):
+            sync_type = "CALL_STARTED"
+        else:
+            sync_type = "CALL_INVITE"
+        await websocket.send_json(
+            {
+                "type": sync_type,
+                "data": guest_call_service.public_call_payload(synced),
+            }
+        )
+        return
 
     if message_type == "CALL_ACCEPT":
         accepted, err = await guest_call_service.accept_call(call_id, accepter_role=role)
@@ -550,7 +586,7 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
         try:
             from app.services import guest_access_service as gas
 
-            gas.require_guest_bearer_session_active(db, guest_id=guest_id)
+            gas.require_guest_bearer_session_active(db, guest_id=guest_id, for_call=True)
         except HTTPException:
             await websocket.close(code=1008, reason="Guest access invalidated")
             return
