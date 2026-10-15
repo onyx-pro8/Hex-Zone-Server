@@ -446,11 +446,13 @@ async def enqueue_or_start(
         return call, None, err, promoted
 
 
-async def deliver_live_call(call: GuestCallSession, *, from_queue: bool = False) -> None:
-    """One event for the caller, one invite for the receiver.
+async def deliver_live_call(
+    call: GuestCallSession, *, from_queue: bool = False
+) -> tuple[int, int]:
+    """Send ``CALL_INVITE`` to the receiver and ``CALL_STARTED`` to the caller.
 
-    The caller already has the card open. ``CALL_STARTED`` only swaps in the
-    server id. ``CALL_INVITE`` is what shows the card on the other side.
+    Returns ``(invite_deliveries, started_deliveries)``. The caller card must
+    open only when the invite reached at least one live receiver socket.
     """
     from app.database import session_maker
     from app.services import guest_access_service as gas
@@ -464,18 +466,30 @@ async def deliver_live_call(call: GuestCallSession, *, from_queue: bool = False)
                 remember_watchers(call, gas.zone_member_owner_ids(db, call.zone_id))
             finally:
                 db.close()
-    call.admin_invited = True
     payload = public_call_payload(call, **({"from_queue": True} if from_queue else {}))
     if call.caller_role == "guest":
         receiver_ids = [token for token in call.watcher_ids if token and not token.startswith("guest:")]
         admin_id = str(call.admin_owner_id)
         if admin_id not in receiver_ids:
             receiver_ids.append(admin_id)
-        await ws_manager.broadcast_to_users(receiver_ids, "CALL_INVITE", payload)
-        await ws_manager.broadcast_to_users([f"guest:{call.guest_id}"], "CALL_STARTED", payload)
-        return
-    await ws_manager.broadcast_to_users([f"guest:{call.guest_id}"], "CALL_INVITE", payload)
-    await ws_manager.broadcast_to_users([str(call.admin_owner_id)], "CALL_STARTED", payload)
+        invited = await ws_manager.broadcast_to_users(receiver_ids, "CALL_INVITE", payload)
+        if invited <= 0:
+            return 0, 0
+        call.admin_invited = True
+        started = await ws_manager.broadcast_to_users(
+            [f"guest:{call.guest_id}"], "CALL_STARTED", payload
+        )
+        return invited, started
+    invited = await ws_manager.broadcast_to_users(
+        [f"guest:{call.guest_id}"], "CALL_INVITE", payload
+    )
+    if invited <= 0:
+        return 0, 0
+    call.admin_invited = True
+    started = await ws_manager.broadcast_to_users(
+        [str(call.admin_owner_id)], "CALL_STARTED", payload
+    )
+    return invited, started
 
 
 async def _promote_holding_lock() -> list[GuestCallSession]:

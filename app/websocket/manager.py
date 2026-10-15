@@ -104,7 +104,8 @@ class WebSocketManager:
 
     async def broadcast_to_users(
         self, user_ids: list[int | str], event_type: str, payload: dict
-    ) -> None:
+    ) -> int:
+        """Send to matching sockets. Returns how many sockets accepted the frame."""
         user_id_set = {str(item) for item in user_ids}
         async with self._lock:
             recipients = [
@@ -112,24 +113,27 @@ class WebSocketManager:
                 for state in self._connections.values()
                 if state.user_id in user_id_set
             ]
-        await self._broadcast(recipients, event_type, payload)
+        return await self._broadcast(recipients, event_type, payload)
 
     async def _snapshot_connections(self) -> list[ConnectionState]:
         async with self._lock:
             return list(self._connections.values())
 
-    async def _broadcast(self, recipients: list[ConnectionState], event_type: str, payload: dict) -> None:
+    async def _broadcast(self, recipients: list[ConnectionState], event_type: str, payload: dict) -> int:
         dead_connection_ids: list[str] = []
+        delivered = 0
         message = {"type": event_type, "data": payload}
         for state in recipients:
             try:
                 await state.websocket.send_json(message)
+                delivered += 1
             except Exception:
                 logger.exception("Failed sending websocket message: connection_id=%s", state.connection_id)
                 dead_connection_ids.append(state.connection_id)
 
         for connection_id in dead_connection_ids:
             await self.disconnect(connection_id)
+        return delivered
 
     async def get_connection_count(self) -> int:
         async with self._lock:

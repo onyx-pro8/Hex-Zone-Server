@@ -136,7 +136,9 @@ async def _announce_queued(item: guest_call_service.QueuedCallRequest) -> None:
 
 async def _broadcast_promoted(started: list[guest_call_service.GuestCallSession]) -> None:
     for call in started:
-        await guest_call_service.deliver_live_call(call, from_queue=True)
+        invited, _started = await guest_call_service.deliver_live_call(call, from_queue=True)
+        if invited <= 0:
+            await guest_call_service.end_call(call.call_id, reason="cancel", closer_role="system")
 
 
 async def _finish_call_end(
@@ -229,18 +231,55 @@ async def _handle_call_frame(
                 return
             if err == "CALL_ALREADY_ACTIVE":
                 existing = guest_call_service.active_call_for_guest(guest_id)
-                if existing is not None and existing.state in ("ringing", "connected"):
-                    replay = "CALL_ACCEPT" if existing.state == "connected" else "CALL_STARTED"
+                if existing is not None and existing.state == "connected":
                     await websocket.send_json(
                         {
-                            "type": replay,
+                            "type": "CALL_ACCEPT",
+                            "data": guest_call_service.public_call_payload(existing),
+                        }
+                    )
+                    return
+                if existing is not None and existing.state == "ringing":
+                    guest_call_service.remember_watchers(existing, member_ids)
+                    invited, _started = await guest_call_service.deliver_live_call(existing)
+                    if invited <= 0:
+                        await guest_call_service.end_call(
+                            existing.call_id, reason="cancel", closer_role="system"
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "ERROR",
+                                "error": {
+                                    "message": "The administrator is offline.",
+                                    "error_code": "RECEIVER_OFFLINE",
+                                },
+                            }
+                        )
+                        return
+                    await websocket.send_json(
+                        {
+                            "type": "CALL_STARTED",
                             "data": guest_call_service.public_call_payload(existing),
                         }
                     )
                     return
             if call is not None and err is None:
                 guest_call_service.remember_watchers(call, member_ids)
-                await guest_call_service.deliver_live_call(call)
+                invited, _started = await guest_call_service.deliver_live_call(call)
+                if invited <= 0:
+                    await guest_call_service.end_call(
+                        call.call_id, reason="cancel", closer_role="system"
+                    )
+                    await websocket.send_json(
+                        {
+                            "type": "ERROR",
+                            "error": {
+                                "message": "The administrator is offline.",
+                                "error_code": "RECEIVER_OFFLINE",
+                            },
+                        }
+                    )
+                    return
                 await websocket.send_json(
                     {
                         "type": "CALL_STARTED",
@@ -302,6 +341,39 @@ async def _handle_call_frame(
             if queued is not None and err is None:
                 await _announce_queued(queued)
                 return
+        if err == "CALL_ALREADY_ACTIVE":
+            existing = guest_call_service.active_call_for_guest(target_guest)
+            if existing is not None and existing.state == "connected":
+                await websocket.send_json(
+                    {
+                        "type": "CALL_ACCEPT",
+                        "data": guest_call_service.public_call_payload(existing),
+                    }
+                )
+                return
+            if existing is not None and existing.state == "ringing":
+                invited, _started = await guest_call_service.deliver_live_call(existing)
+                if invited <= 0:
+                    await guest_call_service.end_call(
+                        existing.call_id, reason="cancel", closer_role="system"
+                    )
+                    await websocket.send_json(
+                        {
+                            "type": "ERROR",
+                            "error": {
+                                "message": "The guest is offline.",
+                                "error_code": "RECEIVER_OFFLINE",
+                            },
+                        }
+                    )
+                    return
+                await websocket.send_json(
+                    {
+                        "type": "CALL_STARTED",
+                        "data": guest_call_service.public_call_payload(existing),
+                    }
+                )
+                return
         if err or call is None:
             await websocket.send_json(
                 {
@@ -313,7 +385,21 @@ async def _handle_call_frame(
                 }
             )
             return
-        await guest_call_service.deliver_live_call(call)
+        invited, _started = await guest_call_service.deliver_live_call(call)
+        if invited <= 0:
+            await guest_call_service.end_call(
+                call.call_id, reason="cancel", closer_role="system"
+            )
+            await websocket.send_json(
+                {
+                    "type": "ERROR",
+                    "error": {
+                        "message": "The guest is offline.",
+                        "error_code": "RECEIVER_OFFLINE",
+                    },
+                }
+            )
+            return
         await websocket.send_json(
             {
                 "type": "CALL_STARTED",
