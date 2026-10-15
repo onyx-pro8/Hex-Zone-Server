@@ -323,13 +323,41 @@ async def _handle_call_frame(
         return
 
     call_id = str(body.get("call_id") or "").strip()
+    if not call_id and message_type == "CALL_SYNC":
+        # Pending local cards have no server id yet — resolve by guest.
+        lookup_guest = guest_id if is_guest else str(body.get("guest_id") or "").strip()
+        synced = (
+            guest_call_service.active_call_for_guest(lookup_guest)
+            if lookup_guest
+            else None
+        )
+        if synced is None and not is_guest and str(user_id).isdigit():
+            synced = guest_call_service.active_call_for_admin(int(user_id))
+        if synced is None or synced.state not in ("ringing", "connected"):
+            # No live call yet (invite still in flight) — keep the local pending card.
+            return
+        if synced.state == "connected":
+            sync_type = "CALL_ACCEPT"
+        elif (is_guest and synced.caller_role == "guest") or (
+            not is_guest and synced.caller_role == "admin"
+        ):
+            sync_type = "CALL_STARTED"
+        else:
+            sync_type = "CALL_INVITE"
+        await websocket.send_json(
+            {
+                "type": sync_type,
+                "data": guest_call_service.public_call_payload(synced),
+            }
+        )
+        return
     if not call_id:
         await websocket.send_json(
             {"type": "ERROR", "error": {"message": "call_id is required"}}
         )
         return
     call = guest_call_service.get_call(call_id)
-    if not call and message_type in ("CALL_CANCEL", "CALL_REJECT", "CALL_END"):
+    if not call and message_type in ("CALL_CANCEL", "CALL_REJECT", "CALL_END", "CALL_SYNC"):
         # Optimistic cards use a local pending id. End the real call for that guest.
         lookup_guest = guest_id if is_guest else str(body.get("guest_id") or "").strip()
         if lookup_guest:
@@ -379,24 +407,52 @@ async def _handle_call_frame(
                     guest_id=removed.guest_id,
                 )
             return
-        if (
-            message_type in ("CALL_CANCEL", "CALL_REJECT")
-            and lookup_guest
-            and bool(body.get("access_reject_escalation"))
-        ):
+        if message_type in ("CALL_CANCEL", "CALL_REJECT"):
             zone_for_close = str(body.get("zone_id") or "").strip()
-            if zone_for_close:
+            auto_close = bool(body.get("access_reject_escalation")) and bool(lookup_guest)
+            if auto_close and zone_for_close:
                 await guest_call_service.auto_close_escalated_access(
                     zone_id=zone_for_close,
                     guest_id=lookup_guest,
                 )
+            # No live call. Still tell the requester so their card closes.
+            await websocket.send_json(
+                {
+                    "type": "CALL_CANCEL",
+                    "data": {
+                        "call_id": call_id,
+                        "guest_id": lookup_guest or "",
+                        "zone_id": zone_for_close,
+                        "state": "ended",
+                        "reason": "cancel",
+                        "auto_close_access": auto_close,
+                    },
+                }
+            )
             return
     if not call and message_type == "CALL_SYNC":
+        lookup_guest = guest_id if is_guest else str(body.get("guest_id") or "").strip()
         if is_guest and guest_id:
             call = guest_call_service.active_call_for_guest(guest_id)
         elif not is_guest and str(user_id).isdigit():
             call = guest_call_service.active_call_for_admin(int(user_id))
+        if call is None and lookup_guest:
+            call = guest_call_service.active_call_for_guest(lookup_guest)
         if call is None:
+            # Client still shows ringing after the call already ended.
+            if call_id and not call_id.startswith("pending-") and not call_id.startswith("queue-"):
+                await websocket.send_json(
+                    {
+                        "type": "CALL_END",
+                        "data": {
+                            "call_id": call_id,
+                            "guest_id": lookup_guest or "",
+                            "zone_id": str(body.get("zone_id") or "").strip(),
+                            "state": "ended",
+                            "reason": "hangup",
+                        },
+                    }
+                )
             return
     if not call:
         await websocket.send_json(
