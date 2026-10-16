@@ -623,13 +623,18 @@ async def _handle_call_frame(
             signal=signal,
             from_role=role,
         )
-        # Relay only to the other party.
-        other = (
-            [str(call.admin_owner_id)]
-            if is_guest
-            else [f"guest:{call.guest_id}"]
-        )
-        await ws_manager.broadcast_to_users(other, "CALL_SIGNAL", payload)
+        targets = [
+            token
+            for token in guest_call_service.party_user_ids(call)
+            if token and token != (f"guest:{guest_id}" if is_guest else str(user_id))
+        ]
+        if not targets:
+            targets = (
+                [str(call.admin_owner_id)]
+                if is_guest
+                else [f"guest:{call.guest_id}"]
+            )
+        await ws_manager.broadcast_to_users(targets, "CALL_SIGNAL", payload)
         return
 
     if message_type in ("CALL_REJECT", "CALL_CANCEL", "CALL_END"):
