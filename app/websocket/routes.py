@@ -28,6 +28,7 @@ them to the other party. Auth: member JWT (**`sub`** = owner id) or guest JWT
 import json
 import asyncio
 import logging
+import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -42,6 +43,7 @@ from app.websocket.manager import ws_manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_last_audio_log = 0.0
 
 
 def _coords_from_frame(data: dict) -> tuple[float, float] | None:
@@ -618,6 +620,18 @@ async def _handle_call_frame(
                 {"type": "ERROR", "error": {"message": "signal object is required"}}
             )
             return
+        if str(signal.get("kind") or "") == "audio":
+            global _last_audio_log
+            now = time.monotonic()
+            if now - _last_audio_log >= 1.0:
+                _last_audio_log = now
+                logger.info(
+                    "CALL_SIGNAL audio from=%s call_id=%s level=%s bytes=%s",
+                    role,
+                    call.call_id,
+                    signal.get("level"),
+                    len(str(signal.get("b64") or "")),
+                )
         payload = guest_call_service.public_call_payload(
             call,
             signal=signal,
