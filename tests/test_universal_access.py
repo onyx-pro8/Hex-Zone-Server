@@ -117,6 +117,15 @@ def test_approved_code_shows_other_network_primary_zone(db):
     assert created["status"] == "pending"
     assert created["email"] == member.email
 
+    from app.services.guest_api_service import list_zone_permission_events_for_owner_feed
+
+    system_feed = list_zone_permission_events_for_owner_feed(db, owner=system_admin)
+    assert any("Universal access code requested" in row.text for row in system_feed)
+    admin_feed = list_zone_permission_events_for_owner_feed(db, owner=admin)
+    assert any("Universal access code requested" in row.text for row in admin_feed)
+    member_feed = list_zone_permission_events_for_owner_feed(db, owner=member)
+    assert all("Universal access code requested" not in row.text for row in member_feed)
+
     approved = universal_access_service.approve_request(
         db,
         caller=system_admin,

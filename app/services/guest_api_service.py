@@ -20,6 +20,7 @@ from app.domain.permission_visibility import PERMISSION_VISIBILITY_ZONE_PENDING_
 from app.models import Device, GuestAccessSession, Owner, Zone, ZoneMessageEvent
 from app.services import message_block_service
 from app.services.access_policy import zone_listing_owner_ids
+from app.services.account_type_policy import is_system_administrator
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
 from app.services.private_plus_messaging import geo_event_visible_in_private_plus_shared_inbox
@@ -174,6 +175,13 @@ def merged_inbox_permission_event_visible(db: Session, viewer: Owner, row: ZoneM
     if not zid:
         return False
     meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+    # Universal access requests are filed on a network id that may not be a zone
+    # record. System administrators listed on the event still see the history row.
+    if meta.get("flow") == "universal_access_request":
+        delivered = meta.get("delivered_owner_ids") or []
+        if isinstance(delivered, list) and viewer.id in delivered:
+            return True
+        return viewer.id == row.sender_id or viewer.id == row.receiver_id
     # Guest schedule lifecycle: all zone managers + participants in delivered_owner_ids.
     if meta.get("flow") == "guest_schedule_lifecycle":
         delivered = meta.get("delivered_owner_ids") or []
@@ -289,23 +297,42 @@ def list_zone_permission_events_for_owner_feed(
     """Recent **`PERMISSION`** zone events for zones this owner may administer (guest access feed)."""
 
     zonable = manageable_zone_ids_for_permission_inbox(db, owner)
-    if not zonable:
-        return []
-    chunk = tuple(sorted(zonable))
-    rows = (
-        db.query(ZoneMessageEvent)
-        .filter(
-            ZoneMessageEvent.zone_id.in_(chunk),
-            ZoneMessageEvent.type == CanonicalMessageType.PERMISSION.value,
-        )
-        .order_by(ZoneMessageEvent.created_at.desc())
-        .limit(max(1, min(int(max_scan), 8000)))
-        .all()
-    )
     visible: list[ZoneMessageEvent] = []
+    seen: set[str] = set()
+    if zonable:
+        chunk = tuple(sorted(zonable))
+        rows = (
+            db.query(ZoneMessageEvent)
+            .filter(
+                ZoneMessageEvent.zone_id.in_(chunk),
+                ZoneMessageEvent.type == CanonicalMessageType.PERMISSION.value,
+            )
+            .order_by(ZoneMessageEvent.created_at.desc())
+            .limit(max(1, min(int(max_scan), 8000)))
+            .all()
+        )
+    else:
+        rows = []
     for row in rows:
         if merged_inbox_permission_event_visible(db, owner, row):
             visible.append(row)
+            seen.add(row.id)
+    if is_system_administrator(owner):
+        extra = (
+            db.query(ZoneMessageEvent)
+            .filter(ZoneMessageEvent.type == CanonicalMessageType.PERMISSION.value)
+            .order_by(ZoneMessageEvent.created_at.desc())
+            .limit(max(1, min(int(max_scan), 8000)))
+            .all()
+        )
+        for row in extra:
+            if row.id in seen:
+                continue
+            meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+            if meta.get("flow") != "universal_access_request":
+                continue
+            if merged_inbox_permission_event_visible(db, owner, row):
+                visible.append(row)
     return visible
 
 

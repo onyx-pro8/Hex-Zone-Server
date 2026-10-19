@@ -37,13 +37,13 @@ def _caller(db: Session, current_user: dict):
 
 
 @router.post("/requests")
-def create_universal_access_request(
+async def create_universal_access_request(
     body: UniversalAccessCreate,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     caller = _caller(db, current_user)
-    return universal_access_service.create_request(
+    created = universal_access_service.create_request(
         db,
         admin=caller,
         member_id=body.member_id,
@@ -54,6 +54,10 @@ def create_universal_access_request(
         city=body.city,
         note=body.note,
     )
+    notice_event_id = created.pop("notice_event_id", None)
+    if notice_event_id:
+        await universal_access_service.notify_system_admins_of_request(db, str(notice_event_id))
+    return created
 
 
 @router.get("/requests")

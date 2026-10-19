@@ -1,6 +1,7 @@
 """Universal access codes: request, approve, enable, and zone visibility."""
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime
 from typing import Any
@@ -8,15 +9,19 @@ from typing import Any
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, defer
 
-from app.models.owner import Owner
+from app.domain.message_types import CanonicalMessageType, type_category, type_scope
+from app.models.owner import Owner, OwnerRole
 from app.models.universal_access import (
     UniversalAccessCredential,
     UniversalAccessRequest,
     UniversalAccessStatus,
 )
 from app.models.zone import Zone
+from app.models.zone_message_event import ZoneMessageEvent
 from app.services.access_policy import messaging_visible_owner_ids
 from app.services.account_type_policy import is_system_administrator
+
+logger = logging.getLogger(__name__)
 
 _MAX_PHOTO_CHARS = 1_500_000
 _MAX_UNIVERSAL_ZONES = 200
@@ -205,9 +210,129 @@ def create_request(
         status=UniversalAccessStatus.PENDING,
     )
     db.add(row)
+    db.flush()
+    notice = _record_request_notice(db, row, admin)
     db.commit()
     db.refresh(row)
-    return _request_row(db, row, include_photo=True)
+    payload = _request_row(db, row, include_photo=True)
+    if notice is not None:
+        payload["notice_event_id"] = notice.id
+    return payload
+
+
+def _system_admin_ids(db: Session) -> list[int]:
+    rows = (
+        db.query(Owner)
+        .filter(Owner.role == OwnerRole.ADMINISTRATOR, Owner.active.is_(True))
+        .all()
+    )
+    return [row.id for row in rows if is_system_administrator(row)]
+
+
+def _record_request_notice(
+    db: Session,
+    row: UniversalAccessRequest,
+    admin: Owner,
+) -> ZoneMessageEvent | None:
+    """Persist a PERMISSION history row for system administrators.
+
+    The photo stays on the request. The inbox line is the same kind of access
+    history a guest permission leaves behind.
+    """
+    targets = _system_admin_ids(db)
+    if not targets:
+        return None
+    place = _place_label(row.country, row.region, row.city)
+    text = f"Universal access code requested for {row.member_name} ({place})."
+    event = ZoneMessageEvent(
+        zone_id=(admin.zone_id or "").strip() or "universal-access",
+        sender_id=admin.id,
+        receiver_id=targets[0],
+        type=CanonicalMessageType.PERMISSION.value,
+        category=type_category(CanonicalMessageType.PERMISSION),
+        scope=type_scope(CanonicalMessageType.PERMISSION),
+        text=text,
+        body_json={
+            "code": "UNIVERSAL_ACCESS_REQUESTED",
+            "universal_access_request_id": row.id,
+            "member_id": row.member_id,
+            "member_name": row.member_name,
+            "place": place,
+            "note": row.note or "",
+        },
+        metadata_json={
+            "flow": "universal_access_request",
+            "permission_visibility": "direct",
+            "universal_access_request_id": row.id,
+            "delivered_owner_ids": targets,
+            "sender_message": {"code": "UNIVERSAL_ACCESS_REQUESTED", "text": text},
+            "member_message": {"code": "UNIVERSAL_ACCESS_REQUESTED", "text": text},
+        },
+    )
+    db.add(event)
+    db.flush()
+    return event
+
+
+async def notify_system_admins_of_request(db: Session, event_id: str) -> None:
+    """Push, inbox socket, and smart-hub webhook. Failures do not undo the request."""
+    event = db.get(ZoneMessageEvent, event_id)
+    if event is None:
+        return
+    meta = event.metadata_json if isinstance(event.metadata_json, dict) else {}
+    targets = [
+        int(owner_id)
+        for owner_id in (meta.get("delivered_owner_ids") or [])
+        if isinstance(owner_id, int) and not isinstance(owner_id, bool)
+    ]
+    if not targets:
+        return
+    try:
+        from app.services import push_notification_service, smart_home_webhook_service
+        from app.services.guest_api_service import zone_message_event_to_member_zone_message_response
+        from app.websocket.manager import ws_manager
+
+        payload = zone_message_event_to_member_zone_message_response(
+            event,
+            db=db,
+            viewer_owner_id=targets[0],
+        ).model_dump(mode="json")
+        await ws_manager.broadcast_to_users(targets, "NEW_MESSAGE", payload)
+        await push_notification_service.send_plain_push_to_owners(
+            db,
+            targets,
+            title="Universal access request",
+            body=(event.text or "A network requested a universal access code.")[:240],
+            data={
+                "event": "NEW_MESSAGE",
+                "type": "PERMISSION",
+                "id": str(event.id),
+                "zone_id": str(event.zone_id or ""),
+            },
+        )
+        zone = str(event.zone_id or "").strip()
+        webhook_payload = {
+            "type": CanonicalMessageType.PERMISSION.value,
+            "text": event.text,
+            "sender_id": event.sender_id,
+            "zone_id": zone,
+            "delivered_owner_ids": targets,
+            "metadata": {
+                "sender_network_id": zone,
+                "flow": "universal_access_request",
+            },
+        }
+        webhook_stats = await smart_home_webhook_service.send_smart_home_webhooks(
+            db,
+            targets,
+            webhook_payload,
+            require_pushable=False,
+        )
+        await smart_home_webhook_service.notify_smart_home_webhook_owners(
+            list(webhook_stats.get("webhook_owner_results") or [])
+        )
+    except Exception:
+        logger.exception("Universal access request notice failed for event %s", event_id)
 
 
 def list_requests(db: Session, *, caller: Owner) -> list[dict[str, Any]]:

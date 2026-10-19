@@ -1066,9 +1066,17 @@ async def get_zone_capabilities(
     return ZoneCapabilitiesResponse.model_validate(capabilities_for_owner(db, owner).to_dict())
 
 
-class ZoneSizeLimitsUpdate(BaseModel):
+class ZoneSizeLimitRule(BaseModel):
+    account_type: str
+    role: str
     each_zone_m2: Optional[float] = None
+    each_unit: str = "km2"
     total_m2: Optional[float] = None
+    total_unit: str = "km2"
+
+
+class ZoneSizeLimitsUpdate(BaseModel):
+    rules: list[ZoneSizeLimitRule]
 
 
 @router.get("/area-budget", summary="Remaining zone area for this account")
@@ -1087,7 +1095,28 @@ async def get_zone_area_budget(
     return payload
 
 
-@router.put("/area-limits", summary="Set the platform zone size limits")
+@router.get("/area-limits", summary="Zone size limits for every account type and role")
+async def get_zone_area_limits(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    from app.services.account_type_policy import is_system_administrator
+    from app.services.zone_area import list_rules
+
+    if not is_system_administrator(owner):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the system administrator can read zone size limits.",
+        )
+    payload = {"rules": list_rules(db)}
+    db.commit()
+    return payload
+
+
+@router.put("/area-limits", summary="Set zone size limits per account type and role")
 async def put_zone_area_limits(
     body: ZoneSizeLimitsUpdate,
     current_user: dict = Depends(get_current_user),
@@ -1098,12 +1127,7 @@ async def put_zone_area_limits(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
     from app.services.zone_area import set_limits
 
-    return set_limits(
-        db,
-        owner,
-        each_zone_m2=body.each_zone_m2,
-        total_m2=body.total_m2,
-    )
+    return set_limits(db, owner, rules=[rule.model_dump() for rule in body.rules])
 
 
 def _resolve_dynamic_cluster_for_owner(
