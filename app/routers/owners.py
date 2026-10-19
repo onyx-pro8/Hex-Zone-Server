@@ -333,6 +333,39 @@ async def get_owner_avatar(
 
 
 @router.get(
+    "/network-admins",
+    response_model=list[OwnerListResponse],
+    summary="List network administrators on every network",
+    description=(
+        "System administrator only. Returns every administrator who is not the "
+        "system administrator, across family, Enhanced, and Organization networks."
+    ),
+)
+async def list_network_admins(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    caller = owner_crud.get_owner(db, current_user["user_id"])
+    if not caller:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Caller not found")
+    if not is_system_administrator(caller):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the system administrator can list network administrators.",
+        )
+    from app.models.owner import Owner, OwnerRole
+
+    rows = (
+        db.query(Owner)
+        .filter(Owner.role == OwnerRole.ADMINISTRATOR)
+        .order_by(Owner.id.asc())
+        .all()
+    )
+    visible = [row for row in rows if not is_system_administrator(row)]
+    return [OwnerListResponse.model_validate(row) for row in visible]
+
+
+@router.get(
     "/{owner_id}",
     response_model=OwnerDetailResponse,
     summary="Get owner by id",

@@ -27,6 +27,7 @@ from app.models.universal_access import (
     UniversalAccessRequest,
     UniversalAccessStatus,
 )
+from app.models.hub_command import HubCommand
 
 __all__ = [
     "Owner",
@@ -56,4 +57,5 @@ __all__ = [
     "UniversalAccessRequest",
     "UniversalAccessCredential",
     "UniversalAccessStatus",
+    "HubCommand",
 ]

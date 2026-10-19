@@ -1,5 +1,6 @@
 """Router for Device endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -422,3 +423,35 @@ async def delete_device(
             detail="Device not found",
         )
     db.commit()
+
+
+class HubCommandRequest(BaseModel):
+    hid: str = Field(..., min_length=1, max_length=255)
+    command: str = Field(..., min_length=1, max_length=16)
+
+
+@router.get("/hub-commands", summary="Recent smart-hub commands for this network admin")
+def list_my_hub_commands(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    from app.services.hub_command_service import list_hub_commands
+
+    return list_hub_commands(db, owner)
+
+
+@router.post("/hub-commands", summary="Send arm, disarm, or status to this account's hub")
+def post_hub_command(
+    body: HubCommandRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    from app.services.hub_command_service import send_hub_command
+
+    return send_hub_command(db, owner, hid=body.hid, command=body.command)
