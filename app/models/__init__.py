@@ -22,6 +22,11 @@ from app.models.wellness_recipient_ask import WellnessRecipientAsk
 from app.models.wellness_sender_reply import WellnessSenderReply
 from app.models.alarm_message_read import AlarmMessageRead
 from app.models.emergency_event import EmergencyEvent
+from app.models.universal_access import (
+    UniversalAccessCredential,
+    UniversalAccessRequest,
+    UniversalAccessStatus,
+)
 
 __all__ = [
     "Owner",
@@ -48,4 +53,7 @@ __all__ = [
     "WellnessSenderReply",
     "AlarmMessageRead",
     "EmergencyEvent",
+    "UniversalAccessRequest",
+    "UniversalAccessCredential",
+    "UniversalAccessStatus",
 ]

@@ -678,6 +678,17 @@ def _owner_display_name(owner: Owner | None) -> str | None:
     return label or None
 
 
+def _merge_universal_primary_zones(db: Session, caller, zones: list) -> list:
+    """Add other networks' primary zones that sit in the caller's enabled places."""
+    from app.services.universal_access_service import universal_primary_zones
+
+    already = {int(zone.id) for zone in zones}
+    extra = universal_primary_zones(db, caller, already_ids=already)
+    if not extra:
+        return zones
+    return [*zones, *extra]
+
+
 def _owners_by_ids(db: Session, owner_ids: set[int]) -> dict[int, Owner]:
     ids = {int(oid) for oid in owner_ids if oid is not None}
     if not ids:
@@ -698,6 +709,8 @@ def _serialize_zone(
     config = params.get("config") if isinstance(params.get("config"), dict) else {}
     config = dict(config)
 
+    if getattr(zone, "shared_via_universal", False):
+        config["universal_access"] = True
     if "h3Cells" in config and "h3_cells" not in config:
         config["h3_cells"] = config["h3Cells"]
     if zone.h3_cells and "h3_cells" not in config:
@@ -987,6 +1000,7 @@ async def list_zones(
                 if zone_is_primary(zone) or int(zone.creator_id) == int(caller.id)
             ]
         zones, shared_ids = _merge_communal_shared_zones(db, caller, zones)
+        zones = _merge_universal_primary_zones(db, caller, zones)
         return [
             ZoneContractResponse.model_validate(row)
             for row in _serialize_zones(db, zones, shared_ids=shared_ids)
@@ -1016,6 +1030,7 @@ async def list_zones(
     # Network-scoped zones plus any zones shared into this network via Communal
     # IDs minted by this network's administrators (not counted toward quota).
     zones, shared_ids = _merge_communal_shared_zones(db, caller, zones)
+    zones = _merge_universal_primary_zones(db, caller, zones)
 
     return [
         ZoneContractResponse.model_validate(row)

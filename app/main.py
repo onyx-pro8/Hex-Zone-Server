@@ -8,7 +8,18 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.database import init_db, patch_owner_location_columns, patch_registration_code_email_columns
-from app.routers import access, app_links, devices, guest, message_feature, messages, owners, utils, zones
+from app.routers import (
+    access,
+    app_links,
+    devices,
+    guest,
+    message_feature,
+    messages,
+    owners,
+    universal_access,
+    utils,
+    zones,
+)
 from app.routes.contract_routes import router as contract_router
 from app.utils.api_response import error_response
 from app.websocket.routes import router as websocket_router
@@ -417,6 +428,7 @@ async def handle_http_error(request: Request, exc: HTTPException) -> JSONRespons
 app.include_router(owners.router)
 app.include_router(devices.router)
 app.include_router(zones.router)
+app.include_router(universal_access.router)
 app.include_router(messages.router)
 app.include_router(utils.router)
 app.include_router(message_feature.router)
