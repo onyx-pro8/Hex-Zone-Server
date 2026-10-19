@@ -423,11 +423,6 @@ def reject_request(
             detail="This request was already reviewed.",
         )
     cleaned = _clean(reason, limit=500)
-    if not cleaned:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="A reject reason is required.",
-        )
     row.status = UniversalAccessStatus.REJECTED
     row.reject_reason = cleaned
     row.reviewed_by_id = caller.id

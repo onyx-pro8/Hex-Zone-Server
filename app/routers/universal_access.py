@@ -22,7 +22,7 @@ class UniversalAccessCreate(BaseModel):
 
 
 class UniversalAccessReject(BaseModel):
-    reason: str = Field(..., min_length=1, max_length=500)
+    reason: str = Field("", max_length=500)
 
 
 class UniversalAccessEnabled(BaseModel):
