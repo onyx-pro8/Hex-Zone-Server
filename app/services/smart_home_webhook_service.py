@@ -391,9 +391,9 @@ async def send_smart_home_webhooks(
     - has a valid ``sn_webhook``
 
     When ``require_pushable`` is True (default), non-geo types such as
-    ``PERMISSION`` are skipped. Guest-pass auto-approval may pass
-    ``require_pushable=False`` so hubs still get the arrival notice while
-    mobile alarm-push rules stay unchanged.
+    ``PERMISSION`` and ``SERVICE`` are skipped. Guest-pass auto-approval and
+    member-invite QR joins may pass ``require_pushable=False`` so hubs still
+    get that notice while mobile alarm-push rules stay unchanged.
 
     Returns aggregate counts plus ``webhook_owner_results`` for per-user toasts.
     Never raises.

@@ -709,7 +709,7 @@ async def join_with_qr(
         qr_crud.mark_qr_registration_used(db, qr.token)
     db.commit()
 
-    welcome = await notify_members_of_new_join(db, new_owner)
+    welcome = await notify_members_of_new_join(db, new_owner, notify_admin_hub=True)
     return QRJoinOwnerResponse(
         **OwnerResponse.model_validate(new_owner).model_dump(),
         join_welcome_message=welcome,

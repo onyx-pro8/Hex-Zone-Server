@@ -76,8 +76,53 @@ def _message_to_response(db_message, *, zone_id: str, sender: Owner) -> ZoneMess
     )
 
 
-async def notify_members_of_new_join(db: Session, new_owner: Owner) -> str | None:
+async def _notify_admin_smart_home(
+    db: Session,
+    *,
+    admin: Owner,
+    welcome_text: str,
+) -> None:
+    """POST the welcome to the network admin's registered hub, if one is configured.
+
+    Uses the same webhook body as geo and guest-arrival notices. A missing hub
+    or webhook URL is skipped and never fails the join.
+    """
+    from app.services import smart_home_webhook_service
+
+    network_id = (admin.zone_id or "").strip()
+    webhook_payload = {
+        "type": CanonicalMessageType.SERVICE.value,
+        "text": welcome_text,
+        "sender_id": admin.id,
+        "zone_id": network_id,
+        "delivered_owner_ids": [admin.id],
+        "metadata": {
+            "sender_network_id": network_id,
+            "flow": "member_invite_qr_join",
+            "sender_relevant_zone": {"label": network_id} if network_id else {},
+        },
+    }
+    stats = await smart_home_webhook_service.send_smart_home_webhooks(
+        db,
+        [admin.id],
+        webhook_payload,
+        require_pushable=False,
+    )
+    await smart_home_webhook_service.notify_smart_home_webhook_owners(
+        list(stats.get("webhook_owner_results") or [])
+    )
+
+
+async def notify_members_of_new_join(
+    db: Session,
+    new_owner: Owner,
+    *,
+    notify_admin_hub: bool = False,
+) -> str | None:
     """Post a zone-wide SERVICE welcome and push it to members (including the joiner).
+
+    When ``notify_admin_hub`` is true (member invite QR redemption), the same
+    welcome is also sent to the network administrator's smart home device.
 
     Returns the rendered welcome text when a message was sent, otherwise ``None``.
     """
@@ -112,4 +157,6 @@ async def notify_members_of_new_join(db: Session, new_owner: Owner) -> str | Non
         admin.zone_id,
         recipient_ids,
     )
+    if notify_admin_hub:
+        await _notify_admin_smart_home(db, admin=admin, welcome_text=welcome_text)
     return welcome_text

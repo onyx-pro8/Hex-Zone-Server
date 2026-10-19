@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -143,6 +144,57 @@ async def test_user_register_notifies_admin(test_db, override_get_db):
         assert admin_messages.status_code == 200
         expected = f"Welcome! Registered User has joined the {zone_id}."
         assert expected in [row["message"] for row in admin_messages.json()]
+
+
+@pytest.mark.asyncio
+async def test_qr_join_notifies_admin_smart_home(test_db, override_get_db):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        zone_id = f"zone-mjw-hub-{uuid.uuid4().hex[:8]}"
+        admin_id, admin_token = await _register_admin(client, zone_id=zone_id)
+
+        generate = await client.post(
+            "/utils/qr/generate",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"expires_in_hours": 24},
+        )
+        assert generate.status_code == 200
+        token = generate.json()["token"]
+
+        with (
+            patch(
+                "app.services.smart_home_webhook_service.send_smart_home_webhooks",
+                new_callable=AsyncMock,
+                return_value={"webhook_owner_results": []},
+            ) as send_webhooks,
+            patch(
+                "app.services.smart_home_webhook_service.notify_smart_home_webhook_owners",
+                new_callable=AsyncMock,
+            ) as notify_owners,
+        ):
+            join = await client.post(
+                "/utils/qr/join",
+                json={
+                    "token": token,
+                    "email": f"mjw-hub-{uuid.uuid4().hex[:8]}@example.com",
+                    "first_name": "Hub",
+                    "last_name": "Member",
+                    "password": "SecurePassword123",
+                    "address": "Member Address",
+                },
+            )
+
+        assert join.status_code == 200, join.text
+        send_webhooks.assert_awaited_once()
+        args, kwargs = send_webhooks.await_args
+        assert args[1] == [admin_id]
+        payload = args[2]
+        assert payload["type"] == "SERVICE"
+        assert payload["text"] == f"Welcome! Hub Member has joined the {zone_id}."
+        assert payload["delivered_owner_ids"] == [admin_id]
+        assert payload["metadata"]["flow"] == "member_invite_qr_join"
+        assert payload["metadata"]["sender_relevant_zone"]["label"] == zone_id
+        assert kwargs["require_pushable"] is False
+        notify_owners.assert_awaited_once()
 
 
 def test_render_member_join_welcome_default():
