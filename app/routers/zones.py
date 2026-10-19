@@ -896,6 +896,15 @@ async def create_zone(
     model_zone_type = CANONICAL_TO_MODEL_ZONE_TYPE[zone_type]
     h3_cells = _extract_h3_cells(config)
     geo_fence_polygon = _extract_geo_fence_polygon(geometry)
+    from app.services.zone_area import enforce_zone_area
+
+    enforce_zone_area(
+        db,
+        owner,
+        geometry=geometry,
+        config=config,
+        h3_cells=h3_cells,
+    )
 
     # Defining zones are public by default so they can be shared via Communal IDs.
     if zone_type not in {"communal_id", "custom_1"}:
@@ -1055,6 +1064,46 @@ async def get_zone_capabilities(
             detail={"message": "Owner not found", "error_code": "OWNER_NOT_FOUND"},
         )
     return ZoneCapabilitiesResponse.model_validate(capabilities_for_owner(db, owner).to_dict())
+
+
+class ZoneSizeLimitsUpdate(BaseModel):
+    each_zone_m2: Optional[float] = None
+    total_m2: Optional[float] = None
+
+
+@router.get("/area-budget", summary="Remaining zone area for this account")
+async def get_zone_area_budget(
+    exclude_zone_id: Optional[int] = Query(None, ge=1),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    from app.services.zone_area import budget_for
+
+    payload = budget_for(db, owner, exclude_zone_id=exclude_zone_id)
+    db.commit()
+    return payload
+
+
+@router.put("/area-limits", summary="Set the platform zone size limits")
+async def put_zone_area_limits(
+    body: ZoneSizeLimitsUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    from app.services.zone_area import set_limits
+
+    return set_limits(
+        db,
+        owner,
+        each_zone_m2=body.each_zone_m2,
+        total_m2=body.total_m2,
+    )
 
 
 def _resolve_dynamic_cluster_for_owner(
@@ -1838,6 +1887,17 @@ async def update_zone(
         _apply_dynamic_resolution_to_payload(
             merged["geometry"], merged["config"], resolution
         )
+
+    from app.services.zone_area import enforce_zone_area
+
+    enforce_zone_area(
+        db,
+        zone_owner,
+        geometry=merged["geometry"],
+        config=merged["config"],
+        h3_cells=_extract_h3_cells(merged["config"]),
+        exclude_zone_id=target_zone.id,
+    )
 
     target_zone.name = normalized_name
     target_zone.zone_type = CANONICAL_TO_MODEL_ZONE_TYPE[merged["type"]]

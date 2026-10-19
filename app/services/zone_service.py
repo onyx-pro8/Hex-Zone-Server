@@ -132,6 +132,9 @@ def create_zone(db: Session, owner: Owner, payload: dict) -> dict:
 
     normalized_name = normalize_zone_name(payload.get("name"))
     ensure_unique_zone_name(db, account_owner_ids, normalized_name)
+    from app.services.zone_area import enforce_zone_area
+
+    enforce_zone_area(db, owner, geometry=geometry, config=config, h3_cells=h3_cells)
 
     zone = Zone(
         zone_id=payload.get("id") or owner.zone_id,
@@ -214,6 +217,16 @@ def update_zone(db: Session, owner: Owner, zone_id: str, payload: dict) -> dict:
                 )
         params["config"] = config
         zone.h3_cells = h3_cells
+    from app.services.zone_area import enforce_zone_area
+
+    enforce_zone_area(
+        db,
+        owner,
+        geometry=params.get("geometry") if isinstance(params.get("geometry"), dict) else {},
+        config=params.get("config") if isinstance(params.get("config"), dict) else {},
+        h3_cells=list(zone.h3_cells or []),
+        exclude_zone_id=zone.id,
+    )
     if payload.get("type"):
         params["contractType"] = payload["type"]
     zone.parameters = params

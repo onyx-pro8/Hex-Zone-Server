@@ -28,6 +28,7 @@ from app.models.universal_access import (
     UniversalAccessStatus,
 )
 from app.models.hub_command import HubCommand
+from app.models.zone_size_limit import ZoneSizeLimit
 
 __all__ = [
     "Owner",
@@ -58,4 +59,5 @@ __all__ = [
     "UniversalAccessCredential",
     "UniversalAccessStatus",
     "HubCommand",
+    "ZoneSizeLimit",
 ]
