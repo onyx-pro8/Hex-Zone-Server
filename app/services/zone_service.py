@@ -188,7 +188,7 @@ def update_zone(db: Session, owner: Owner, zone_id: str, payload: dict) -> dict:
     zone = db.query(Zone).filter(Zone.owner_id == owner.id, Zone.zone_id == zone_id).first()
     if not zone:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Zone not found")
-    ensure_zone_edit_allowed(owner, zone)
+    ensure_zone_edit_allowed(owner, zone, db)
     if payload.get("name") is not None:
         normalized_name = normalize_zone_name(payload["name"])
         owner_ids = account_owner_ids_for_policy(db, owner)

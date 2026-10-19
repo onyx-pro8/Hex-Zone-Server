@@ -418,7 +418,27 @@ def caller_may_delete_zone(owner: Owner, zone: Zone) -> bool:
     return caller_may_edit_zone(owner, zone)
 
 
-def ensure_zone_edit_allowed(owner: Owner, zone: Zone) -> None:
+def zone_belongs_to_caller_account(db: Session, owner: Owner, zone: Zone) -> bool:
+    """Universal access can reveal another network's primary zone. That stays view-only."""
+    if is_system_administrator(owner):
+        return True
+    ids = {int(item) for item in account_owner_ids_for_policy(db, owner)}
+    if int(zone.owner_id) in ids:
+        return True
+    if zone.creator_id is not None and int(zone.creator_id) in ids:
+        return True
+    return False
+
+
+def ensure_zone_edit_allowed(owner: Owner, zone: Zone, db: Session | None = None) -> None:
+    if db is not None and not zone_belongs_to_caller_account(db, owner, zone):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "ZONE_EDIT_FORBIDDEN",
+                "message": "This zone is view-only.",
+            },
+        )
     if caller_may_edit_zone(owner, zone):
         return
     if zone_is_primary(zone):
@@ -432,7 +452,14 @@ def ensure_zone_edit_allowed(owner: Owner, zone: Zone) -> None:
 
 
 def ensure_zone_delete_allowed(db: Session, owner: Owner, zone: Zone) -> None:
-    del db  # kept for call-site compatibility
+    if not zone_belongs_to_caller_account(db, owner, zone):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "ZONE_DELETE_FORBIDDEN",
+                "message": "This zone is view-only.",
+            },
+        )
     if caller_may_delete_zone(owner, zone):
         return
     if zone_is_primary(zone):

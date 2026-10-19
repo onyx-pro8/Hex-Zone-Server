@@ -1841,7 +1841,7 @@ async def update_zone(
             detail="Zone not found",
         )
 
-    ensure_zone_edit_allowed(owner, target_zone)
+    ensure_zone_edit_allowed(owner, target_zone, db)
 
     normalized = _normalize_payload(zone_update.model_dump(exclude_none=True), partial=True)
     current = _serialize_zone(target_zone, db=db)
