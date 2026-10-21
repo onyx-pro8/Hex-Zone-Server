@@ -210,3 +210,31 @@ async def test_second_call_waits_then_starts_when_first_ends():
     assert len(started2) == 1
     assert started2[0].guest_id == "guest-queue-c"
     await guest_call_service.end_call(started2[0].call_id, reason="cancel", closer_role="admin")
+
+
+def test_zone_administrator_owner_ids_excludes_members(db):
+    network = "NET-CALL-ADMINS"
+    admin = _admin(db, network)
+    member = Owner(
+        email="member-call@test.com",
+        zone_id=network,
+        first_name="M",
+        last_name="Member",
+        account_type=AccountType.PRIVATE,
+        role=OwnerRole.USER,
+        account_owner_id=admin.id,
+        hashed_password="x",
+        api_key="key-member-call",
+        address="addr",
+        active=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(member)
+    db.flush()
+
+    admins = gas.zone_administrator_owner_ids(db, network)
+    everyone = gas.zone_member_owner_ids(db, network)
+    assert admins == [admin.id]
+    assert member.id in everyone
+    assert member.id not in admins

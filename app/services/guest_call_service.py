@@ -271,6 +271,29 @@ def remember_watchers(call: GuestCallSession, user_ids: list[int | str]) -> None
             call.watcher_ids.append(token)
 
 
+def restrict_watchers_to_admins(call: GuestCallSession) -> list[str]:
+    """Staff recipients are administrators. Members must not see or join the call."""
+    from app.database import session_maker
+    from app.services import guest_access_service as gas
+
+    db = session_maker()
+    try:
+        admin_ids = [str(item) for item in gas.zone_administrator_owner_ids(db, call.zone_id)]
+    finally:
+        db.close()
+    designated = str(call.admin_owner_id or "").strip()
+    if designated and designated not in admin_ids:
+        admin_ids.append(designated)
+    allowed = set(admin_ids)
+    call.watcher_ids = [
+        token
+        for token in call.watcher_ids
+        if token in allowed or str(token).startswith("guest:")
+    ]
+    remember_watchers(call, admin_ids)
+    return admin_ids
+
+
 async def release_admin_invite(call: GuestCallSession) -> None:
     """Show the call to admins only after the guest (sender) already has the card."""
     if call.admin_invited or call.state != "ringing" or call.caller_role != "guest":
@@ -278,10 +301,7 @@ async def release_admin_invite(call: GuestCallSession) -> None:
     call.admin_invited = True
     from app.websocket.manager import ws_manager
 
-    ids = [token for token in call.watcher_ids if token and not token.startswith("guest:")]
-    admin_id = str(call.admin_owner_id)
-    if admin_id not in ids:
-        ids.append(admin_id)
+    ids = restrict_watchers_to_admins(call)
     if not ids:
         return
     await ws_manager.broadcast_to_users(ids, "CALL_INVITE", public_call_payload(call))
@@ -454,24 +474,11 @@ async def deliver_live_call(
     Returns ``(invite_deliveries, started_deliveries)``. The caller card must
     open only when the invite reached at least one live receiver socket.
     """
-    from app.database import session_maker
-    from app.services import guest_access_service as gas
     from app.websocket.manager import ws_manager
 
-    if call.caller_role == "guest":
-        has_admin = any(not str(item).startswith("guest:") for item in call.watcher_ids)
-        if not has_admin:
-            db = session_maker()
-            try:
-                remember_watchers(call, gas.zone_member_owner_ids(db, call.zone_id))
-            finally:
-                db.close()
     payload = public_call_payload(call, **({"from_queue": True} if from_queue else {}))
     if call.caller_role == "guest":
-        receiver_ids = [token for token in call.watcher_ids if token and not token.startswith("guest:")]
-        admin_id = str(call.admin_owner_id)
-        if admin_id not in receiver_ids:
-            receiver_ids.append(admin_id)
+        receiver_ids = restrict_watchers_to_admins(call)
         invited = await ws_manager.broadcast_to_users(receiver_ids, "CALL_INVITE", payload)
         if invited <= 0:
             return 0, 0

@@ -590,6 +590,29 @@ def zone_member_owner_ids(db: Session, zone_id: str) -> list[int]:
     return sorted(zone_staff_owner_ids(db, zone_id))
 
 
+def zone_administrator_owner_ids(db: Session, zone_id: str) -> list[int]:
+    """Active network administrators only. Guest calls must not ring regular members."""
+
+    zid = (zone_id or "").strip()
+    if not zid:
+        return []
+    ids: set[int] = set()
+    for (oid,) in (
+        db.query(Owner.id)
+        .filter(
+            Owner.zone_id == zid,
+            Owner.role == OwnerRole.ADMINISTRATOR,
+            Owner.active.is_(True),
+        )
+        .all()
+    ):
+        ids.add(int(oid))
+    primary = resolve_primary_zone_admin_owner(db, zid)
+    if primary and primary.active and primary.role == OwnerRole.ADMINISTRATOR:
+        ids.add(int(primary.id))
+    return sorted(ids)
+
+
 def pick_co_owner_for_direct_permission(db: Session, zone_id: str, sender_id: int) -> int:
     """Second **`owners.id`** for a direct (non–zone-broadcast) PERMISSION pairing; falls back to **`sender_id`** if alone."""
 

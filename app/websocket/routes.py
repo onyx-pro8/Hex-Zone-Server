@@ -89,6 +89,24 @@ async def _publish_guest_ws_presence(guest_id: str, *, online: bool) -> None:
     )
 
 
+def _owner_may_handle_guest_call(owner_id: int, zone_id: str | None = None) -> bool:
+    """True only for an active administrator of the call's zone."""
+    from app.models.owner import Owner, OwnerRole
+    from app.services import guest_access_service as gas
+
+    db = session_maker()
+    try:
+        owner = db.get(Owner, int(owner_id))
+        if owner is None or not owner.active or owner.role != OwnerRole.ADMINISTRATOR:
+            return False
+        zid = (zone_id or "").strip()
+        if not zid or str(owner.zone_id or "") == zid:
+            return True
+        return int(owner.id) in set(gas.zone_administrator_owner_ids(db, zid))
+    finally:
+        db.close()
+
+
 def _owner_avatar_url(db, owner_id: int | None) -> str | None:
     if not owner_id:
         return None
@@ -199,12 +217,20 @@ async def _handle_call_frame(
 
             db = session_maker()
             try:
-                member_ids = [str(item) for item in gas.zone_member_owner_ids(db, zone_id)]
+                admin_ids = [str(item) for item in gas.zone_administrator_owner_ids(db, zone_id)]
+                from app.models.owner import Owner, OwnerRole
+
+                designated = db.get(Owner, int(admin_oid))
+                designated_is_admin = (
+                    designated is not None
+                    and designated.active
+                    and designated.role == OwnerRole.ADMINISTRATOR
+                )
             finally:
                 db.close()
-            if str(admin_oid) not in member_ids:
-                member_ids.append(str(admin_oid))
-            if not any(ws_manager.is_user_connected(item) for item in member_ids):
+            if designated_is_admin and str(admin_oid) not in admin_ids:
+                admin_ids.append(str(admin_oid))
+            if not any(ws_manager.is_user_connected(item) for item in admin_ids):
                 await websocket.send_json(
                     {
                         "type": "ERROR",
@@ -242,7 +268,7 @@ async def _handle_call_frame(
                     )
                     return
                 if existing is not None and existing.state == "ringing":
-                    guest_call_service.remember_watchers(existing, member_ids)
+                    guest_call_service.remember_watchers(existing, admin_ids)
                     invited, _started = await guest_call_service.deliver_live_call(existing)
                     if invited <= 0:
                         await guest_call_service.end_call(
@@ -266,7 +292,7 @@ async def _handle_call_frame(
                     )
                     return
             if call is not None and err is None:
-                guest_call_service.remember_watchers(call, member_ids)
+                guest_call_service.remember_watchers(call, admin_ids)
                 invited, _started = await guest_call_service.deliver_live_call(call)
                 if invited <= 0:
                     await guest_call_service.end_call(
@@ -299,6 +325,17 @@ async def _handle_call_frame(
                 return
             target_guest = str(body.get("guest_id") or "").strip()
             zone_id = str(body.get("zone_id") or "").strip()
+            if not _owner_may_handle_guest_call(admin_oid, zone_id or None):
+                await websocket.send_json(
+                    {
+                        "type": "ERROR",
+                        "error": {
+                            "message": "Only an administrator can call a guest.",
+                            "error_code": "FORBIDDEN",
+                        },
+                    }
+                )
+                return
             guest_name = str(body.get("guest_name") or "").strip() or "Guest"
             client_call_id = str(body.get("call_id") or "").strip()
             if guest_call_service.consume_cancelled_client_call(client_call_id):
@@ -566,8 +603,14 @@ async def _handle_call_frame(
                 {"type": "ERROR", "error": {"message": "Forbidden", "error_code": "FORBIDDEN"}}
             )
             return
-        # Zone colleagues also receive the invite. The one who answers owns the call.
+        # Another administrator of this zone may answer and then owns the call.
+        # Regular members are not a party to guest calls.
         if oid != call.admin_owner_id:
+            if not _owner_may_handle_guest_call(oid, call.zone_id):
+                await websocket.send_json(
+                    {"type": "ERROR", "error": {"message": "Forbidden", "error_code": "FORBIDDEN"}}
+                )
+                return
             call.admin_owner_id = oid
 
     if message_type == "CALL_SYNC":
