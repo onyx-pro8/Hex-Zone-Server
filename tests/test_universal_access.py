@@ -131,7 +131,8 @@ def test_invite_request_shares_selected_zones(db):
     assert [row.id for row in visible] == [shared_a, shared_b]
 
 
-def test_place_access_lets_system_admin_pick_matching_zones(db):
+def test_place_access_lets_system_admin_pick_matching_zones(db, monkeypatch):
+    monkeypatch.setattr(universal_access_service, "_reverse_place", lambda lng, lat: {})
     admin = _owner(
         db,
         email="net@example.com",
@@ -190,6 +191,77 @@ def test_place_access_lets_system_admin_pick_matching_zones(db):
     assert approved["zone_ids"] == [austin]
     visible = universal_access_service.universal_primary_zones(db, admin, already_ids=set())
     assert [row.id for row in visible] == [austin]
+
+
+def test_place_access_finds_mapped_zones_in_other_networks(db, monkeypatch):
+    def fake_reverse(lng, lat):
+        if lng < -40:
+            return {
+                "country": "United States",
+                "region": "New York",
+                "city": "Watervliet",
+                "country_code": "us",
+            }
+        return {"country": "France", "region": "Ile-de-France", "city": "Paris", "country_code": "fr"}
+
+    monkeypatch.setattr(universal_access_service, "_reverse_place", fake_reverse)
+    admin = _owner(
+        db,
+        email="net@example.com",
+        zone_id="NET-A",
+        account_type=AccountType.ENHANCED,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    other = _owner(
+        db,
+        email="other@example.com",
+        zone_id="NET-OTHER",
+        account_type=AccountType.PRIVATE_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    us_polygon = (
+        '{"geometry":{"geo_fence_polygon":{"type":"Polygon","coordinates":'
+        '[[[-73.8,42.7],[-73.6,42.7],[-73.6,42.8],[-73.8,42.7]]]}}}'
+    )
+    france_polygon = (
+        '{"geometry":{"geo_fence_polygon":{"type":"Polygon","coordinates":'
+        '[[[2.3,48.8],[2.4,48.8],[2.4,48.9],[2.3,48.8]]]}}}'
+    )
+    us_zone = _insert_zone(
+        db,
+        owner_id=other.id,
+        zone_key="ny-primary",
+        name="My zone",
+        parameters=us_polygon,
+    )
+    _insert_zone(
+        db,
+        owner_id=other.id,
+        zone_key="ny-secondary",
+        name="Secondary lot",
+        is_primary=False,
+        parameters=us_polygon,
+    )
+    _insert_zone(
+        db,
+        owner_id=other.id,
+        zone_key="paris-primary",
+        name="Paris hall",
+        parameters=france_polygon,
+    )
+    db.commit()
+
+    created = universal_access_service.create_place_access_request(
+        db,
+        admin=admin,
+        country="United States",
+        region="",
+        city="",
+        photo_id=PHOTO,
+        business_document=BUSINESS,
+    )
+    assert [zone["id"] for zone in created["candidate_zones"]] == [us_zone]
+    assert created["candidate_zones"][0]["owner_id"] == other.id
 
 
 def test_invitee_search_includes_other_networks(db):

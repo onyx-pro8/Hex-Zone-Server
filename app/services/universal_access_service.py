@@ -259,70 +259,72 @@ def _normalize_place(country: str, region: str, city: str) -> tuple[str, str, st
     return country_v, region_v, city_v
 
 
-def _centroid(zone: Zone) -> tuple[float, float] | None:
-    params = zone.parameters if isinstance(zone.parameters, dict) else {}
-    geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
-    polygon = geometry.get("geo_fence_polygon") if isinstance(geometry, dict) else None
-    if not isinstance(polygon, dict):
+def _as_lng_lat(point: object) -> tuple[float, float] | None:
+    if isinstance(point, dict):
+        lat = point.get("latitude", point.get("lat"))
+        lng = point.get("longitude", point.get("lng", point.get("lon")))
+        if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+            return float(lng), float(lat)
         return None
-    ring: list | None = None
-    coords = polygon.get("coordinates")
-    if polygon.get("type") == "Polygon" and isinstance(coords, list) and coords:
-        ring = coords[0]
-    elif polygon.get("type") == "MultiPolygon" and isinstance(coords, list) and coords:
-        first = coords[0]
-        if isinstance(first, list) and first:
-            ring = first[0]
-    if not isinstance(ring, list) or len(ring) < 3:
+    if isinstance(point, (list, tuple)) and len(point) >= 2:
+        first, second = point[0], point[1]
+        if not isinstance(first, (int, float)) or not isinstance(second, (int, float)):
+            return None
+        # GeoJSON positions are [lng, lat]. A bare center pair stored as [lat, lng]
+        # is only used when the first value is clearly a latitude.
+        if abs(float(first)) <= 90 and abs(float(second)) > 90:
+            return float(second), float(first)
+        return float(first), float(second)
+    return None
+
+
+def _ring_centroid(ring: list) -> tuple[float, float] | None:
+    points = [pair for pair in (_as_lng_lat(point) for point in ring) if pair is not None]
+    if len(points) < 3:
         return None
-    lngs: list[float] = []
-    lats: list[float] = []
-    for point in ring:
-        if isinstance(point, (list, tuple)) and len(point) >= 2:
-            lngs.append(float(point[0]))
-            lats.append(float(point[1]))
-    if not lngs:
-        return None
+    lngs = [point[0] for point in points]
+    lats = [point[1] for point in points]
     return sum(lngs) / len(lngs), sum(lats) / len(lats)
 
 
-def _bbox_from_polygon(polygon: dict[str, Any] | None) -> list[float] | None:
+def _polygon_centroid(polygon: object) -> tuple[float, float] | None:
     if not isinstance(polygon, dict):
         return None
-    points: list[list[float]] = []
-
-    def _walk(node: object) -> None:
-        if isinstance(node, list):
-            if len(node) >= 2 and isinstance(node[0], (int, float)) and isinstance(node[1], (int, float)):
-                points.append([float(node[0]), float(node[1])])
-                return
-            for item in node:
-                _walk(item)
-
-    _walk(polygon.get("coordinates"))
-    if not points:
-        return None
-    lngs = [p[0] for p in points]
-    lats = [p[1] for p in points]
-    return [min(lngs), min(lats), max(lngs), max(lats)]
+    coords = polygon.get("coordinates")
+    if polygon.get("type") == "Polygon" and isinstance(coords, list) and coords:
+        return _ring_centroid(coords[0])
+    if polygon.get("type") == "MultiPolygon" and isinstance(coords, list) and coords:
+        first = coords[0]
+        if isinstance(first, list) and first:
+            return _ring_centroid(first[0])
+    return None
 
 
-def _resolve_place_bbox(country: str, region: str, city: str) -> list[float] | None:
-    try:
-        from app.services.area_boundary_service import (
-            AreaLocationInput,
-            lookup_global_area_boundary,
-        )
-
-        parts = [part for part in (city, region) if part]
-        location = AreaLocationInput(country=country or region or city, city=", ".join(parts))
-        found = lookup_global_area_boundary(location)
-    except Exception:
-        return None
-    if not found:
-        return None
-    polygon, _name, _config = found
-    return _bbox_from_polygon(polygon if isinstance(polygon, dict) else None)
+def _zone_point(zone: Zone) -> tuple[float, float] | None:
+    """A representative lng/lat for a zone, from its polygon or its center."""
+    params = zone.parameters if isinstance(zone.parameters, dict) else {}
+    geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
+    polygon = None
+    if isinstance(geometry, dict):
+        polygon = geometry.get("geo_fence_polygon")
+    if not isinstance(polygon, dict):
+        polygon = params.get("geo_fence_polygon") if isinstance(params.get("geo_fence_polygon"), dict) else None
+    centroid = _polygon_centroid(polygon)
+    if centroid is not None:
+        return centroid
+    if isinstance(geometry, dict):
+        for key in ("center", "marker"):
+            point = _as_lng_lat(geometry.get(key))
+            if point is not None:
+                return point
+        circles = geometry.get("circles")
+        if isinstance(circles, list):
+            for circle in circles:
+                if isinstance(circle, dict):
+                    point = _as_lng_lat(circle.get("center"))
+                    if point is not None:
+                        return point
+    return None
 
 
 def _text_place_match(zone: Zone, *, country: str, region: str, city: str) -> bool:
@@ -351,15 +353,111 @@ def _text_place_match(zone: Zone, *, country: str, region: str, city: str) -> bo
     return False
 
 
-def _bbox_place_match(zone: Zone, bbox: list[float] | None) -> bool:
-    if not isinstance(bbox, list) or len(bbox) != 4:
+def _labels_match(wanted: str, found: str) -> bool:
+    left = wanted.strip().casefold()
+    right = found.strip().casefold()
+    if not left:
+        return True
+    if not right:
         return False
-    centroid = _centroid(zone)
-    if centroid is None:
+    return left == right or left in right or right in left
+
+
+def _country_matches(wanted: str, located: dict[str, str]) -> bool:
+    if _labels_match(wanted, located.get("country", "")):
+        return True
+    from app.services.area_boundary_service import normalize_country_iso2
+
+    wanted_iso = normalize_country_iso2(wanted)
+    found_iso = str(located.get("country_code") or "").strip().lower()
+    return bool(wanted_iso and found_iso and wanted_iso == found_iso)
+
+
+_REVERSE_PLACE_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _reverse_place(lng: float, lat: float) -> dict[str, str]:
+    """Country, state, and city at a zone point. Empty when lookup fails."""
+    key = f"{round(lng, 2):.2f},{round(lat, 2):.2f}"
+    cached = _REVERSE_PLACE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    located = _reverse_place_photon(lng, lat) or _reverse_place_nominatim(lng, lat) or {}
+    if located.get("country") or located.get("country_code"):
+        _REVERSE_PLACE_CACHE[key] = located
+    return located
+
+
+def _reverse_place_photon(lng: float, lat: float) -> dict[str, str] | None:
+    try:
+        import httpx
+
+        with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+            response = client.get(
+                "https://photon.komoot.io/reverse",
+                params={"lat": lat, "lon": lng, "lang": "en"},
+                headers={"User-Agent": "HexZone/1.0 (universal-access)", "Accept": "application/json"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        logger.warning("Photon reverse failed for %s,%s", lat, lng, exc_info=True)
+        return None
+    features = payload.get("features") if isinstance(payload, dict) else None
+    props = features[0].get("properties") if isinstance(features, list) and features else None
+    if not isinstance(props, dict):
+        return None
+    return {
+        "country": str(props.get("country") or ""),
+        "region": str(props.get("state") or ""),
+        "city": str(props.get("city") or props.get("county") or ""),
+        "country_code": str(props.get("countrycode") or ""),
+    }
+
+
+def _reverse_place_nominatim(lng: float, lat: float) -> dict[str, str] | None:
+    try:
+        from app.services.area_boundary_service import NOMINATIM_REVERSE_URL, _nominatim_get
+
+        rows = _nominatim_get(
+            NOMINATIM_REVERSE_URL,
+            {
+                "format": "json",
+                "lat": lat,
+                "lon": lng,
+                "zoom": 10,
+                "addressdetails": 1,
+            },
+        )
+    except Exception:
+        logger.warning("Nominatim reverse failed for %s,%s", lat, lng, exc_info=True)
+        return None
+    address = rows[0].get("address") if rows and isinstance(rows[0], dict) else None
+    if not isinstance(address, dict):
+        return None
+    city = address.get("city") or address.get("town") or address.get("village") or ""
+    return {
+        "country": str(address.get("country") or ""),
+        "region": str(address.get("state") or ""),
+        "city": str(city or ""),
+        "country_code": str(address.get("country_code") or ""),
+    }
+
+
+def _zone_located_in_place(zone: Zone, *, country: str, region: str, city: str) -> bool:
+    point = _zone_point(zone)
+    if point is None:
         return False
-    lng, lat = centroid
-    west, south, east, north = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
-    return west <= lng <= east and south <= lat <= north
+    located = _reverse_place(point[0], point[1])
+    if not located:
+        return False
+    if country and not _country_matches(country, located):
+        return False
+    if region and not _labels_match(region, located.get("region", "")):
+        return False
+    if city and not _labels_match(city, located.get("city", "")):
+        return False
+    return bool(country or region or city)
 
 
 def place_candidate_zones(
@@ -369,24 +467,22 @@ def place_candidate_zones(
     region: str,
     city: str,
 ) -> list[dict[str, Any]]:
-    """Non-secondary zones that match or contain the requested place."""
+    """Non-secondary zones in every network that sit in the requested place."""
     country_v, region_v, city_v = _normalize_place(country, region, city)
-    bbox = _resolve_place_bbox(country_v, region_v, city_v)
     rows = (
         db.query(Zone)
         .options(defer(Zone.geo_fence_polygon))
         .filter(Zone.active.is_(True))
         .order_by(Zone.name.asc(), Zone.id.asc())
-        .limit(800)
         .all()
     )
     matched: list[dict[str, Any]] = []
     for zone in rows:
         if not _zone_is_shareable(zone):
             continue
-        if _text_place_match(zone, country=country_v, region=region_v, city=city_v) or _bbox_place_match(
-            zone, bbox
-        ):
+        if _text_place_match(
+            zone, country=country_v, region=region_v, city=city_v
+        ) or _zone_located_in_place(zone, country=country_v, region=region_v, city=city_v):
             matched.append(_zone_summary(zone))
             if len(matched) >= _MAX_UNIVERSAL_ZONES:
                 break
