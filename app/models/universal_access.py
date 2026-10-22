@@ -23,22 +23,33 @@ class UniversalAccessStatus(str, enum.Enum):
     REJECTED = "rejected"
 
 
+class UniversalAccessKind(str, enum.Enum):
+    INVITE = "invite"
+    PLACE_ACCESS = "place_access"
+
+
 class UniversalAccessRequest(Base):
-    """A network admin asks the system admin to share selected primary zones."""
+    """Network admin asks System Admin to invite someone, or to enter other zones."""
 
     __tablename__ = "universal_access_requests"
 
     id = Column(Integer, primary_key=True, index=True)
     network_admin_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Invite: the invited person. Place access: the requester (same as network_admin).
     member_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
     member_name = Column(String(200), nullable=False)
     email = Column(String(255), nullable=False)
     address = Column(String(255), nullable=False, default="")
-    photo_id = Column(Text, nullable=False)
+    photo_id = Column(Text, nullable=False, default="")
     business_document = Column(Text, nullable=False, default="")
-    # Integer primary-zone ids the admin is offering to share.
+    request_kind = Column(
+        Enum(UniversalAccessKind),
+        nullable=False,
+        default=UniversalAccessKind.INVITE,
+        index=True,
+    )
+    # Invite: zones the admin wants to share. Place access: empty until System Admin picks.
     zone_ids = Column(JSON, nullable=False, default=list)
-    # Kept for older rows. New requests do not use a place.
     country = Column(String(120), nullable=False, default="")
     region = Column(String(120), nullable=False, default="")
     city = Column(String(120), nullable=False, default="")
@@ -56,7 +67,7 @@ class UniversalAccessRequest(Base):
 
 
 class UniversalAccessCredential(Base):
-    """Official credential. While enabled, the invitee sees the shared primary zones."""
+    """Granted share. While enabled, the member sees the selected zones."""
 
     __tablename__ = "universal_access_credentials"
 
@@ -76,7 +87,6 @@ class UniversalAccessCredential(Base):
     region = Column(String(120), nullable=False, default="")
     city = Column(String(120), nullable=False, default="")
     enabled = Column(Boolean, nullable=False, default=True)
-    # Legacy place box. New credentials share explicit zone ids instead.
     place_bbox = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

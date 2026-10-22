@@ -1,4 +1,4 @@
-"""Universal access code requests and credentials."""
+"""Universal access invite and place-access requests."""
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -11,12 +11,23 @@ from app.services import universal_access_service
 router = APIRouter(prefix="/universal-access", tags=["universal-access"])
 
 
-class UniversalAccessCreate(BaseModel):
+class InviteCreate(BaseModel):
     invitee_email: str = Field(..., min_length=3, max_length=255)
     zone_ids: list[int] = Field(..., min_length=1)
+    note: str = Field("", max_length=1000)
+
+
+class PlaceAccessCreate(BaseModel):
+    country: str = Field("", max_length=120)
+    region: str = Field("", max_length=120)
+    city: str = Field("", max_length=120)
     photo_id: str = Field(..., min_length=1)
     business_document: str = Field(..., min_length=1)
     note: str = Field("", max_length=1000)
+
+
+class UniversalAccessApprove(BaseModel):
+    zone_ids: list[int] = Field(default_factory=list)
 
 
 class UniversalAccessReject(BaseModel):
@@ -34,13 +45,22 @@ def _caller(db: Session, current_user: dict):
     return owner
 
 
+@router.get("/shareable-zones")
+def list_shareable_zones(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    caller = _caller(db, current_user)
+    return universal_access_service.shareable_network_zones(db, admin=caller)
+
+
 @router.get("/primary-zones")
 def list_shareable_primary_zones(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     caller = _caller(db, current_user)
-    return universal_access_service.shareable_primary_zones(db, admin=caller)
+    return universal_access_service.shareable_network_zones(db, admin=caller)
 
 
 @router.get("/invitees")
@@ -53,18 +73,39 @@ def search_invitees(
     return universal_access_service.search_invitees(db, admin=caller, query=q, limit=5)
 
 
-@router.post("/requests")
-async def create_universal_access_request(
-    body: UniversalAccessCreate,
+@router.post("/requests/invite")
+async def create_invite_request(
+    body: InviteCreate,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     caller = _caller(db, current_user)
-    created = universal_access_service.create_request(
+    created = universal_access_service.create_invite_request(
         db,
         admin=caller,
         invitee_email=body.invitee_email,
         zone_ids=body.zone_ids,
+        note=body.note,
+    )
+    notice_event_id = created.pop("notice_event_id", None)
+    if notice_event_id:
+        await universal_access_service.notify_system_admins_of_request(db, str(notice_event_id))
+    return created
+
+
+@router.post("/requests/place-access")
+async def create_place_access_request(
+    body: PlaceAccessCreate,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    caller = _caller(db, current_user)
+    created = universal_access_service.create_place_access_request(
+        db,
+        admin=caller,
+        country=body.country,
+        region=body.region,
+        city=body.city,
         photo_id=body.photo_id,
         business_document=body.business_document,
         note=body.note,
@@ -73,6 +114,16 @@ async def create_universal_access_request(
     if notice_event_id:
         await universal_access_service.notify_system_admins_of_request(db, str(notice_event_id))
     return created
+
+
+@router.post("/requests")
+async def create_universal_access_request(
+    body: InviteCreate,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Backward-compatible invite endpoint."""
+    return await create_invite_request(body, current_user, db)
 
 
 @router.get("/requests")
@@ -97,31 +148,49 @@ def get_universal_access_request(
 @router.post("/requests/{request_id}/approve")
 async def approve_universal_access_request(
     request_id: int,
+    body: UniversalAccessApprove | None = None,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     caller = _caller(db, current_user)
-    approved = universal_access_service.approve_request(db, caller=caller, request_id=request_id)
+    approved = universal_access_service.approve_request(
+        db,
+        caller=caller,
+        request_id=request_id,
+        zone_ids=(body.zone_ids if body else None),
+    )
     notice_event_id = approved.pop("notice_event_id", None)
     if notice_event_id:
-        await universal_access_service.notify_grant_recipients(db, str(notice_event_id))
+        await universal_access_service.notify_decision_recipients(
+            db,
+            str(notice_event_id),
+            title="Universal access approved",
+        )
     return approved
 
 
 @router.post("/requests/{request_id}/reject")
-def reject_universal_access_request(
+async def reject_universal_access_request(
     request_id: int,
     body: UniversalAccessReject,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     caller = _caller(db, current_user)
-    return universal_access_service.reject_request(
+    rejected = universal_access_service.reject_request(
         db,
         caller=caller,
         request_id=request_id,
         reason=body.reason,
     )
+    notice_event_id = rejected.pop("notice_event_id", None)
+    if notice_event_id:
+        await universal_access_service.notify_decision_recipients(
+            db,
+            str(notice_event_id),
+            title="Universal access rejected",
+        )
+    return rejected
 
 
 @router.post("/credentials/{credential_id}/enabled")

@@ -250,6 +250,18 @@ def patch_universal_access_zone_share_columns() -> None:
         conn.execute(
             text(
                 "ALTER TABLE universal_access_requests "
+                "ADD COLUMN IF NOT EXISTS request_kind VARCHAR(32) NOT NULL DEFAULT 'invite';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_requests "
+                "ALTER COLUMN photo_id SET DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_requests "
                 "ALTER COLUMN address SET DEFAULT '';"
             )
         )
