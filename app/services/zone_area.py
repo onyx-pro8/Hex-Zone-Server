@@ -249,9 +249,9 @@ def area_block_reason(
     total_m2: float | None,
 ) -> str | None:
     if each_zone_m2 is not None and draft_m2 > each_zone_m2 + 1:
-        return "This zone is bigger than the each-zone limit."
+        return "Exceeds the each-zone size limit."
     if total_m2 is not None and used_m2 + draft_m2 > total_m2 + 1:
-        return "Not enough total size left."
+        return "Exceeds the total size limit."
     return None
 
 

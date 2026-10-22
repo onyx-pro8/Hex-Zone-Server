@@ -679,7 +679,7 @@ def _owner_display_name(owner: Owner | None) -> str | None:
 
 
 def _merge_universal_primary_zones(db: Session, caller, zones: list) -> list:
-    """Add other networks' primary zones that sit in the caller's enabled places."""
+    """Add primary zones shared with the caller through an approved universal access code."""
     from app.services.universal_access_service import universal_primary_zones
 
     already = {int(zone.id) for zone in zones}

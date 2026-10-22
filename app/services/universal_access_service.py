@@ -1,4 +1,4 @@
-"""Universal access codes: request, approve, enable, and zone visibility."""
+"""Universal access codes: share selected primary zones with an invitee."""
 from __future__ import annotations
 
 import logging
@@ -7,8 +7,10 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException, status
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, defer
 
+from app.crud import owner as owner_crud
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
 from app.models.owner import Owner, OwnerRole
 from app.models.universal_access import (
@@ -18,13 +20,15 @@ from app.models.universal_access import (
 )
 from app.models.zone import Zone
 from app.models.zone_message_event import ZoneMessageEvent
-from app.services.access_policy import messaging_visible_owner_ids
+from app.services.access_policy import zone_listing_owner_ids
 from app.services.account_type_policy import is_system_administrator
+from app.services.registration_code_service import normalize_pricing_tier_key
 
 logger = logging.getLogger(__name__)
 
 _MAX_PHOTO_CHARS = 1_500_000
-_MAX_UNIVERSAL_ZONES = 200
+_MAX_UNIVERSAL_ZONES = 50
+_SHARE_ACCOUNT_TYPES = frozenset({"enhanced", "enhanced_plus"})
 
 
 def _clean(value: str, *, limit: int) -> str:
@@ -43,10 +47,44 @@ def _require_network_admin(owner: Owner) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only a network administrator can request a universal access code.",
         )
+    tier = normalize_pricing_tier_key(str(owner.account_type.value or ""))
+    if tier not in _SHARE_ACCOUNT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Individual Pro and Organization administrators can request a universal access code.",
+        )
 
 
-def _place_label(country: str, region: str, city: str) -> str:
-    return ", ".join(part for part in (city, region, country) if part)
+def _int_ids(raw: object) -> list[int]:
+    if not isinstance(raw, list):
+        return []
+    ids: list[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value < 1 or value in seen:
+            continue
+        seen.add(value)
+        ids.append(value)
+    return ids
+
+
+def _image_document(value: str, *, label: str) -> str:
+    document = str(value or "").strip()
+    if not document.startswith("data:image/") and not document.startswith("data:application/pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{label} must be an image or PDF.",
+        )
+    if len(document) > _MAX_PHOTO_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{label} is too large.",
+        )
+    return document
 
 
 def _owner_name(owner: Owner | None) -> str:
@@ -54,45 +92,6 @@ def _owner_name(owner: Owner | None) -> str:
         return ""
     full = f"{owner.first_name} {owner.last_name}".strip()
     return full or owner.email
-
-
-def _bbox_from_polygon(polygon: dict[str, Any] | None) -> list[float] | None:
-    if not isinstance(polygon, dict):
-        return None
-    points: list[list[float]] = []
-
-    def _walk(node: object) -> None:
-        if isinstance(node, list):
-            if len(node) >= 2 and isinstance(node[0], (int, float)) and isinstance(node[1], (int, float)):
-                points.append([float(node[0]), float(node[1])])
-                return
-            for item in node:
-                _walk(item)
-
-    _walk(polygon.get("coordinates"))
-    if not points:
-        return None
-    lngs = [p[0] for p in points]
-    lats = [p[1] for p in points]
-    return [min(lngs), min(lats), max(lngs), max(lats)]
-
-
-def _resolve_place_bbox(country: str, region: str, city: str) -> list[float] | None:
-    """Best-effort city box. Approval still succeeds when lookup is unavailable."""
-    try:
-        from app.services.area_boundary_service import (
-            AreaLocationInput,
-            lookup_global_area_boundary,
-        )
-
-        location = AreaLocationInput(country=country, city=f"{city}, {region}".strip(", "))
-        found = lookup_global_area_boundary(location)
-    except Exception:
-        return None
-    if not found:
-        return None
-    polygon, _name, _config = found
-    return _bbox_from_polygon(polygon if isinstance(polygon, dict) else None)
 
 
 def _new_code(db: Session) -> str:
@@ -112,6 +111,99 @@ def _new_code(db: Session) -> str:
     )
 
 
+def _zones_by_ids(db: Session, zone_ids: list[int]) -> list[Zone]:
+    if not zone_ids:
+        return []
+    rows = (
+        db.query(Zone)
+        .options(defer(Zone.geo_fence_polygon))
+        .filter(Zone.id.in_(tuple(zone_ids)))
+        .all()
+    )
+    by_id = {int(row.id): row for row in rows}
+    return [by_id[zone_id] for zone_id in zone_ids if zone_id in by_id]
+
+
+def _zone_summary(zone: Zone) -> dict[str, Any]:
+    zone_type = zone.zone_type.value if hasattr(zone.zone_type, "value") else str(zone.zone_type)
+    return {"id": int(zone.id), "name": zone.name, "zone_type": zone_type}
+
+
+def shareable_primary_zones(db: Session, *, admin: Owner) -> list[dict[str, Any]]:
+    _require_network_admin(admin)
+    owner_ids = [int(item) for item in zone_listing_owner_ids(db, admin)]
+    network_id = (admin.zone_id or "").strip()
+    owned = []
+    if owner_ids:
+        owned.append(Zone.owner_id.in_(tuple(owner_ids)))
+        owned.append(Zone.creator_id.in_(tuple(owner_ids)))
+    if network_id:
+        owned.append(Zone.zone_id == network_id)
+    if not owned:
+        return []
+    rows = (
+        db.query(Zone)
+        .options(defer(Zone.geo_fence_polygon))
+        .filter(
+            Zone.active.is_(True),
+            Zone.is_primary.is_(True),
+            or_(*owned),
+        )
+        .order_by(Zone.name.asc(), Zone.id.asc())
+        .all()
+    )
+    return [_zone_summary(row) for row in rows]
+
+
+def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Up to five active accounts whose email or name contains the keyword."""
+    _require_network_admin(admin)
+    needle = " ".join(str(query or "").split()).lower()
+    if len(needle) < 1:
+        return []
+    like = f"%{needle}%"
+    rows = (
+        db.query(Owner)
+        .filter(
+            Owner.active.is_(True),
+            Owner.id != admin.id,
+            or_(
+                func.lower(Owner.email).like(like),
+                func.lower(Owner.first_name).like(like),
+                func.lower(Owner.last_name).like(like),
+            ),
+        )
+        .order_by(Owner.email.asc())
+        .limit(max(1, min(int(limit), 5)))
+        .all()
+    )
+    return [
+        {"id": row.id, "name": _owner_name(row), "email": row.email}
+        for row in rows
+    ]
+
+
+def _selected_primary_zones(db: Session, admin: Owner, zone_ids: list[int]) -> list[Zone]:
+    selected = _int_ids(zone_ids)
+    if not selected:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Select at least one primary zone to share.",
+        )
+    if len(selected) > _MAX_UNIVERSAL_ZONES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Select at most {_MAX_UNIVERSAL_ZONES} primary zones.",
+        )
+    allowed = {int(item["id"]) for item in shareable_primary_zones(db, admin=admin)}
+    if any(zone_id not in allowed for zone_id in selected):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Every shared zone must be one of your active primary zones.",
+        )
+    return _zones_by_ids(db, selected)
+
+
 def _request_row(
     db: Session,
     row: UniversalAccessRequest,
@@ -124,16 +216,21 @@ def _request_row(
         .filter(UniversalAccessCredential.request_id == row.id)
         .first()
     )
+    zone_ids = _int_ids(row.zone_ids)
+    zones = [_zone_summary(zone) for zone in _zones_by_ids(db, zone_ids)]
+    zone_label = ", ".join(zone["name"] for zone in zones)
     payload: dict[str, Any] = {
         "id": row.id,
         "member_id": row.member_id,
         "member_name": row.member_name,
         "email": row.email,
-        "address": row.address,
-        "country": row.country,
-        "region": row.region,
-        "city": row.city,
-        "place": _place_label(row.country, row.region, row.city),
+        "address": row.address or "",
+        "country": row.country or "",
+        "region": row.region or "",
+        "city": row.city or "",
+        "place": zone_label,
+        "zone_ids": zone_ids,
+        "zones": zones,
         "note": row.note or "",
         "status": row.status.value if hasattr(row.status, "value") else str(row.status),
         "reject_reason": row.reject_reason or "",
@@ -146,6 +243,7 @@ def _request_row(
     }
     if include_photo:
         payload["photo_id"] = row.photo_id
+        payload["business_document"] = row.business_document or ""
     return payload
 
 
@@ -153,12 +251,10 @@ def create_request(
     db: Session,
     *,
     admin: Owner,
-    member_id: int,
-    address: str,
+    invitee_email: str,
+    zone_ids: list[int],
     photo_id: str,
-    country: str,
-    region: str,
-    city: str,
+    business_document: str,
     note: str = "",
 ) -> dict[str, Any]:
     _require_network_admin(admin)
@@ -173,39 +269,27 @@ def create_request(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Photo ID is too large.",
         )
-    country_v = _clean(country, limit=120)
-    region_v = _clean(region, limit=120)
-    city_v = _clean(city, limit=120)
-    address_v = _clean(address, limit=255)
-    if not country_v or not region_v or not city_v or not address_v:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Address, country, region, and city are required.",
-        )
-
-    visible = set(messaging_visible_owner_ids(db, admin, include_inactive=False))
-    if int(member_id) not in visible:
+    document = _image_document(business_document, label="Business document")
+    zones = _selected_primary_zones(db, admin, zone_ids)
+    invitee = owner_crud.get_owner_by_email(db, invitee_email)
+    if invitee is None or not invitee.active or int(invitee.id) == int(admin.id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="That member is not on your network.",
-        )
-    member = db.get(Owner, int(member_id))
-    if member is None or not member.active:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="That member is not on your network.",
+            detail="No active account uses that email.",
         )
 
     row = UniversalAccessRequest(
         network_admin_id=admin.id,
-        member_id=member.id,
-        member_name=_owner_name(member),
-        email=member.email,
-        address=address_v,
+        member_id=invitee.id,
+        member_name=_owner_name(invitee),
+        email=invitee.email,
+        address="",
         photo_id=photo,
-        country=country_v,
-        region=region_v,
-        city=city_v,
+        business_document=document,
+        zone_ids=[int(zone.id) for zone in zones],
+        country="",
+        region="",
+        city="",
         note=_clean(note, limit=1000),
         status=UniversalAccessStatus.PENDING,
     )
@@ -242,8 +326,8 @@ def _record_request_notice(
     targets = _system_admin_ids(db)
     if not targets:
         return None
-    place = _place_label(row.country, row.region, row.city)
-    text = f"Universal access code requested for {row.member_name} ({place})."
+    zone_label = ", ".join(zone.name for zone in _zones_by_ids(db, _int_ids(row.zone_ids))) or "selected zones"
+    text = f"Universal access code requested for {row.member_name} ({zone_label})."
     event = ZoneMessageEvent(
         zone_id=(admin.zone_id or "").strip() or "universal-access",
         sender_id=admin.id,
@@ -257,7 +341,7 @@ def _record_request_notice(
             "universal_access_request_id": row.id,
             "member_id": row.member_id,
             "member_name": row.member_name,
-            "place": place,
+            "zone_ids": _int_ids(row.zone_ids),
             "note": row.note or "",
         },
         metadata_json={
@@ -274,7 +358,13 @@ def _record_request_notice(
     return event
 
 
-async def notify_system_admins_of_request(db: Session, event_id: str) -> None:
+async def notify_event_recipients(
+    db: Session,
+    event_id: str,
+    *,
+    title: str,
+    flow: str,
+) -> None:
     """Push, inbox socket, and smart-hub webhook. Failures do not undo the request."""
     event = db.get(ZoneMessageEvent, event_id)
     if event is None:
@@ -301,8 +391,8 @@ async def notify_system_admins_of_request(db: Session, event_id: str) -> None:
         await push_notification_service.send_plain_push_to_owners(
             db,
             targets,
-            title="Universal access request",
-            body=(event.text or "A network requested a universal access code.")[:240],
+            title=title,
+            body=(event.text or title)[:240],
             data={
                 "event": "NEW_MESSAGE",
                 "type": "PERMISSION",
@@ -319,7 +409,7 @@ async def notify_system_admins_of_request(db: Session, event_id: str) -> None:
             "delivered_owner_ids": targets,
             "metadata": {
                 "sender_network_id": zone,
-                "flow": "universal_access_request",
+                "flow": flow,
             },
         }
         webhook_stats = await smart_home_webhook_service.send_smart_home_webhooks(
@@ -332,7 +422,25 @@ async def notify_system_admins_of_request(db: Session, event_id: str) -> None:
             list(webhook_stats.get("webhook_owner_results") or [])
         )
     except Exception:
-        logger.exception("Universal access request notice failed for event %s", event_id)
+        logger.exception("Universal access notice failed for event %s", event_id)
+
+
+async def notify_system_admins_of_request(db: Session, event_id: str) -> None:
+    await notify_event_recipients(
+        db,
+        event_id,
+        title="Universal access request",
+        flow="universal_access_request",
+    )
+
+
+async def notify_grant_recipients(db: Session, event_id: str) -> None:
+    await notify_event_recipients(
+        db,
+        event_id,
+        title="Universal access approved",
+        flow="universal_access_granted",
+    )
 
 
 def list_requests(db: Session, *, caller: Owner) -> list[dict[str, Any]]:
@@ -365,7 +473,6 @@ def approve_request(
     *,
     caller: Owner,
     request_id: int,
-    resolve_boundary: bool = True,
 ) -> dict[str, Any]:
     if not is_system_administrator(caller):
         raise HTTPException(
@@ -380,26 +487,79 @@ def approve_request(
             status_code=status.HTTP_409_CONFLICT,
             detail="This request was already reviewed.",
         )
-    bbox = _resolve_place_bbox(row.country, row.region, row.city) if resolve_boundary else None
+    zone_ids = _int_ids(row.zone_ids)
     credential = UniversalAccessCredential(
         request_id=row.id,
         member_id=row.member_id,
         network_admin_id=row.network_admin_id,
         code=_new_code(db),
-        country=row.country,
-        region=row.region,
-        city=row.city,
+        zone_ids=zone_ids,
+        country="",
+        region="",
+        city="",
         enabled=True,
-        place_bbox=bbox,
+        place_bbox=None,
     )
     row.status = UniversalAccessStatus.APPROVED
     row.reviewed_by_id = caller.id
     row.reviewed_at = datetime.utcnow()
     row.reject_reason = ""
     db.add(credential)
+    db.flush()
+    notice = _record_grant_notice(db, row, caller)
     db.commit()
     db.refresh(row)
-    return _request_row(db, row, include_photo=True)
+    payload = _request_row(db, row, include_photo=True)
+    if notice is not None:
+        payload["notice_event_id"] = notice.id
+    return payload
+
+
+def _record_grant_notice(
+    db: Session,
+    row: UniversalAccessRequest,
+    reviewer: Owner,
+) -> ZoneMessageEvent | None:
+    """Tell the network admin and the invited user that the share was approved."""
+    targets: list[int] = []
+    for owner_id in (row.network_admin_id, row.member_id):
+        if owner_id is None:
+            continue
+        value = int(owner_id)
+        if value not in targets:
+            targets.append(value)
+    if not targets:
+        return None
+    zone_label = ", ".join(zone.name for zone in _zones_by_ids(db, _int_ids(row.zone_ids))) or "the shared zones"
+    text = f"Universal access approved for {row.member_name}. They can now see {zone_label}."
+    admin = db.get(Owner, row.network_admin_id)
+    event = ZoneMessageEvent(
+        zone_id=((admin.zone_id if admin else "") or "").strip() or "universal-access",
+        sender_id=reviewer.id,
+        receiver_id=int(row.member_id),
+        type=CanonicalMessageType.PERMISSION.value,
+        category=type_category(CanonicalMessageType.PERMISSION),
+        scope=type_scope(CanonicalMessageType.PERMISSION),
+        text=text,
+        body_json={
+            "code": "UNIVERSAL_ACCESS_APPROVED",
+            "universal_access_request_id": row.id,
+            "member_id": row.member_id,
+            "member_name": row.member_name,
+            "zone_ids": _int_ids(row.zone_ids),
+        },
+        metadata_json={
+            "flow": "universal_access_granted",
+            "permission_visibility": "direct",
+            "universal_access_request_id": row.id,
+            "delivered_owner_ids": targets,
+            "sender_message": {"code": "UNIVERSAL_ACCESS_APPROVED", "text": text},
+            "member_message": {"code": "UNIVERSAL_ACCESS_APPROVED", "text": text},
+        },
+    )
+    db.add(event)
+    db.flush()
+    return event
 
 
 def reject_request(
@@ -453,75 +613,6 @@ def set_credential_enabled(
     return _request_row(db, request_row, include_photo=is_system_administrator(caller))
 
 
-def _config_of(zone: Zone) -> dict[str, Any]:
-    params = zone.parameters if isinstance(zone.parameters, dict) else {}
-    config = params.get("config") if isinstance(params.get("config"), dict) else {}
-    return config
-
-
-def _centroid(zone: Zone) -> tuple[float, float] | None:
-    params = zone.parameters if isinstance(zone.parameters, dict) else {}
-    geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
-    polygon = geometry.get("geo_fence_polygon")
-    if not isinstance(polygon, dict):
-        polygon = zone.geo_fence_polygon if isinstance(zone.geo_fence_polygon, dict) else None
-    if not isinstance(polygon, dict):
-        return None
-    ring: list | None = None
-    coords = polygon.get("coordinates")
-    if polygon.get("type") == "Polygon" and isinstance(coords, list) and coords:
-        ring = coords[0]
-    elif polygon.get("type") == "MultiPolygon" and isinstance(coords, list) and coords:
-        first = coords[0]
-        if isinstance(first, list) and first:
-            ring = first[0]
-    if not isinstance(ring, list) or len(ring) < 3:
-        return None
-    lngs: list[float] = []
-    lats: list[float] = []
-    for point in ring:
-        if isinstance(point, (list, tuple)) and len(point) >= 2:
-            lngs.append(float(point[0]))
-            lats.append(float(point[1]))
-    if not lngs:
-        return None
-    return sum(lngs) / len(lngs), sum(lats) / len(lats)
-
-
-def _text_match(credential: UniversalAccessCredential, zone: Zone) -> bool:
-    config = _config_of(zone)
-    city = str(config.get("city") or "").strip().lower()
-    region = str(config.get("region") or config.get("state") or "").strip().lower()
-    country = str(config.get("country") or "").strip().lower()
-    if not city and not region and not country:
-        return False
-    if city and city != credential.city.strip().lower():
-        return False
-    if region and region != credential.region.strip().lower():
-        return False
-    if country and country != credential.country.strip().lower():
-        return False
-    return True
-
-
-def _bbox_match(credential: UniversalAccessCredential, zone: Zone) -> bool:
-    bbox = credential.place_bbox
-    if not isinstance(bbox, list) or len(bbox) != 4:
-        return False
-    centroid = _centroid(zone)
-    if centroid is None:
-        return False
-    lng, lat = centroid
-    west, south, east, north = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
-    return west <= lng <= east and south <= lat <= north
-
-
-def _zone_in_credential(credential: UniversalAccessCredential, zone: Zone) -> bool:
-    if isinstance(credential.place_bbox, list) and len(credential.place_bbox) == 4:
-        return _bbox_match(credential, zone)
-    return _text_match(credential, zone)
-
-
 def enabled_credentials_for(db: Session, owner: Owner) -> list[UniversalAccessCredential]:
     return (
         db.query(UniversalAccessCredential)
@@ -539,27 +630,39 @@ def universal_primary_zones(
     *,
     already_ids: set[int],
 ) -> list[Zone]:
-    """Primary zones in the member's enabled places, including other networks."""
+    """Primary zones an approved universal access credential shares with this person."""
     if is_system_administrator(owner):
         return []
-    credentials = enabled_credentials_for(db, owner)
-    if not credentials:
+    wanted: list[int] = []
+    seen: set[int] = set()
+    for credential in enabled_credentials_for(db, owner):
+        for zone_id in _int_ids(credential.zone_ids):
+            if zone_id in seen or zone_id in already_ids:
+                continue
+            seen.add(zone_id)
+            wanted.append(zone_id)
+            if len(wanted) >= _MAX_UNIVERSAL_ZONES:
+                break
+        if len(wanted) >= _MAX_UNIVERSAL_ZONES:
+            break
+    if not wanted:
         return []
     rows = (
         db.query(Zone)
         .options(defer(Zone.geo_fence_polygon))
-        .filter(Zone.active.is_(True), Zone.is_primary.is_(True))
-        .order_by(Zone.id.desc())
-        .limit(500)
+        .filter(
+            Zone.id.in_(tuple(wanted)),
+            Zone.active.is_(True),
+            Zone.is_primary.is_(True),
+        )
         .all()
     )
+    by_id = {int(row.id): row for row in rows}
     matched: list[Zone] = []
-    for zone in rows:
-        if int(zone.id) in already_ids:
+    for zone_id in wanted:
+        zone = by_id.get(zone_id)
+        if zone is None:
             continue
-        if any(_zone_in_credential(cred, zone) for cred in credentials):
-            setattr(zone, "shared_via_universal", True)
-            matched.append(zone)
-            if len(matched) >= _MAX_UNIVERSAL_ZONES:
-                break
+        setattr(zone, "shared_via_universal", True)
+        matched.append(zone)
     return matched

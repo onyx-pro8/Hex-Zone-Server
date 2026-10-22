@@ -177,7 +177,7 @@ def merged_inbox_permission_event_visible(db: Session, viewer: Owner, row: ZoneM
     meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
     # Universal access requests are filed on a network id that may not be a zone
     # record. System administrators listed on the event still see the history row.
-    if meta.get("flow") == "universal_access_request":
+    if meta.get("flow") in {"universal_access_request", "universal_access_granted"}:
         delivered = meta.get("delivered_owner_ids") or []
         if isinstance(delivered, list) and viewer.id in delivered:
             return True
@@ -317,6 +317,7 @@ def list_zone_permission_events_for_owner_feed(
         if merged_inbox_permission_event_visible(db, owner, row):
             visible.append(row)
             seen.add(row.id)
+    # System admins review requests filed against another network id.
     if is_system_administrator(owner):
         extra = (
             db.query(ZoneMessageEvent)
@@ -333,6 +334,27 @@ def list_zone_permission_events_for_owner_feed(
                 continue
             if merged_inbox_permission_event_visible(db, owner, row):
                 visible.append(row)
+                seen.add(row.id)
+    # Invitees are the receiver even when the event is filed on the admin network.
+    addressed = (
+        db.query(ZoneMessageEvent)
+        .filter(
+            ZoneMessageEvent.type == CanonicalMessageType.PERMISSION.value,
+            ZoneMessageEvent.receiver_id == owner.id,
+        )
+        .order_by(ZoneMessageEvent.created_at.desc())
+        .limit(max(1, min(int(max_scan), 200)))
+        .all()
+    )
+    for row in addressed:
+        if row.id in seen:
+            continue
+        meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+        if meta.get("flow") != "universal_access_granted":
+            continue
+        if merged_inbox_permission_event_visible(db, owner, row):
+            visible.append(row)
+            seen.add(row.id)
     return visible
 
 

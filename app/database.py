@@ -226,6 +226,80 @@ def patch_qr_registration_expires_nullable() -> None:
     logger.info("qr_registrations.expires_at nullable patch applied")
 
 
+def patch_universal_access_zone_share_columns() -> None:
+    """Allow zone-based universal access shares on existing databases."""
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
+        conn.execute(text("SET LOCAL statement_timeout = '8s';"))
+        if conn.execute(text("SELECT to_regclass('public.universal_access_requests')")).scalar() is None:
+            return
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_requests "
+                "ADD COLUMN IF NOT EXISTS business_document TEXT NOT NULL DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_requests "
+                "ADD COLUMN IF NOT EXISTS zone_ids JSON NOT NULL DEFAULT '[]'::json;"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_requests "
+                "ALTER COLUMN address SET DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_requests "
+                "ALTER COLUMN country SET DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_requests "
+                "ALTER COLUMN region SET DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_requests "
+                "ALTER COLUMN city SET DEFAULT '';"
+            )
+        )
+        if conn.execute(text("SELECT to_regclass('public.universal_access_credentials')")).scalar() is None:
+            return
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_credentials "
+                "ADD COLUMN IF NOT EXISTS zone_ids JSON NOT NULL DEFAULT '[]'::json;"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_credentials "
+                "ALTER COLUMN country SET DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_credentials "
+                "ALTER COLUMN region SET DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_credentials "
+                "ALTER COLUMN city SET DEFAULT '';"
+            )
+        )
+    logger.info("Universal access zone share columns patch applied")
+
+
 def patch_qr_registration_communal_id_column() -> None:
     """Add pre-issued Communal ID column on member-invite QR tokens."""
     if engine.dialect.name != "postgresql":
@@ -268,6 +342,10 @@ def init_db():
         patch_qr_registration_communal_id_column()
     except Exception as exc:
         logger.exception("QR registration communal_id column patch failed: %s", exc)
+    try:
+        patch_universal_access_zone_share_columns()
+    except Exception as exc:
+        logger.exception("Universal access zone share columns patch failed: %s", exc)
 
     if engine.dialect.name == "postgresql":
         # Quick-alert templates live in `messages` flagged with is_template.

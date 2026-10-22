@@ -24,7 +24,7 @@ class UniversalAccessStatus(str, enum.Enum):
 
 
 class UniversalAccessRequest(Base):
-    """A network admin asks the system admin to mint a place-bound credential."""
+    """A network admin asks the system admin to share selected primary zones."""
 
     __tablename__ = "universal_access_requests"
 
@@ -33,11 +33,15 @@ class UniversalAccessRequest(Base):
     member_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
     member_name = Column(String(200), nullable=False)
     email = Column(String(255), nullable=False)
-    address = Column(String(255), nullable=False)
+    address = Column(String(255), nullable=False, default="")
     photo_id = Column(Text, nullable=False)
-    country = Column(String(120), nullable=False)
-    region = Column(String(120), nullable=False)
-    city = Column(String(120), nullable=False)
+    business_document = Column(Text, nullable=False, default="")
+    # Integer primary-zone ids the admin is offering to share.
+    zone_ids = Column(JSON, nullable=False, default=list)
+    # Kept for older rows. New requests do not use a place.
+    country = Column(String(120), nullable=False, default="")
+    region = Column(String(120), nullable=False, default="")
+    city = Column(String(120), nullable=False, default="")
     note = Column(Text, nullable=False, default="")
     status = Column(
         Enum(UniversalAccessStatus),
@@ -52,7 +56,7 @@ class UniversalAccessRequest(Base):
 
 
 class UniversalAccessCredential(Base):
-    """Official credential. While enabled, the member sees primary zones in this place."""
+    """Official credential. While enabled, the invitee sees the shared primary zones."""
 
     __tablename__ = "universal_access_credentials"
 
@@ -67,11 +71,12 @@ class UniversalAccessCredential(Base):
     member_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
     network_admin_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
     code = Column(String(32), nullable=False, unique=True, index=True)
-    country = Column(String(120), nullable=False)
-    region = Column(String(120), nullable=False)
-    city = Column(String(120), nullable=False)
+    zone_ids = Column(JSON, nullable=False, default=list)
+    country = Column(String(120), nullable=False, default="")
+    region = Column(String(120), nullable=False, default="")
+    city = Column(String(120), nullable=False, default="")
     enabled = Column(Boolean, nullable=False, default=True)
-    # [west, south, east, north] in degrees. Null when the place could not be resolved.
+    # Legacy place box. New credentials share explicit zone ids instead.
     place_bbox = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

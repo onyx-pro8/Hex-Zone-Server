@@ -28,13 +28,13 @@ def test_polygon_beats_a_radius():
 
 def test_each_zone_limit_blocks_before_the_total():
     assert area_block_reason(50, 0, each_zone_m2=10, total_m2=1000) == (
-        "This zone is bigger than the each-zone limit."
+        "Exceeds the each-zone size limit."
     )
 
 
 def test_total_limit_blocks_when_the_account_is_full():
     assert area_block_reason(30, 80, each_zone_m2=100, total_m2=100) == (
-        "Not enough total size left."
+        "Exceeds the total size limit."
     )
 
 

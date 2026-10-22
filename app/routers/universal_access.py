@@ -1,5 +1,5 @@
 """Universal access code requests and credentials."""
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -12,12 +12,10 @@ router = APIRouter(prefix="/universal-access", tags=["universal-access"])
 
 
 class UniversalAccessCreate(BaseModel):
-    member_id: int = Field(..., ge=1)
-    address: str = Field(..., min_length=1, max_length=255)
+    invitee_email: str = Field(..., min_length=3, max_length=255)
+    zone_ids: list[int] = Field(..., min_length=1)
     photo_id: str = Field(..., min_length=1)
-    country: str = Field(..., min_length=1, max_length=120)
-    region: str = Field(..., min_length=1, max_length=120)
-    city: str = Field(..., min_length=1, max_length=120)
+    business_document: str = Field(..., min_length=1)
     note: str = Field("", max_length=1000)
 
 
@@ -36,6 +34,25 @@ def _caller(db: Session, current_user: dict):
     return owner
 
 
+@router.get("/primary-zones")
+def list_shareable_primary_zones(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    caller = _caller(db, current_user)
+    return universal_access_service.shareable_primary_zones(db, admin=caller)
+
+
+@router.get("/invitees")
+def search_invitees(
+    q: str = Query("", max_length=255),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    caller = _caller(db, current_user)
+    return universal_access_service.search_invitees(db, admin=caller, query=q, limit=5)
+
+
 @router.post("/requests")
 async def create_universal_access_request(
     body: UniversalAccessCreate,
@@ -46,12 +63,10 @@ async def create_universal_access_request(
     created = universal_access_service.create_request(
         db,
         admin=caller,
-        member_id=body.member_id,
-        address=body.address,
+        invitee_email=body.invitee_email,
+        zone_ids=body.zone_ids,
         photo_id=body.photo_id,
-        country=body.country,
-        region=body.region,
-        city=body.city,
+        business_document=body.business_document,
         note=body.note,
     )
     notice_event_id = created.pop("notice_event_id", None)
@@ -80,13 +95,17 @@ def get_universal_access_request(
 
 
 @router.post("/requests/{request_id}/approve")
-def approve_universal_access_request(
+async def approve_universal_access_request(
     request_id: int,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     caller = _caller(db, current_user)
-    return universal_access_service.approve_request(db, caller=caller, request_id=request_id)
+    approved = universal_access_service.approve_request(db, caller=caller, request_id=request_id)
+    notice_event_id = approved.pop("notice_event_id", None)
+    if notice_event_id:
+        await universal_access_service.notify_grant_recipients(db, str(notice_event_id))
+    return approved
 
 
 @router.post("/requests/{request_id}/reject")
