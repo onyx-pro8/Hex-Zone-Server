@@ -156,21 +156,24 @@ def shareable_primary_zones(db: Session, *, admin: Owner) -> list[dict[str, Any]
 
 
 def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) -> list[dict[str, Any]]:
-    """Up to five active accounts whose email or name contains the keyword."""
+    """Up to five accounts in any network whose email or name contains the keyword."""
     _require_network_admin(admin)
     needle = " ".join(str(query or "").split()).lower()
-    if len(needle) < 1:
+    if len(needle) < 2:
         return []
-    like = f"%{needle}%"
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like = f"%{escaped}%"
+    full_name = func.lower(func.concat(Owner.first_name, " ", Owner.last_name))
     rows = (
         db.query(Owner)
         .filter(
-            Owner.active.is_(True),
             Owner.id != admin.id,
             or_(
-                func.lower(Owner.email).like(like),
-                func.lower(Owner.first_name).like(like),
-                func.lower(Owner.last_name).like(like),
+                func.lower(Owner.email).like(like, escape="\\"),
+                func.lower(Owner.first_name).like(like, escape="\\"),
+                func.lower(Owner.last_name).like(like, escape="\\"),
+                func.lower(Owner.broadcast_name).like(like, escape="\\"),
+                full_name.like(like, escape="\\"),
             ),
         )
         .order_by(Owner.email.asc())
@@ -178,7 +181,12 @@ def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) ->
         .all()
     )
     return [
-        {"id": row.id, "name": _owner_name(row), "email": row.email}
+        {
+            "id": row.id,
+            "name": _owner_name(row),
+            "email": row.email,
+            "network_id": (row.zone_id or "").strip(),
+        }
         for row in rows
     ]
 

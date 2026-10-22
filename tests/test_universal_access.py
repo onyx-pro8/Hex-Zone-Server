@@ -146,6 +146,28 @@ def test_approved_code_shows_selected_primary_zones(db):
     assert universal_access_service.universal_primary_zones(db, invitee, already_ids=set()) == []
 
 
+def test_invitee_search_includes_other_networks(db):
+    admin = _owner(
+        db,
+        email="net@example.com",
+        zone_id="NET-A",
+        account_type=AccountType.ENHANCED,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    _owner(
+        db,
+        email="worker@city.gov",
+        zone_id="NET-OTHER",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+    )
+    db.commit()
+
+    matches = universal_access_service.search_invitees(db, admin=admin, query="city.gov")
+    assert [row["email"] for row in matches] == ["worker@city.gov"]
+    assert matches[0]["network_id"] == "NET-OTHER"
+
+
 def test_family_admin_cannot_request_universal_access(db):
     admin = _owner(
         db,
