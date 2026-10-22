@@ -43,9 +43,15 @@ class UniversalAccessRequest(Base):
     photo_id = Column(Text, nullable=False, default="")
     business_document = Column(Text, nullable=False, default="")
     request_kind = Column(
-        Enum(UniversalAccessKind),
+        Enum(
+            UniversalAccessKind,
+            native_enum=False,
+            length=32,
+            values_callable=lambda choices: [item.value for item in choices],
+        ),
         nullable=False,
         default=UniversalAccessKind.INVITE,
+        server_default=UniversalAccessKind.INVITE.value,
         index=True,
     )
     # Invite: zones the admin wants to share. Place access: empty until System Admin picks.
