@@ -20,6 +20,10 @@ INDIVIDUAL_ACCOUNT_USER_ROLE_ONLY_DETAIL = (
     "Individual accounts always use the user role and cannot be administrators."
 )
 
+INDIVIDUAL_PRO_ADMIN_ROLE_ONLY_DETAIL = (
+    "Individual Pro accounts always use the administrator role and cannot invite members."
+)
+
 ROLE_CHANGE_SYSTEM_ADMIN_ONLY_DETAIL = (
     "Only system administrators may change user roles."
 )
@@ -37,6 +41,14 @@ def is_individual_account_type(account_type: str | AccountType | None) -> bool:
     return normalize_pricing_tier_key(value) == "exclusive"
 
 
+def is_individual_pro_account_type(account_type: str | AccountType | None) -> bool:
+    """True for Enhanced / Individual Pro tier."""
+    if account_type is None:
+        return False
+    value = account_type.value if isinstance(account_type, AccountType) else str(account_type)
+    return normalize_pricing_tier_key(value) == "enhanced"
+
+
 def assert_account_type_allowed_for_public_registration(account_type: str) -> None:
     """Reject self-service registration for the Private (system admin) tier."""
     if normalize_pricing_tier_key(account_type) == PRICING_TIER_PRIVATE:
@@ -47,9 +59,15 @@ def assert_account_type_allowed_for_public_registration(account_type: str) -> No
 
 
 def coerce_individual_registration_role(account_type: str, role: OwnerRole) -> OwnerRole:
-    """Individual accounts always register as user (never administrator)."""
+    """Lock signup role for tiers that have only one role.
+
+    Individual accounts always register as user. Individual Pro accounts always
+    register as administrator.
+    """
     if is_individual_account_type(account_type):
         return OwnerRole.USER
+    if is_individual_pro_account_type(account_type):
+        return OwnerRole.ADMINISTRATOR
     return role
 
 
@@ -58,14 +76,20 @@ def assert_individual_role_change_allowed(
     account_type: str | AccountType | None,
     new_role: str | OwnerRole | None,
 ) -> None:
-    """Reject promoting an Individual account to administrator."""
-    if new_role is None or not is_individual_account_type(account_type):
+    """Reject roles that the account type does not allow."""
+    if new_role is None:
         return
     role_value = new_role.value if isinstance(new_role, OwnerRole) else str(new_role)
-    if role_value.strip().lower() == "administrator":
+    normalized = role_value.strip().lower()
+    if is_individual_account_type(account_type) and normalized == "administrator":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=INDIVIDUAL_ACCOUNT_USER_ROLE_ONLY_DETAIL,
+        )
+    if is_individual_pro_account_type(account_type) and normalized == "user":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=INDIVIDUAL_PRO_ADMIN_ROLE_ONLY_DETAIL,
         )
 
 
@@ -75,7 +99,10 @@ def assert_role_change_allowed(
     account_type: str | AccountType | None = None,
     new_role: str | OwnerRole | None = None,
 ) -> None:
-    """Only system administrators may change roles; Individuals stay user-only."""
+    """Only system administrators may change roles.
+
+    Individual accounts stay user-only. Individual Pro accounts stay administrator-only.
+    """
     if new_role is None:
         return
     if not is_system_administrator(caller):
@@ -101,7 +128,8 @@ def account_type_for_invited_member(administrator: Owner) -> AccountType:
 
     - Family (private_plus) / Organization (enhanced_plus): same type as inviter,
       role stays ``user``.
-    - Individual Pro (enhanced): invited seat is Individual (exclusive).
+    - Individual Pro (enhanced) cannot invite members. Callers must reject that
+      tier before using this helper. The Exclusive fallback is only a guard.
     - Other tiers: Individual (exclusive).
 
     System-admin (Private) QR invites are separate: they provision a *Solo*

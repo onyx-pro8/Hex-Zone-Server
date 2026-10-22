@@ -284,8 +284,8 @@ async def convert_to_h3(
         "account for a new network (invitee chooses their own network ID on join). "
         "**Family (Private+) / Organization (Enhanced+):** invite a **user-role** member with "
         "the same account type onto the inviter's network. "
-        "**Individual Pro (Enhanced):** invite one **Individual** user onto the primary zone. "
-        "**Exclusive** (solo Individual) accounts cannot generate these invites. "
+        "**Individual Pro (Enhanced)** and **Exclusive** (solo Individual) accounts "
+        "cannot generate these invites. "
         "Each invite mints a unique Communal ID for the invitee (Individuals cannot "
         "generate one themselves). "
         "Send **`expires_in_hours`: 0** (or **null**) for a never-expiring "
@@ -326,8 +326,12 @@ async def generate_qr_registration(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "This account type does not support member invite QR codes "
-                "(Enhanced accounts are solo administrator only)"
+                "Individual Pro accounts are administrator-only and cannot generate member invite QR codes."
+                if str(owner.account_type.value).strip().lower() == "enhanced"
+                else (
+                    "This account type does not support member invite QR codes "
+                    "(solo accounts cannot invite members)."
+                )
             ),
         )
 
@@ -530,7 +534,7 @@ def _resolve_qr_join_address(*, inviter: Owner, submitted: str | None, inherit_a
     description=(
         "Public (no auth) preview of a QR invite. Clients use this to choose the "
         "join form: **member** (user-role member on inviter zone; Family/Org inherit "
-        "inviter account type, Individual Pro invites are Individual) vs **new_network_admin** "
+        "inviter account type) vs **new_network_admin** "
         "(Individual user account for a new network ID supplied on join)."
     ),
     responses={
@@ -578,8 +582,7 @@ async def preview_qr_registration(
         "**Family / Organization admins:** create a **user-role** member with the same "
         "account type on the inviter's zone. Family members inherit the administrator's "
         "home address (clients should omit the address field). "
-        "**Individual Pro:** create an **Individual** user member on the inviter's zone "
-        "(max one invited seat). "
+        "Individual Pro accounts cannot create member invites. "
         "All invite tokens (timed and never-expiring) are single-use."
     ),
     responses={

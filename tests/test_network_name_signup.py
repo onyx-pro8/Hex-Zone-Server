@@ -131,14 +131,22 @@ def test_joinable_networks_match_the_selected_account_type(test_db):
     _admin(test_db, email="ada@example.com", zone_id="Family-Net")
     _admin(
         test_db,
+        email="org@example.com",
+        zone_id="Org-Net",
+        account_type=AccountType.ENHANCED_PLUS,
+    )
+    _admin(
+        test_db,
         email="pro@example.com",
         zone_id="Pro-Net",
         account_type=AccountType.ENHANCED,
     )
     family = list_joinable_networks(test_db, account_type="PRIVATE_PLUS")
+    org = list_joinable_networks(test_db, account_type="enhanced_plus")
     pro = list_joinable_networks(test_db, account_type="enhanced")
     assert [row["network_id"] for row in family] == ["Family-Net"]
-    assert [row["network_id"] for row in pro] == ["Pro-Net"]
+    assert [row["network_id"] for row in org] == ["Org-Net"]
+    assert pro == []
 
 
 def test_different_account_type_does_not_join_the_network(test_db):
@@ -187,7 +195,7 @@ def test_unknown_administrator_email_is_rejected(test_db):
     assert exc.value.detail == NETWORK_ADMIN_EMAIL_NOT_FOUND_DETAIL
 
 
-def test_contract_join_inherits_the_administrator_plan(test_db, monkeypatch):
+def test_individual_pro_signup_is_administrator_not_a_member(test_db, monkeypatch):
     monkeypatch.setattr("app.services.auth_service.get_password_hash", lambda _password: "hashed")
     monkeypatch.setattr(
         "app.services.auth_service.sync_owner_home_from_address",
@@ -209,12 +217,15 @@ def test_contract_join_inherits_the_administrator_plan(test_db, monkeypatch):
             "password": "SecurePassword123",
             "accountType": "ENHANCED",
             "registrationType": "USER",
-            "zoneId": "pro-net",
+            "registrationCode": "FREE",
+            "zoneId": "pro-own-net",
             "address": "2 Member St",
         },
     )
-    assert created["account_owner_id"] == admin.id
-    assert created["account_type"] == "exclusive"
+    assert created["role"] == "administrator"
+    assert created["account_type"] == "enhanced"
+    assert int(created["account_owner_id"]) == int(created["id"])
+    assert int(created["account_owner_id"]) != admin.id
 
 
 def test_explicit_account_owner_id_still_links(test_db):

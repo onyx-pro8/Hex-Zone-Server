@@ -14,6 +14,8 @@ from app.schemas.schemas import AccountTypeEnum, OwnerUpdate
 from app.services.account_type_policy import (
     account_type_for_invited_member,
     assert_account_type_change_allowed,
+    assert_individual_role_change_allowed,
+    coerce_individual_registration_role,
     invited_member_inherits_admin_address,
 )
 
@@ -178,6 +180,23 @@ def test_private_account_type_requires_administrator_role(db):
             system_admin,
             user,
             AccountType.PRIVATE.value,
+        )
+    assert exc.value.status_code == 422
+
+
+def test_individual_pro_registration_role_is_administrator_only():
+    assert (
+        coerce_individual_registration_role("enhanced", OwnerRole.USER)
+        == OwnerRole.ADMINISTRATOR
+    )
+    assert (
+        coerce_individual_registration_role("exclusive", OwnerRole.ADMINISTRATOR)
+        == OwnerRole.USER
+    )
+    with pytest.raises(HTTPException) as exc:
+        assert_individual_role_change_allowed(
+            account_type="enhanced",
+            new_role=OwnerRole.USER,
         )
     assert exc.value.status_code == 422
 

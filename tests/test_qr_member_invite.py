@@ -376,13 +376,16 @@ async def test_qr_join_family_inherits_admin_address(test_db, override_get_db):
 
 
 @pytest.mark.asyncio
-async def test_qr_join_rejects_when_member_capacity_full(test_db, override_get_db):
+async def test_qr_join_rejects_when_member_capacity_full(test_db, override_get_db, monkeypatch):
     """Leftover invites surface a clear limit message and independent-signup hint."""
-    admin, token = _admin(
+    from app.services.device_entitlements import USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE
+
+    monkeypatch.setitem(USER_MEMBER_LIMITS_BY_ACCOUNT_TYPE, "private_plus", 2)
+    _, token = _admin(
         test_db,
-        email="pro-admin@example.com",
-        zone_id="pro-zone",
-        account_type=AccountType.ENHANCED,
+        email="family-admin@example.com",
+        zone_id="family-zone",
+        account_type=AccountType.PRIVATE_PLUS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post(
@@ -445,8 +448,9 @@ async def test_qr_join_organization_inherits_account_type(test_db, override_get_
 
 
 @pytest.mark.asyncio
-async def test_qr_join_individual_pro_invites_one_individual(test_db, override_get_db):
-    admin, token = _admin(
+async def test_qr_generate_rejected_for_individual_pro(test_db, override_get_db):
+    """Individual Pro is administrator-only and cannot mint member-invite QR codes."""
+    _, token = _admin(
         test_db,
         email="pro-admin@example.com",
         zone_id="pro-zone",
@@ -458,29 +462,10 @@ async def test_qr_join_individual_pro_invites_one_individual(test_db, override_g
             headers={"Authorization": f"Bearer {token}"},
             json={"expires_in_hours": 24},
         )
-        assert generate.status_code == 200, generate.text
-        preview = await client.get(
-            "/utils/qr/preview",
-            params={"token": generate.json()["token"]},
-        )
-        assert preview.status_code == 200, preview.text
-        assert preview.json()["account_type"] == "exclusive"
-
-        join = await _join(client, generate.json()["token"], "pro-member@example.com")
-        assert join.status_code == 200, join.text
-        joined = join.json()
-        assert joined["account_type"] == "exclusive"
-        assert joined["role"] == "user"
-        assert joined["zone_id"] == admin.zone_id
-        assert joined["account_owner_id"] == admin.id
-        assert joined["address"] == "Member Address"
-
-        second_generate = await client.post(
-            "/utils/qr/generate",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"expires_in_hours": 24},
-        )
-        assert second_generate.status_code == 403, second_generate.text
+        assert generate.status_code == 403, generate.text
+        body = generate.json()
+        text = str(body.get("message") or body.get("detail") or "").lower()
+        assert "individual pro" in text or "member invite" in text
 
 
 @pytest.mark.asyncio

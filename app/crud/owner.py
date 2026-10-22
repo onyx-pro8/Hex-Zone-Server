@@ -158,8 +158,8 @@ def cascade_account_type_from_administrator(
 ) -> None:
     """Sync invited members' account type from the account holder.
 
-    Family/Organization members inherit the admin tier; Individual Pro invites
-    stay Individual (Exclusive).
+    Family/Organization members inherit the admin tier. Individual Pro accounts
+    have no invited members.
     """
     _ = account_type  # caller passes the admin's new type; policy reads administrator
     if administrator.role.value != "administrator":

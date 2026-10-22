@@ -34,6 +34,7 @@ from app.services.account_type_policy import (
     assert_role_change_allowed,
     coerce_individual_registration_role,
     is_individual_account_type,
+    is_individual_pro_account_type,
     is_system_administrator,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
@@ -106,7 +107,7 @@ async def register_owner(
         administrator_email=owner.administrator_email,
     )
 
-    # Invited users inherit Family/Org type (or Individual under Pro).
+    # Invited users inherit the Family or Organization account type.
     if owner.role == OwnerRoleEnum.USER and owner.account_owner_id is not None:
         administrator = db.get(OwnerModel, owner.account_owner_id)
         if administrator is not None:
@@ -535,6 +536,13 @@ async def update_owner(
 
             if target.role != ModelOwnerRole.USER:
                 owner_update.role = SchemaOwnerRole.USER
+        if owner_update.role is None and is_individual_pro_account_type(effective_type):
+            # Changing into Individual Pro forces administrator role.
+            from app.models.owner import OwnerRole as ModelOwnerRole
+            from app.schemas.schemas import OwnerRoleEnum as SchemaOwnerRole
+
+            if target.role != ModelOwnerRole.ADMINISTRATOR:
+                owner_update.role = SchemaOwnerRole.ADMINISTRATOR
 
     if owner_update.account_type is not None:
         target = owner_crud.get_owner(db, owner_id)
