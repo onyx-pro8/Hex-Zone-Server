@@ -777,6 +777,35 @@ async def notify_decision_recipients(db: Session, event_id: str, *, title: str) 
     )
 
 
+async def notify_granted_zones(db: Session, *, member_id: int, zone_ids: list[int]) -> None:
+    """Tell the approved member to redraw their zone map immediately."""
+    from app.websocket.manager import ws_manager
+
+    owner = db.get(Owner, int(member_id))
+    if owner is None:
+        return
+    visible = universal_primary_zones(db, owner, already_ids=set())
+    try:
+        from app.services.zone_service import _serialize_zone
+
+        zones = [_serialize_zone(zone) for zone in visible]
+    except Exception:
+        logger.exception("Could not serialize granted zones for owner %s", member_id)
+        zones = []
+    try:
+        await ws_manager.broadcast_to_users(
+            [int(member_id)],
+            "UNIVERSAL_ZONES_GRANTED",
+            {
+                "member_id": int(member_id),
+                "zone_ids": _int_ids(zone_ids),
+                "zones": zones,
+            },
+        )
+    except Exception:
+        logger.exception("Universal zone grant push failed for owner %s", member_id)
+
+
 def list_requests(db: Session, *, caller: Owner) -> list[dict[str, Any]]:
     if (caller.role.value or "").strip().lower() != "administrator":
         raise HTTPException(
@@ -1055,17 +1084,23 @@ def universal_primary_zones(
             break
     if not wanted:
         return []
-    rows = (
-        db.query(Zone)
-        .options(defer(Zone.geo_fence_polygon))
-        .filter(Zone.id.in_(tuple(wanted)), Zone.active.is_(True))
-        .all()
-    )
-    by_id = {int(row.id): row for row in rows}
+    try:
+        from app.crud.zone import list_zones_with_geojson_by_ids
+
+        rows = list_zones_with_geojson_by_ids(db, wanted, active_only=True)
+    except Exception:
+        # SQLite tests (and hosts without PostGIS) fall back to plain rows.
+        rows = (
+            db.query(Zone)
+            .options(defer(Zone.geo_fence_polygon))
+            .filter(Zone.id.in_(tuple(wanted)), Zone.active.is_(True))
+            .all()
+        )
+        by_id = {int(row.id): row for row in rows}
+        rows = [by_id[zone_id] for zone_id in wanted if zone_id in by_id]
     matched: list[Zone] = []
-    for zone_id in wanted:
-        zone = by_id.get(zone_id)
-        if zone is None or not _zone_is_shareable(zone):
+    for zone in rows:
+        if not _zone_is_shareable(zone):
             continue
         setattr(zone, "shared_via_universal", True)
         matched.append(zone)

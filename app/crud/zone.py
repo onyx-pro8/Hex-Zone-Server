@@ -240,6 +240,30 @@ def list_zones_by_zone_id_with_geojson(
     return zones
 
 
+def list_zones_with_geojson_by_ids(
+    db: Session,
+    zone_ids: Sequence[int],
+    *,
+    active_only: bool = True,
+) -> List[Zone]:
+    """Load specific zone rows with GeoJSON polygons for map clients."""
+    ids = [int(zone_id) for zone_id in zone_ids if int(zone_id) > 0]
+    if not ids:
+        return []
+    query = select(
+        Zone,
+        func.ST_AsGeoJSON(Zone.geo_fence_polygon).label("geo_fence_polygon"),
+    ).where(Zone.id.in_(tuple(ids)))
+    if active_only:
+        query = query.where(Zone.active == True)
+    result = db.execute(query).all()
+    by_id: dict[int, Zone] = {}
+    for zone, geojson_text in result:
+        apply_zone_geo_fence_geojson(zone, geojson_text)
+        by_id[int(zone.id)] = zone
+    return [by_id[zone_id] for zone_id in ids if zone_id in by_id]
+
+
 def update_zone(
     db: Session,
     zone_id: str,

@@ -81,6 +81,15 @@ def _serialize_zone(
     config = dict((zone.parameters or {}).get("config", {}) or {})
     # Always source h3 cells from canonical DB column.
     config["h3Cells"] = list(zone.h3_cells or [])
+    if getattr(zone, "shared_via_universal", False):
+        config["universal_access"] = True
+    geometry = (zone.parameters or {}).get("geometry", {})
+    geometry = dict(geometry) if isinstance(geometry, dict) else {}
+    # Prefer an already-loaded GeoJSON dict (from ST_AsGeoJSON). Do not touch a
+    # deferred PostGIS column — that breaks SQLite tests and is slow in prod.
+    loaded_polygon = zone.__dict__.get("geo_fence_polygon")
+    if isinstance(loaded_polygon, dict) and "geo_fence_polygon" not in geometry:
+        geometry["geo_fence_polygon"] = loaded_polygon
     preferred_id = (
         int(zone.creator_id) if zone.creator_id is not None else int(zone.owner_id)
     )
@@ -95,7 +104,7 @@ def _serialize_zone(
         "owner_name": owner_name,
         "name": zone.name,
         "type": contract_type or MODEL_TO_CONTRACT_ZONE_TYPE.get(zone.zone_type, "dynamic"),
-        "geometry": (zone.parameters or {}).get("geometry", {}),
+        "geometry": geometry,
         "config": config,
         "is_primary": zone_is_primary(zone),
     }
@@ -162,15 +171,25 @@ def create_zone(db: Session, owner: Owner, payload: dict) -> dict:
 
 
 def list_zones(db: Session, owner: Owner) -> list[dict]:
+    from sqlalchemy.orm import defer
+
+    from app.services.universal_access_service import universal_primary_zones
+
     owner_ids = visible_zone_owner_ids(db, owner)
-    query = db.query(Zone).filter(Zone.owner_id.in_(owner_ids), Zone.active.is_(True))
+    query = (
+        db.query(Zone)
+        .options(defer(Zone.geo_fence_polygon))
+        .filter(Zone.owner_id.in_(owner_ids), Zone.active.is_(True))
+    )
     visibility = list_zones_visibility_filter(owner)
     if visibility is not None:
         query = query.filter(visibility)
     zones = query.all()
 
-    # Network-scoped only (system admin sees all via visible_zone_owner_ids).
-    # Communal selection uses GET /zones/public (network primary zones).
+    # Network-scoped zones, plus primary/communal zones granted through
+    # approved universal access (the mobile app calls this contract list).
+    already = {int(zone.id) for zone in zones}
+    zones = [*zones, *universal_primary_zones(db, owner, already_ids=already)]
 
     lookup_ids: set[int] = set()
     for zone in zones:

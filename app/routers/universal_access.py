@@ -166,6 +166,11 @@ async def approve_universal_access_request(
             str(notice_event_id),
             title="Universal access approved",
         )
+    await universal_access_service.notify_granted_zones(
+        db,
+        member_id=int(approved["member_id"]),
+        zone_ids=list(approved.get("zone_ids") or []),
+    )
     return approved
 
 

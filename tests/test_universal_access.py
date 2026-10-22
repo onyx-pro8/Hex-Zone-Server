@@ -192,6 +192,11 @@ def test_place_access_lets_system_admin_pick_matching_zones(db, monkeypatch):
     visible = universal_access_service.universal_primary_zones(db, admin, already_ids=set())
     assert [row.id for row in visible] == [austin]
 
+    from app.services import zone_service
+
+    listed = zone_service.list_zones(db, admin)
+    assert any(int(row["id"]) == austin and row["config"].get("universal_access") for row in listed)
+
 
 def test_place_access_finds_mapped_zones_in_other_networks(db, monkeypatch):
     def fake_reverse(lng, lat):
