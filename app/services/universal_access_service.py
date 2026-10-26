@@ -320,11 +320,13 @@ def lookup_target_network(db: Session, *, caller: Owner, network_id: str) -> dic
 
 
 def search_target_networks(db: Session, *, caller: Owner, query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Suggest other networks only — UA place access is cross-network."""
     needle = " ".join(str(query or "").split()).lower()
     if len(needle) < 2:
         return []
     escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     like = f"%{escaped}%"
+    own_network = (caller.zone_id or "").strip().lower()
     zone_rows = (
         db.query(Zone)
         .options(defer(Zone.geo_fence_polygon))
@@ -346,6 +348,8 @@ def search_target_networks(db: Session, *, caller: Owner, query: str, limit: int
             continue
         network = (zone.zone_id or "").strip()
         if not network or network in seen:
+            continue
+        if own_network and network.lower() == own_network:
             continue
         try:
             payload = lookup_target_network(db, caller=caller, network_id=network)
