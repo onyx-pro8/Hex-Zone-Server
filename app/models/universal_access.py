@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 
 from app.database import Base
@@ -28,14 +29,22 @@ class UniversalAccessKind(str, enum.Enum):
     PLACE_ACCESS = "place_access"
 
 
+class UniversalAccessKeyType(str, enum.Enum):
+    PRIVATE = "private"
+    PUBLIC = "public"
+
+
 class UniversalAccessRequest(Base):
-    """Network admin asks System Admin to invite someone, or to enter other zones."""
+    """Invite key generation, or a place-access request to a network admin."""
 
     __tablename__ = "universal_access_requests"
 
     id = Column(Integer, primary_key=True, index=True)
+    # Invite: the network admin who generated the key.
+    # Place access: the network admin who must approve/reject.
     network_admin_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
-    # Invite: the invited person. Place access: the requester (same as network_admin).
+    # Invite private: the invited person. Invite public: the generating admin.
+    # Place access: the requester.
     member_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
     member_name = Column(String(200), nullable=False)
     email = Column(String(255), nullable=False)
@@ -54,7 +63,6 @@ class UniversalAccessRequest(Base):
         server_default=UniversalAccessKind.INVITE.value,
         index=True,
     )
-    # Invite: zones the admin wants to share. Place access: empty until System Admin picks.
     zone_ids = Column(JSON, nullable=False, default=list)
     country = Column(String(120), nullable=False, default="")
     region = Column(String(120), nullable=False, default="")
@@ -73,7 +81,7 @@ class UniversalAccessRequest(Base):
 
 
 class UniversalAccessCredential(Base):
-    """Granted share. While enabled, the member sees the selected zones."""
+    """Granted share. While enabled, members (or public-key holders) see the zones."""
 
     __tablename__ = "universal_access_credentials"
 
@@ -88,6 +96,18 @@ class UniversalAccessCredential(Base):
     member_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
     network_admin_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
     code = Column(String(32), nullable=False, unique=True, index=True)
+    key_type = Column(
+        Enum(
+            UniversalAccessKeyType,
+            native_enum=False,
+            length=16,
+            values_callable=lambda choices: [item.value for item in choices],
+        ),
+        nullable=False,
+        default=UniversalAccessKeyType.PRIVATE,
+        server_default=UniversalAccessKeyType.PRIVATE.value,
+        index=True,
+    )
     zone_ids = Column(JSON, nullable=False, default=list)
     country = Column(String(120), nullable=False, default="")
     region = Column(String(120), nullable=False, default="")
@@ -96,3 +116,22 @@ class UniversalAccessCredential(Base):
     place_bbox = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class UniversalAccessActivation(Base):
+    """Public key entered by a user so those zones appear on their map."""
+
+    __tablename__ = "universal_access_activations"
+    __table_args__ = (
+        UniqueConstraint("credential_id", "owner_id", name="uq_universal_access_activation"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    credential_id = Column(
+        Integer,
+        ForeignKey("universal_access_credentials.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id = Column(Integer, ForeignKey("owners.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

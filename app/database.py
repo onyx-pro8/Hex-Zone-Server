@@ -309,6 +309,38 @@ def patch_universal_access_zone_share_columns() -> None:
                 "ALTER COLUMN city SET DEFAULT '';"
             )
         )
+        conn.execute(
+            text(
+                "ALTER TABLE universal_access_credentials "
+                "ADD COLUMN IF NOT EXISTS key_type VARCHAR(16) NOT NULL DEFAULT 'private';"
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS universal_access_activations (
+                    id SERIAL PRIMARY KEY,
+                    credential_id INTEGER NOT NULL
+                        REFERENCES universal_access_credentials(id) ON DELETE CASCADE,
+                    owner_id INTEGER NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                    CONSTRAINT uq_universal_access_activation UNIQUE (credential_id, owner_id)
+                );
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_universal_access_activations_credential_id "
+                "ON universal_access_activations (credential_id);"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_universal_access_activations_owner_id "
+                "ON universal_access_activations (owner_id);"
+            )
+        )
     logger.info("Universal access zone share columns patch applied")
 
 

@@ -23,7 +23,9 @@ from app.models.wellness_sender_reply import WellnessSenderReply
 from app.models.alarm_message_read import AlarmMessageRead
 from app.models.emergency_event import EmergencyEvent
 from app.models.universal_access import (
+    UniversalAccessActivation,
     UniversalAccessCredential,
+    UniversalAccessKeyType,
     UniversalAccessRequest,
     UniversalAccessStatus,
 )
@@ -57,6 +59,8 @@ __all__ = [
     "EmergencyEvent",
     "UniversalAccessRequest",
     "UniversalAccessCredential",
+    "UniversalAccessActivation",
+    "UniversalAccessKeyType",
     "UniversalAccessStatus",
     "HubCommand",
     "ZoneSizeLimit",
