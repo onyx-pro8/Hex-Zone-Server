@@ -225,6 +225,7 @@ def shareable_network_zones(db: Session, *, admin: Owner) -> list[dict[str, Any]
 
 
 def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Suggest invitees on other networks only — UA is cross-network."""
     _require_network_admin(admin)
     needle = " ".join(str(query or "").split()).lower()
     if len(needle) < 2:
@@ -232,20 +233,30 @@ def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) ->
     escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     like = f"%{escaped}%"
     full_name = func.lower(func.concat(Owner.first_name, " ", Owner.last_name))
+    admin_network = (admin.zone_id or "").strip().lower()
+    filters = [
+        Owner.id != admin.id,
+        or_(
+            func.lower(Owner.email).like(like, escape="\\"),
+            func.lower(Owner.first_name).like(like, escape="\\"),
+            func.lower(Owner.last_name).like(like, escape="\\"),
+            func.lower(Owner.broadcast_name).like(like, escape="\\"),
+            full_name.like(like, escape="\\"),
+        ),
+    ]
+    if admin_network:
+        filters.append(
+            or_(
+                Owner.zone_id.is_(None),
+                Owner.zone_id == "",
+                func.lower(Owner.zone_id) != admin_network,
+            )
+        )
     rows = (
         db.query(Owner)
-        .filter(
-            Owner.id != admin.id,
-            or_(
-                func.lower(Owner.email).like(like, escape="\\"),
-                func.lower(Owner.first_name).like(like, escape="\\"),
-                func.lower(Owner.last_name).like(like, escape="\\"),
-                func.lower(Owner.broadcast_name).like(like, escape="\\"),
-                full_name.like(like, escape="\\"),
-            ),
-        )
+        .filter(*filters)
         .order_by(Owner.email.asc())
-        .limit(max(1, min(int(limit), 5)))
+        .limit(max(1, min(int(limit), 8)))
         .all()
     )
     return [
@@ -256,6 +267,7 @@ def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) ->
             "network_id": (row.zone_id or "").strip(),
         }
         for row in rows
+        if (row.zone_id or "").strip().lower() != admin_network or not admin_network
     ]
 
 
@@ -635,6 +647,13 @@ def generate_invite_key(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No account uses that email.",
+            )
+        admin_network = (admin.zone_id or "").strip().lower()
+        invitee_network = (invitee.zone_id or "").strip().lower()
+        if admin_network and invitee_network and admin_network == invitee_network:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Universal access is for users on a different network.",
             )
         member = invitee
     else:

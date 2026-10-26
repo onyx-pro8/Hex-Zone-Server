@@ -290,6 +290,13 @@ def test_invitee_search_includes_other_networks(db):
     )
     _owner(
         db,
+        email="coworker@city.gov",
+        zone_id="NET-A",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+    )
+    _owner(
+        db,
         email="worker@city.gov",
         zone_id="NET-OTHER",
         account_type=AccountType.EXCLUSIVE,
