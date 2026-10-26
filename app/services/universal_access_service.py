@@ -1174,6 +1174,37 @@ def list_activated_keys(db: Session, *, caller: Owner) -> list[dict[str, Any]]:
     ]
 
 
+def deactivate_public_key(db: Session, *, caller: Owner, credential_id: int) -> dict[str, Any]:
+    activation = (
+        db.query(UniversalAccessActivation, UniversalAccessCredential)
+        .join(
+            UniversalAccessCredential,
+            UniversalAccessCredential.id == UniversalAccessActivation.credential_id,
+        )
+        .filter(
+            UniversalAccessActivation.owner_id == caller.id,
+            UniversalAccessActivation.credential_id == int(credential_id),
+        )
+        .first()
+    )
+    if activation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activated access key not found.",
+        )
+    row, credential = activation
+    zone_ids = _int_ids(credential.zone_ids)
+    db.delete(row)
+    db.commit()
+    return {
+        "credential_id": credential.id,
+        "code": credential.code,
+        "key_type": _credential_key_type(credential),
+        "zone_ids": zone_ids,
+        "zones": [_zone_summary(zone) for zone in _zones_by_ids(db, zone_ids)],
+    }
+
+
 def enabled_credentials_for(db: Session, owner: Owner) -> list[UniversalAccessCredential]:
     private_rows = (
         db.query(UniversalAccessCredential)

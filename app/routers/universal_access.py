@@ -329,3 +329,21 @@ async def activate_public_key(
         zone_ids=list(activated.get("zone_ids") or []),
     )
     return activated
+
+
+@router.delete("/keys/activated/{credential_id}")
+async def deactivate_public_key(
+    credential_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    caller = _caller(db, current_user)
+    removed = universal_access_service.deactivate_public_key(
+        db, caller=caller, credential_id=credential_id
+    )
+    await universal_access_service.notify_granted_zones(
+        db,
+        member_id=int(caller.id),
+        zone_ids=list(removed.get("zone_ids") or []),
+    )
+    return removed

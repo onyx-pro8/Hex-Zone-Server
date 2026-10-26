@@ -168,6 +168,16 @@ def test_public_invite_activates_on_zones_page(db):
     visible = universal_access_service.universal_primary_zones(db, outsider, already_ids=set())
     assert [row.id for row in visible] == [shared]
 
+    removed = universal_access_service.deactivate_public_key(
+        db, caller=outsider, credential_id=created["credential_id"]
+    )
+    assert removed["credential_id"] == created["credential_id"]
+    after_remove = universal_access_service.universal_primary_zones(
+        db, outsider, already_ids=set()
+    )
+    assert after_remove == []
+    assert universal_access_service.list_activated_keys(db, caller=outsider) == []
+
 
 def test_place_access_network_admin_approves(db):
     requester = _owner(
