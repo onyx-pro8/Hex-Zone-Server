@@ -231,6 +231,14 @@ def test_place_access_network_admin_approves(db):
     listed = zone_service.list_zones(db, requester)
     assert any(int(row["id"]) == austin and row["config"].get("universal_access") for row in listed)
 
+    admin_rows = universal_access_service.list_requests(db, caller=other)
+    assert admin_rows[0]["viewer_actions"]["can_remove"] is True
+    universal_access_service.delete_request(db, caller=other, request_id=created["id"])
+    after_remove = universal_access_service.universal_primary_zones(
+        db, requester, already_ids=set()
+    )
+    assert after_remove == []
+
 
 def test_place_access_reject_and_edit_docs(db):
     requester = _owner(

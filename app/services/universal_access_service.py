@@ -376,7 +376,7 @@ def _viewer_actions(
             "can_approve": is_admin and pending,
             "can_reject": is_admin and pending,
             "can_edit_docs": is_member and pending,
-            "can_remove": (is_member and pending) or (is_admin and pending),
+            "can_remove": is_admin or (is_member and pending),
             "can_view_detail": True,
         }
     # Invite / generated keys: admin may remove; invitee is read-only.
@@ -912,13 +912,15 @@ def delete_request(db: Session, *, caller: Owner, request_id: int) -> dict[str, 
                 detail="Only the network admin can remove this access key.",
             )
     else:
-        if row.status != UniversalAccessStatus.PENDING:
+        if is_admin:
+            pass
+        elif is_member and row.status == UniversalAccessStatus.PENDING:
+            pass
+        else:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Only pending requests can be removed.",
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the network admin can remove this request.",
             )
-        if not (is_member or is_admin):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request not found.")
     payload = _request_row(db, row, caller=caller, include_docs=False)
     credential = (
         db.query(UniversalAccessCredential)
