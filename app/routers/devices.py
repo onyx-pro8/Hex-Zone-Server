@@ -49,7 +49,7 @@ def _caller_visibility(db: Session, user_id: int) -> list[int]:
     description=(
         "Create a device under the authenticated owner account. Smart-home "
         "enrollment capacity (non MOB-/WEB- HIDs) is enforced by account tier: "
-        "private/enhanced=1, exclusive=0 (disabled), private_plus=10, enhanced_plus=unlimited. "
+        "private/enhanced/private_plus=1, exclusive=0 (disabled), enhanced_plus=unlimited. "
         "Phone and browser login clients (MOB-/WEB-) do not consume that quota."
     ),
     responses={
