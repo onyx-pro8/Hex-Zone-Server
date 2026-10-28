@@ -27,6 +27,10 @@ from app.services.device_entitlements import (
     release_other_device_sessions,
 )
 from app.websocket.manager import ws_manager
+from app.services.smart_home_device_settings import (
+    apply_smart_home_create_fields,
+    apply_smart_home_update_fields,
+)
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -75,6 +79,7 @@ async def create_device(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Owner not found",
         )
+    apply_smart_home_create_fields(db, owner, device)
     try:
         assert_no_conflicting_online_session(db, owner.id, device.hid)
         if not is_client_session_hid(device.hid):
@@ -333,7 +338,20 @@ async def update_device(
     db: Session = Depends(get_db),
 ):
     """Update a device."""
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Owner not found",
+        )
     owner_ids = _caller_visibility(db, current_user["user_id"])
+    existing = device_crud.get_device(db, device_id, owner_ids=owner_ids)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found",
+        )
+    apply_smart_home_update_fields(db, owner, existing, device_update)
     device = device_crud.update_device(
         db,
         device_id,

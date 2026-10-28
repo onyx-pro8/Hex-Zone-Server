@@ -79,7 +79,7 @@ def send_hub_command(db: Session, owner: Owner, *, hid: str, command: str) -> di
             detail="That hub is not on your account.",
         )
 
-    webhook = normalize_webhook_url(str(getattr(owner, "sn_webhook", "") or ""))
+    webhook = normalize_webhook_url(str(getattr(device, "webhook", "") or ""))
     outcome = "failed"
     detail = "No webhook configured."
     if is_valid_webhook_url(webhook):

@@ -49,6 +49,8 @@ def _owner(db, *, email, account_type, role):
         owner_id=owner.id,
         address="1 Main",
         active=True,
+        webhook="https://hub.example/hook",
+        zone_ids=[1],
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )

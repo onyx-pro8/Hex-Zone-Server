@@ -1,4 +1,6 @@
 """Tests for registration and H3 conversion."""
+from datetime import datetime
+
 import pytest
 from httpx import AsyncClient
 from starlette.testclient import TestClient
@@ -1483,17 +1485,48 @@ async def test_private_account_device_limit_is_one_per_owner(test_db, override_g
             last_name="Cap",
         )
         headers = {"Authorization": f"Bearer {token}"}
+        from app.models import Owner, Zone
+        from app.models.zone import ZoneType
+
+        owner = test_db.query(Owner).filter(Owner.email == "device-cap@example.com").one()
+        zone = Zone(
+            zone_id=owner.zone_id,
+            owner_id=owner.id,
+            creator_id=owner.id,
+            zone_type=ZoneType.GEOFENCE,
+            name="Home",
+            h3_cells=[],
+            active=True,
+            is_primary=True,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        test_db.add(zone)
+        test_db.commit()
+        test_db.refresh(zone)
         first = await client.post(
             "/devices/",
             headers=headers,
-            json={"hid": "PRIVATE-DEVICE-1", "name": "Phone 1", "address": "Addr"},
+            json={
+                "hid": "PRIVATE-DEVICE-1",
+                "name": "Phone 1",
+                "address": "Addr",
+                "webhook": "https://hub.example/one",
+                "zone_ids": [zone.id],
+            },
         )
         assert first.status_code == 201
 
         second = await client.post(
             "/devices/",
             headers=headers,
-            json={"hid": "PRIVATE-DEVICE-2", "name": "Phone 2", "address": "Addr"},
+            json={
+                "hid": "PRIVATE-DEVICE-2",
+                "name": "Phone 2",
+                "address": "Addr",
+                "webhook": "https://hub.example/two",
+                "zone_ids": [zone.id],
+            },
         )
         assert second.status_code == 403
         assert "at most 1 device" in _http_error_message(second.json()).lower()

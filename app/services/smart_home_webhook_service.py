@@ -1,7 +1,7 @@
 """Outbound smart-home webhook delivery for geo-propagated alarms/alerts.
 
-When an owner configures ``owners.sn_webhook``, Hex Zone POSTs each delivered
-geo message to that URL so a hub can sound/show the alarm without polling.
+When a smart-home device has its own webhook and linked zones, Hex Zone POSTs
+each delivered geo message that matches one of those zones.
 
 Hubs are notified for owners in the delivery set whose account network appears
 in the message's routing networks (fanout matched networks and/or sender
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.domain.message_types import is_pushable_geo_type
-from app.models import Device, Owner
+from app.models import Device, Owner, Zone
 from app.services.device_entitlements import is_smart_home_hid
 
 logger = logging.getLogger(__name__)
@@ -162,6 +162,92 @@ def owner_registered_smart_home_hid(db: Session, owner: Owner) -> str | None:
             if hid.upper() == preferred_key:
                 return hid
     return str(hubs[0].hid or "").strip() or None
+
+
+def _add_zone_record_id(bucket: set[int], value: Any) -> None:
+    try:
+        bucket.add(int(value))
+    except (TypeError, ValueError):
+        return
+
+
+def device_zone_record_ids(device: Device) -> set[int]:
+    """Zone record ids stored on a smart-home device."""
+    raw = getattr(device, "zone_ids", None)
+    if not isinstance(raw, list):
+        return set()
+    found: set[int] = set()
+    for item in raw:
+        _add_zone_record_id(found, item)
+    return found
+
+
+def message_zone_record_ids_for_owner(
+    alarm_payload: dict[str, Any],
+    owner_id: int,
+) -> set[int]:
+    """Zone records this delivery is about for one recipient."""
+    metadata = _as_dict(alarm_payload.get("metadata"))
+    found: set[int] = set()
+    mapping = metadata.get("recipient_zone_record_ids")
+    if isinstance(mapping, dict):
+        raw = mapping.get(str(owner_id))
+        if raw is None:
+            raw = mapping.get(owner_id)
+        if raw is not None:
+            _add_zone_record_id(found, raw)
+
+    sender_raw = alarm_payload.get("sender_id")
+    try:
+        sender_id = int(sender_raw) if sender_raw is not None else None
+    except (TypeError, ValueError):
+        sender_id = None
+    if sender_id is not None and sender_id == int(owner_id):
+        raw = metadata.get("sender_relevant_zone_record_id")
+        if raw is not None:
+            _add_zone_record_id(found, raw)
+
+    fanout = _as_dict(metadata.get("fanout"))
+    for key in (
+        "primary_zone_record_ids",
+        "sender_zone_record_ids",
+        "secondary_zone_record_ids",
+        "matched_zone_record_ids",
+    ):
+        values = fanout.get(key)
+        if isinstance(values, list):
+            for item in values:
+                _add_zone_record_id(found, item)
+    return found
+
+
+def device_matches_message_zones(
+    db: Session,
+    device: Device,
+    owner_id: int,
+    alarm_payload: dict[str, Any],
+) -> bool:
+    """True when the hub is linked to a zone this message is about.
+
+    Record ids win when the payload has them. Otherwise a linked zone whose
+    network id appears on the message still matches (guest and permission
+    notices often only carry the network id).
+    """
+    linked = device_zone_record_ids(device)
+    if not linked:
+        return False
+    related = message_zone_record_ids_for_owner(alarm_payload, owner_id)
+    if related:
+        return bool(linked & related)
+    networks = {net.casefold() for net in message_related_network_ids(alarm_payload)}
+    if not networks:
+        return False
+    rows = db.query(Zone).filter(Zone.id.in_(list(linked))).all()
+    for row in rows:
+        label = str(getattr(row, "zone_id", "") or "").strip()
+        if label and label.casefold() in networks:
+            return True
+    return False
 
 
 def owner_should_receive_webhook(owner: Owner, alarm_payload: dict[str, Any]) -> bool:
@@ -385,10 +471,11 @@ async def send_smart_home_webhooks(
 ) -> dict[str, Any]:
     """POST the alarm to each eligible hub owner's webhook URL.
 
-    Eligibility per owner:
-    - in ``owner_ids`` and passes delivery/network rules
-    - has a registered smart-home HID (``DEV-`` device)
-    - has a valid ``sn_webhook``
+    Eligibility per device:
+    - owner is in ``owner_ids`` and passes delivery/network rules
+    - registered smart-home HID (``DEV-`` device)
+    - its own valid webhook
+    - linked to a zone this message is about
 
     When ``require_pushable`` is True (default), non-geo types such as
     ``PERMISSION`` and ``SERVICE`` are skipped. Guest-pass auto-approval and
@@ -430,47 +517,59 @@ async def send_smart_home_webhooks(
     skipped_network = 0
     skipped_no_url = 0
     skipped_no_hid = 0
+    skipped_no_zone = 0
     for owner in owners:
         if not owner_should_receive_webhook(owner, alarm_payload):
             skipped_network += 1
             continue
-        hid = owner_registered_smart_home_hid(db, owner)
-        if not hid:
+        devices = (
+            db.query(Device)
+            .filter(Device.owner_id == owner.id, Device.active.is_(True))
+            .order_by(Device.created_at.asc())
+            .all()
+        )
+        hubs = [device for device in devices if is_smart_home_hid(device.hid)]
+        if not hubs:
             skipped_no_hid += 1
             continue
-        url = normalize_webhook_url(str(getattr(owner, "sn_webhook", "") or ""))
-        if not url:
-            skipped_no_url += 1
-            continue
-        if not is_valid_webhook_url(url):
-            logger.warning(
-                "Ignoring invalid smart-home webhook for owner %s: %s",
-                owner.id,
-                url[:80],
-            )
-            skipped_no_url += 1
-            continue
-        targets.append((owner, url, hid))
+        for hub in hubs:
+            url = normalize_webhook_url(str(getattr(hub, "webhook", "") or ""))
+            if not url or not is_valid_webhook_url(url):
+                if url:
+                    logger.warning(
+                        "Ignoring invalid smart-home webhook for device %s: %s",
+                        getattr(hub, "hid", ""),
+                        url[:80],
+                    )
+                skipped_no_url += 1
+                continue
+            if not device_matches_message_zones(db, hub, int(owner.id), alarm_payload):
+                skipped_no_zone += 1
+                continue
+            targets.append((owner, url, str(hub.hid or "").strip()))
 
     if not targets:
         logger.info(
             "Smart-home webhook type=%s no targets (owners=%s skipped_network=%d "
-            "skipped_no_hid=%d skipped_no_url=%d related_networks=%s origin=%s)",
+            "skipped_no_hid=%d skipped_no_url=%d skipped_no_zone=%d "
+            "related_networks=%s origin=%s)",
             msg_type,
             unique_ids,
             skipped_network,
             skipped_no_hid,
             skipped_no_url,
+            skipped_no_zone,
             sorted(related_networks),
             origin_network,
         )
         return {
             "webhook_sent": 0,
             "webhook_failed": 0,
-            "webhook_no_urls": True,
+            "webhook_no_urls": skipped_no_url > 0 and skipped_no_zone == 0,
             "webhook_skipped_network_count": skipped_network,
             "webhook_skipped_no_hid_count": skipped_no_hid,
             "webhook_skipped_no_url_count": skipped_no_url,
+            "webhook_skipped_no_zone_count": skipped_no_zone,
             "webhook_owner_results": [],
         }
 
@@ -510,7 +609,7 @@ async def send_smart_home_webhooks(
 
     logger.info(
         "Smart-home webhook type=%s origin=%s related=%s targets=%d sent=%d "
-        "failed=%d skipped_network=%d skipped_no_hid=%d skipped_no_url=%d",
+        "failed=%d skipped_network=%d skipped_no_hid=%d skipped_no_url=%d skipped_no_zone=%d",
         msg_type,
         origin_network,
         sorted(related_networks),
@@ -520,6 +619,7 @@ async def send_smart_home_webhooks(
         skipped_network,
         skipped_no_hid,
         skipped_no_url,
+        skipped_no_zone,
     )
     return {
         "webhook_sent": sent,
@@ -528,6 +628,7 @@ async def send_smart_home_webhooks(
         "webhook_skipped_network_count": skipped_network,
         "webhook_skipped_no_hid_count": skipped_no_hid,
         "webhook_skipped_no_url_count": skipped_no_url,
+        "webhook_skipped_no_zone_count": skipped_no_zone,
         "webhook_owner_results": owner_results,
     }
 

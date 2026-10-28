@@ -19,22 +19,36 @@ from app.services.smart_home_webhook_service import (
 )
 
 
+def _hub(owner: SimpleNamespace, hid: str, *, zone_ids: list[int] | None = None, webhook: str | None = None):
+    return SimpleNamespace(
+        hid=hid,
+        created_at=None,
+        active=True,
+        webhook=owner.sn_webhook if webhook is None else webhook,
+        zone_ids=list(zone_ids if zone_ids is not None else getattr(owner, "linked_zone_ids", None) or [1]),
+    )
+
+
 def _db_with_owner_and_hub(
     owner: SimpleNamespace,
     hid: str = "DEV-TEST1",
     *,
     sender: SimpleNamespace | None = None,
+    hubs: list | None = None,
 ):
-    hub = SimpleNamespace(hid=hid, created_at=None)
+    hub_rows = hubs if hubs is not None else [_hub(owner, hid)]
 
-    def query_side_effect(model):
+    def query_side_effect(*models):
         q = MagicMock()
+        model = models[0] if models else None
         if model is Owner:
             q.filter.return_value.all.return_value = [owner]
             q.filter.return_value.first.return_value = sender
+        elif model is Device:
+            q.filter.return_value.order_by.return_value.all.return_value = hub_rows
+            q.filter.return_value.all.return_value = hub_rows
         else:
-            q.filter.return_value.order_by.return_value.all.return_value = [hub]
-            q.filter.return_value.all.return_value = [hub]
+            q.filter.return_value.all.return_value = []
         return q
 
     db = MagicMock()
@@ -255,6 +269,7 @@ async def test_send_smart_home_webhooks_posts_to_same_network_owners():
                     "sender_network_id": "ZONE-ABC",
                     "position": {"latitude": 10.5, "longitude": 20.25},
                     "sender_relevant_zone": {"name": "Lobby"},
+                    "recipient_zone_record_ids": {"9": 1},
                 },
             },
         )
@@ -304,6 +319,7 @@ async def test_send_webhook_when_delivered_on_admin_network_from_other_sender():
                 "delivered_owner_ids": [1, 3, 7],
                 "metadata": {
                     "sender_network_id": "INDIVIDUAL-SOLO",
+                    "recipient_zone_record_ids": {"1": 1},
                     "fanout": {
                         "network_zone_id": "DISTRICT-11",
                         "matched_network_zone_ids": ["DISTRICT-11"],
@@ -429,7 +445,10 @@ async def test_send_smart_home_webhooks_normalizes_scheme_less_url():
             {
                 "type": "PANIC",
                 "text": "Help",
-                "metadata": {"sender_network_id": "ZONE-ABC"},
+                "metadata": {
+                    "sender_network_id": "ZONE-ABC",
+                    "recipient_zone_record_ids": {"9": 1},
+                },
             },
         )
 
@@ -460,3 +479,47 @@ async def test_send_smart_home_webhooks_skips_without_url():
     )
     assert stats.get("webhook_no_urls") is True
     assert stats["webhook_sent"] == 0
+
+
+@pytest.mark.asyncio
+async def test_send_only_the_hub_linked_to_the_message_zone():
+    owner = SimpleNamespace(
+        id=9,
+        active=True,
+        sn_webhook="",
+        sn_hid="",
+        zone_id="ZONE-ABC",
+    )
+    front = _hub(owner, "DEV-FRONT", zone_ids=[11], webhook="https://hub.example/front")
+    back = _hub(owner, "DEV-BACK", zone_ids=[22], webhook="https://hub.example/back")
+    db = _db_with_owner_and_hub(owner, hubs=[front, back])
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "app.services.smart_home_webhook_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        stats = await send_smart_home_webhooks(
+            db,
+            [9],
+            {
+                "type": "SENSOR",
+                "text": "Door",
+                "delivered_owner_ids": [9],
+                "metadata": {
+                    "sender_network_id": "ZONE-ABC",
+                    "recipient_zone_record_ids": {"9": 22},
+                },
+            },
+        )
+
+    assert stats["webhook_sent"] == 1
+    assert stats["webhook_skipped_no_zone_count"] == 1
+    args, _kwargs = mock_client.post.await_args
+    assert args[0] == "https://hub.example/back"

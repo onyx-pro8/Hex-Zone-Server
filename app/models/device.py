@@ -1,5 +1,5 @@
 """Device model."""
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Boolean, Index, Text
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Boolean, Index, Text, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
@@ -33,6 +33,11 @@ class Device(Base):
     enable_notification = Column(Boolean, default=True, nullable=False)
     alert_threshold_meters = Column(Float, default=100.0, nullable=False)
     update_interval_seconds = Column(Integer, default=60, nullable=False)
+    # Per-hub smart-home integration. Each hub has its own webhook and the
+    # zones that should trigger it. Phone/web login sessions leave these empty.
+    webhook = Column(Text, nullable=False, default="")
+    periodical_check_sec = Column(String(32), nullable=False, default="86400")
+    zone_ids = Column(JSON, nullable=False, default=list)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

@@ -368,6 +368,81 @@ def patch_qr_registration_communal_id_column() -> None:
     logger.info("qr_registrations.communal_id column patch applied")
 
 
+def patch_device_smart_home_columns() -> None:
+    """Add per-device webhook, poll interval, and linked zone ids.
+
+    Copies a legacy account webhook onto the hub that settings had selected,
+    then links that hub to the owner's active zones so existing alarms keep
+    flowing until the user edits the device.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
+        conn.execute(text("SET LOCAL statement_timeout = '8s';"))
+        if conn.execute(text("SELECT to_regclass('public.devices')")).scalar() is None:
+            return
+        conn.execute(
+            text(
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS webhook "
+                "TEXT NOT NULL DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS periodical_check_sec "
+                "VARCHAR(32) NOT NULL DEFAULT '86400';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS zone_ids "
+                "JSON NOT NULL DEFAULT '[]'::json;"
+            )
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE devices d
+                SET webhook = btrim(o.sn_webhook),
+                    periodical_check_sec = COALESCE(
+                        NULLIF(btrim(o.sn_periodical_check_sec), ''),
+                        '86400'
+                    )
+                FROM owners o
+                WHERE d.owner_id = o.id
+                  AND upper(d.hid) LIKE 'DEV-%'
+                  AND upper(d.hid) = upper(btrim(o.sn_hid))
+                  AND btrim(COALESCE(d.webhook, '')) = ''
+                  AND btrim(COALESCE(o.sn_webhook, '')) <> ''
+                  AND btrim(o.sn_webhook) <> '/alertname';
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE devices d
+                SET zone_ids = sub.ids
+                FROM (
+                    SELECT owner_id, json_agg(id) AS ids
+                    FROM zones
+                    WHERE active IS TRUE
+                    GROUP BY owner_id
+                ) sub
+                WHERE d.owner_id = sub.owner_id
+                  AND upper(d.hid) LIKE 'DEV-%'
+                  AND btrim(COALESCE(d.webhook, '')) <> ''
+                  AND (
+                    d.zone_ids IS NULL
+                    OR d.zone_ids::text IN ('[]', 'null')
+                  );
+                """
+            )
+        )
+    logger.info("Device smart-home columns patch applied")
+
+
 def init_db():
     """Initialize database tables."""
     import app.models  # noqa: F401
@@ -377,7 +452,15 @@ def init_db():
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
     # Critical: Owner ORM maps latitude/longitude; patch before any request path runs.
     patch_owner_location_columns()
+    try:
+        patch_device_smart_home_columns()
+    except Exception as exc:
+        logger.exception("Device smart-home columns patch failed: %s", exc)
     Base.metadata.create_all(bind=engine)
+    try:
+        patch_device_smart_home_columns()
+    except Exception as exc:
+        logger.exception("Device smart-home columns patch failed: %s", exc)
     try:
         patch_qr_registration_expires_nullable()
     except Exception as exc:

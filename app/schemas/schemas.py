@@ -1,5 +1,5 @@
 """Pydantic schemas for request/response validation."""
-from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, model_validator, computed_field
+from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator, computed_field
 from typing import Any, List, Literal, Optional
 from datetime import datetime
 from enum import Enum
@@ -260,6 +260,24 @@ class OwnerDetailResponse(OwnerResponse):
 
 # ==================== DEVICE SCHEMAS ====================
 
+def _coerce_zone_id_list(value: Any) -> list[int]:
+    """Normalize a zone-id list from JSON or form input."""
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        try:
+            zone_id = int(item)
+        except (TypeError, ValueError):
+            continue
+        if zone_id in seen:
+            continue
+        seen.add(zone_id)
+        out.append(zone_id)
+    return out
+
+
 class DeviceBase(BaseModel):
     """Base device schema."""
     hid: str = Field(..., min_length=1)
@@ -270,6 +288,16 @@ class DeviceBase(BaseModel):
     enable_notification: bool = True
     alert_threshold_meters: float = Field(default=100.0, ge=1.0, le=1_000_000.0)
     update_interval_seconds: int = Field(default=60, ge=1, le=86400)
+    webhook: str = ""
+    periodical_check_sec: str = Field(default="86400")
+    zone_ids: List[int] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_smart_home_fields(cls, data):
+        if isinstance(data, dict) and "zone_ids" in data:
+            data = {**data, "zone_ids": _coerce_zone_id_list(data.get("zone_ids"))}
+        return data
 
 
 class DeviceLocationUpdate(BaseModel):
@@ -311,6 +339,16 @@ class DeviceUpdate(BaseModel):
     enable_notification: Optional[bool] = None
     alert_threshold_meters: Optional[float] = Field(None, ge=1.0, le=1_000_000.0)
     update_interval_seconds: Optional[int] = Field(None, ge=1, le=86400)
+    webhook: Optional[str] = None
+    periodical_check_sec: Optional[str] = None
+    zone_ids: Optional[List[int]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_smart_home_fields(cls, data):
+        if isinstance(data, dict) and data.get("zone_ids") is not None:
+            data = {**data, "zone_ids": _coerce_zone_id_list(data.get("zone_ids"))}
+        return data
 
     @model_validator(mode="after")
     def map_status_to_active(self):
@@ -374,8 +412,27 @@ class DeviceResponse(BaseModel):
     enable_notification: bool
     alert_threshold_meters: float
     update_interval_seconds: int
+    webhook: str = ""
+    periodical_check_sec: str = "86400"
+    zone_ids: List[int] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("webhook", mode="before")
+    @classmethod
+    def _webhook_text(cls, value):
+        return "" if value is None else str(value)
+
+    @field_validator("periodical_check_sec", mode="before")
+    @classmethod
+    def _period_text(cls, value):
+        text = "" if value is None else str(value).strip()
+        return text or "86400"
+
+    @field_validator("zone_ids", mode="before")
+    @classmethod
+    def _zone_id_list(cls, value):
+        return _coerce_zone_id_list(value)
 
     class Config:
         from_attributes = True

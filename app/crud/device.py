@@ -30,6 +30,9 @@ def create_device(db: Session, owner_id: int, device: DeviceCreate) -> Device:
         enable_notification=device.enable_notification,
         alert_threshold_meters=device.alert_threshold_meters,
         update_interval_seconds=device.update_interval_seconds,
+        webhook=(device.webhook or "").strip(),
+        periodical_check_sec=(device.periodical_check_sec or "86400").strip() or "86400",
+        zone_ids=list(device.zone_ids or []),
     )
     db.add(db_device)
     db.flush()
