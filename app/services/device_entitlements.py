@@ -113,6 +113,8 @@ def expire_stale_device_sessions(db: Session, owner_id: int) -> None:
     devices = device_crud.list_devices(db, owner_id=owner_id)
     cutoff = _presence_cutoff()
     for device in devices:
+        if is_smart_home_hid(device.hid):
+            continue
         if not device.is_online:
             continue
         if _device_recency(device) < cutoff:

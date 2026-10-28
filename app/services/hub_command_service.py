@@ -18,16 +18,12 @@ HUB_COMMANDS = ("arm", "disarm", "status")
 _HISTORY_LIMIT = 8
 
 
-def _require_network_admin(owner: Owner) -> None:
+def _require_can_command_hub(owner: Owner) -> None:
+    """The hub owner may command that hub. System admins may not."""
     if is_system_administrator(owner):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="System administrators do not send hub commands.",
-        )
-    if (owner.role.value or "").strip().lower() != "administrator":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only a network administrator can send hub commands.",
         )
 
 
@@ -43,7 +39,7 @@ def _row(command: HubCommand) -> dict[str, Any]:
 
 
 def list_hub_commands(db: Session, owner: Owner) -> list[dict[str, Any]]:
-    _require_network_admin(owner)
+    _require_can_command_hub(owner)
     rows = (
         db.query(HubCommand)
         .filter(HubCommand.owner_id == owner.id)
@@ -55,7 +51,7 @@ def list_hub_commands(db: Session, owner: Owner) -> list[dict[str, Any]]:
 
 
 def send_hub_command(db: Session, owner: Owner, *, hid: str, command: str) -> dict[str, Any]:
-    _require_network_admin(owner)
+    _require_can_command_hub(owner)
     verb = str(command or "").strip().lower()
     if verb not in HUB_COMMANDS:
         raise HTTPException(
