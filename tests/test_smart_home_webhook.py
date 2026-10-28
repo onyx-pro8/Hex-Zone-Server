@@ -9,6 +9,7 @@ import pytest
 from app.models import Device, Owner, Zone
 from app.services.smart_home_webhook_service import (
     build_smart_home_webhook_payload,
+    build_universal_access_open_payload,
     device_matches_message_zones,
     is_valid_webhook_url,
     message_origin_network_id,
@@ -17,6 +18,7 @@ from app.services.smart_home_webhook_service import (
     owner_matches_message_network,
     owner_should_receive_webhook,
     send_smart_home_webhooks,
+    send_universal_access_open_webhooks,
 )
 
 
@@ -645,3 +647,105 @@ async def test_unknown_posts_to_all_hubs_on_message_network():
     assert stats["webhook_skipped_no_zone_count"] == 1
     posted = sorted(call.args[0] for call in mock_client.post.await_args_list)
     assert posted == ["https://hub.example/back", "https://hub.example/front"]
+
+
+def test_build_universal_access_open_payload():
+    assert build_universal_access_open_payload(
+        zone_id="NET-B",
+        email="req@example.com",
+        name="Ada Lovelace",
+    ) == {
+        "zone_id": "NET-B",
+        "email": "req@example.com",
+        "name": "Ada Lovelace",
+        "action": "open",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ua_open_posts_only_to_hubs_linked_to_granted_zones():
+    owner = SimpleNamespace(id=3, active=True, sn_webhook="", sn_hid="", zone_id="NET-B")
+    front = _hub(owner, "DEV-FRONT", zone_ids=[11], webhook="https://hub.example/front")
+    back = _hub(owner, "DEV-BACK", zone_ids=[22], webhook="https://hub.example/back")
+    db = _db_with_owner_and_hub(
+        owner,
+        hubs=[front, back],
+        zones=[_zone(11, "NET-B"), _zone(22, "NET-B")],
+    )
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "app.services.smart_home_webhook_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        stats = await send_universal_access_open_webhooks(
+            db,
+            hub_owner_id=3,
+            zone_record_ids=[22],
+            member_email="req@example.com",
+            member_name="Ada Lovelace",
+        )
+
+    assert stats["ua_open_sent"] == 1
+    assert stats["ua_open_failed"] == 0
+    mock_client.post.assert_awaited_once()
+    args, kwargs = mock_client.post.await_args
+    assert args[0] == "https://hub.example/back"
+    assert kwargs["json"] == {
+        "zone_id": "NET-B",
+        "email": "req@example.com",
+        "name": "Ada Lovelace",
+        "action": "open",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ua_open_posts_to_each_granted_zone_hub():
+    owner = SimpleNamespace(id=3, active=True, sn_webhook="", sn_hid="", zone_id="NET-B")
+    front = _hub(owner, "DEV-FRONT", zone_ids=[11], webhook="https://hub.example/front")
+    back = _hub(owner, "DEV-BACK", zone_ids=[22], webhook="https://hub.example/back")
+    db = _db_with_owner_and_hub(
+        owner,
+        hubs=[front, back],
+        zones=[_zone(11, "HALL-A"), _zone(22, "HALL-B")],
+    )
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "app.services.smart_home_webhook_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        stats = await send_universal_access_open_webhooks(
+            db,
+            hub_owner_id=3,
+            zone_record_ids=[11, 22],
+            member_email="out@example.com",
+            member_name="Out User",
+        )
+
+    assert stats["ua_open_sent"] == 2
+    bodies = [call.kwargs["json"] for call in mock_client.post.await_args_list]
+    assert {
+        "zone_id": "HALL-A",
+        "email": "out@example.com",
+        "name": "Out User",
+        "action": "open",
+    } in bodies
+    assert {
+        "zone_id": "HALL-B",
+        "email": "out@example.com",
+        "name": "Out User",
+        "action": "open",
+    } in bodies

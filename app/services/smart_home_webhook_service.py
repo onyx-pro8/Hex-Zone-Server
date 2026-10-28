@@ -689,3 +689,131 @@ async def notify_smart_home_webhook_owners(owner_results: list[dict[str, Any]]) 
             logger.exception(
                 "Smart-home webhook WS notify failed for owner %s", owner_id
             )
+
+
+def build_universal_access_open_payload(
+    *,
+    zone_id: str,
+    email: str,
+    name: str,
+) -> dict[str, str]:
+    """Body posted when someone joins a zone via universal access."""
+    return {
+        "zone_id": str(zone_id or "").strip(),
+        "email": str(email or "").strip(),
+        "name": str(name or "").strip(),
+        "action": "open",
+    }
+
+
+async def send_universal_access_open_webhooks(
+    db: Session,
+    *,
+    hub_owner_id: int,
+    zone_record_ids: list[int],
+    member_email: str,
+    member_name: str,
+) -> dict[str, Any]:
+    """POST ``{zone_id, email, name, action: open}`` to hubs linked to those zones.
+
+    Only hubs owned by ``hub_owner_id`` (the network admin) that list a granted
+    zone in ``device.zone_ids`` are notified. Never raises.
+    """
+    unique_zone_ids: list[int] = []
+    seen: set[int] = set()
+    for raw in zone_record_ids:
+        try:
+            zone_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if zone_id < 1 or zone_id in seen:
+            continue
+        seen.add(zone_id)
+        unique_zone_ids.append(zone_id)
+
+    if not unique_zone_ids:
+        return {
+            "ua_open_sent": 0,
+            "ua_open_failed": 0,
+            "ua_open_skipped": True,
+        }
+
+    try:
+        owner_id = int(hub_owner_id)
+    except (TypeError, ValueError):
+        return {
+            "ua_open_sent": 0,
+            "ua_open_failed": 0,
+            "ua_open_skipped": True,
+        }
+
+    devices = (
+        db.query(Device)
+        .filter(Device.owner_id == owner_id, Device.active.is_(True))
+        .order_by(Device.created_at.asc())
+        .all()
+    )
+    hubs = [device for device in devices if is_smart_home_hid(device.hid)]
+    if not hubs:
+        return {
+            "ua_open_sent": 0,
+            "ua_open_failed": 0,
+            "ua_open_no_hubs": True,
+        }
+
+    targets: list[tuple[str, dict[str, str]]] = []
+    for zone_record_id in unique_zone_ids:
+        zone = db.get(Zone, zone_record_id)
+        if zone is None:
+            continue
+        zone_label = str(getattr(zone, "zone_id", "") or "").strip() or str(zone.id)
+        body = build_universal_access_open_payload(
+            zone_id=zone_label,
+            email=member_email,
+            name=member_name,
+        )
+        for hub in hubs:
+            if zone_record_id not in device_zone_record_ids(hub):
+                continue
+            url = normalize_webhook_url(str(getattr(hub, "webhook", "") or ""))
+            if not url or not is_valid_webhook_url(url):
+                continue
+            targets.append((url, body))
+
+    if not targets:
+        return {
+            "ua_open_sent": 0,
+            "ua_open_failed": 0,
+            "ua_open_no_targets": True,
+        }
+
+    sent = 0
+    failed = 0
+    timeout = _webhook_timeout_seconds()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for url, body in targets:
+                ok = await _post_webhook(client, url=url, body=body)
+                if ok:
+                    sent += 1
+                else:
+                    failed += 1
+    except Exception:  # pragma: no cover - never break UA join
+        logger.exception(
+            "Universal-access open webhook batch failed for owner %s", owner_id
+        )
+        failed += max(0, len(targets) - sent)
+
+    logger.info(
+        "Universal-access open webhooks owner=%s zones=%s targets=%d sent=%d failed=%d",
+        owner_id,
+        unique_zone_ids,
+        len(targets),
+        sent,
+        failed,
+    )
+    return {
+        "ua_open_sent": sent,
+        "ua_open_failed": failed,
+        "ua_open_targets": len(targets),
+    }

@@ -131,6 +131,15 @@ async def create_invite_request(
             member_id=int(created["member_id"]),
             zone_ids=list(created.get("zone_ids") or []),
         )
+        # Private invite immediately joins the member — notify hubs linked to those zones.
+        await universal_access_service.notify_hubs_of_zone_join(
+            db,
+            hub_owner_id=int(created.get("network_admin_id") or caller.id),
+            zone_ids=list(created.get("zone_ids") or []),
+            member_id=int(created["member_id"]),
+            member_email=str(created.get("email") or ""),
+            member_name=str(created.get("member_name") or ""),
+        )
     return created
 
 
@@ -242,6 +251,15 @@ async def approve_universal_access_request(
         member_id=int(approved["member_id"]),
         zone_ids=list(approved.get("zone_ids") or []),
     )
+    # Private-key place access: after approval the member has joined — open hubs.
+    await universal_access_service.notify_hubs_of_zone_join(
+        db,
+        hub_owner_id=int(approved.get("network_admin_id") or caller.id),
+        zone_ids=list(approved.get("zone_ids") or []),
+        member_id=int(approved["member_id"]),
+        member_email=str(approved.get("email") or ""),
+        member_name=str(approved.get("member_name") or ""),
+    )
     return approved
 
 
@@ -328,6 +346,16 @@ async def activate_public_key(
         member_id=int(caller.id),
         zone_ids=list(activated.get("zone_ids") or []),
     )
+    # Public key: first activate/add joins the zones — open hubs linked to them.
+    if activated.get("newly_activated"):
+        await universal_access_service.notify_hubs_of_zone_join(
+            db,
+            hub_owner_id=int(activated.get("network_admin_id") or 0),
+            zone_ids=list(activated.get("zone_ids") or []),
+            member_id=int(activated.get("member_id") or caller.id),
+            member_email=str(activated.get("email") or ""),
+            member_name=str(activated.get("member_name") or ""),
+        )
     return activated
 
 

@@ -1,5 +1,6 @@
 """Universal access invite keys and place-access requests."""
 from datetime import datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -347,3 +348,118 @@ def test_admin_can_remove_generated_key(db):
     universal_access_service.delete_request(db, caller=admin, request_id=created["id"])
     assert universal_access_service.list_requests(db, caller=invitee) == []
     assert universal_access_service.universal_primary_zones(db, invitee, already_ids=set()) == []
+
+
+@pytest.mark.asyncio
+async def test_approve_triggers_hub_open_notify(db):
+    requester = _owner(
+        db,
+        email="req@example.com",
+        zone_id="NET-A",
+        account_type=AccountType.ENHANCED,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    other = _owner(
+        db,
+        email="other@example.com",
+        zone_id="NET-B",
+        account_type=AccountType.PRIVATE_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    austin = _insert_zone(
+        db,
+        owner_id=other.id,
+        zone_key="austin-hall",
+        name="Austin hall",
+    )
+    db.execute(text("UPDATE zones SET zone_id = 'NET-B' WHERE id = :id"), {"id": austin})
+    db.commit()
+
+    created = universal_access_service.create_place_access_request(
+        db,
+        requester=requester,
+        network_id="NET-B",
+        zone_ids=[austin],
+        photo_id=PHOTO,
+        business_document=BUSINESS,
+    )
+    approved = universal_access_service.approve_request(
+        db,
+        caller=other,
+        request_id=created["id"],
+    )
+
+    with patch(
+        "app.services.smart_home_webhook_service.send_universal_access_open_webhooks",
+        new_callable=AsyncMock,
+    ) as send_open:
+        send_open.return_value = {"ua_open_sent": 1}
+        await universal_access_service.notify_hubs_of_zone_join(
+            db,
+            hub_owner_id=int(approved["network_admin_id"]),
+            zone_ids=list(approved["zone_ids"]),
+            member_id=int(approved["member_id"]),
+            member_email=str(approved["email"]),
+            member_name=str(approved["member_name"]),
+        )
+
+    send_open.assert_awaited_once()
+    kwargs = send_open.await_args.kwargs
+    assert kwargs["hub_owner_id"] == other.id
+    assert kwargs["zone_record_ids"] == [austin]
+    assert kwargs["member_email"] == "req@example.com"
+    assert "Ada" in kwargs["member_name"]
+
+
+@pytest.mark.asyncio
+async def test_public_activate_triggers_hub_open_only_when_new(db):
+    admin = _owner(
+        db,
+        email="net@example.com",
+        zone_id="NET-A",
+        account_type=AccountType.PRIVATE_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    outsider = _owner(
+        db,
+        email="out@example.com",
+        zone_id="NET-B",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+    )
+    outsider.account_owner_id = outsider.id
+    shared = _insert_zone(db, owner_id=admin.id, zone_key="hall", name="City hall")
+    db.execute(text("UPDATE zones SET zone_id = 'NET-A' WHERE id = :id"), {"id": shared})
+    db.commit()
+
+    created = universal_access_service.generate_invite_key(
+        db,
+        admin=admin,
+        key_type="public",
+        zone_ids=[shared],
+    )
+    first = universal_access_service.activate_public_key(
+        db, caller=outsider, code=created["code"]
+    )
+    assert first["newly_activated"] is True
+    assert first["network_admin_id"] == admin.id
+
+    with patch(
+        "app.services.smart_home_webhook_service.send_universal_access_open_webhooks",
+        new_callable=AsyncMock,
+    ) as send_open:
+        send_open.return_value = {"ua_open_sent": 1}
+        await universal_access_service.notify_hubs_of_zone_join(
+            db,
+            hub_owner_id=int(first["network_admin_id"]),
+            zone_ids=list(first["zone_ids"]),
+            member_id=int(first["member_id"]),
+            member_email=str(first["email"]),
+            member_name=str(first["member_name"]),
+        )
+    send_open.assert_awaited_once()
+
+    second = universal_access_service.activate_public_key(
+        db, caller=outsider, code=created["code"]
+    )
+    assert second["newly_activated"] is False

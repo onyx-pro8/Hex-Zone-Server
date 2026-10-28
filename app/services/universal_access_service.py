@@ -438,6 +438,7 @@ def _request_row(
         "status": row.status.value if hasattr(row.status, "value") else str(row.status),
         "reject_reason": row.reject_reason or "",
         "network_id": admin.zone_id if admin else "",
+        "network_admin_id": int(row.network_admin_id),
         "network_admin_name": _owner_name(admin),
         "network_admin_email": admin.email if admin else "",
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -595,6 +596,47 @@ async def notify_system_admins_of_request(db: Session, event_id: str) -> None:
 
 async def notify_decision_recipients(db: Session, event_id: str, *, title: str) -> None:
     await notify_permission_recipients(db, event_id, title=title)
+
+
+async def notify_hubs_of_zone_join(
+    db: Session,
+    *,
+    hub_owner_id: int,
+    zone_ids: list[int],
+    member_id: int | None = None,
+    member_email: str = "",
+    member_name: str = "",
+) -> None:
+    """Tell hubs linked to the granted zones that this member joined (action=open).
+
+    Keeps existing PERMISSION / zone-list notifies unchanged; this only adds the
+    smart-hub open payload.
+    """
+    from app.services import smart_home_webhook_service
+
+    email = (member_email or "").strip()
+    name = (member_name or "").strip()
+    if member_id is not None:
+        member = db.get(Owner, int(member_id))
+        if member is not None:
+            if not email:
+                email = (member.email or "").strip()
+            if not name:
+                name = _owner_name(member)
+    try:
+        await smart_home_webhook_service.send_universal_access_open_webhooks(
+            db,
+            hub_owner_id=int(hub_owner_id),
+            zone_record_ids=_int_ids(zone_ids),
+            member_email=email,
+            member_name=name,
+        )
+    except Exception:
+        logger.exception(
+            "Universal-access hub open notify failed for admin %s member %s",
+            hub_owner_id,
+            member_id,
+        )
 
 
 async def notify_granted_zones(db: Session, *, member_id: int, zone_ids: list[int]) -> None:
@@ -1155,7 +1197,8 @@ def activate_public_key(db: Session, *, caller: Owner, code: str) -> dict[str, A
         )
         .first()
     )
-    if existing is None:
+    newly_activated = existing is None
+    if newly_activated:
         db.add(
             UniversalAccessActivation(
                 credential_id=credential.id,
@@ -1169,6 +1212,11 @@ def activate_public_key(db: Session, *, caller: Owner, code: str) -> dict[str, A
         "key_type": UniversalAccessKeyType.PUBLIC.value,
         "zone_ids": _int_ids(credential.zone_ids),
         "zones": [_zone_summary(zone) for zone in _zones_by_ids(db, _int_ids(credential.zone_ids))],
+        "network_admin_id": int(credential.network_admin_id),
+        "newly_activated": newly_activated,
+        "member_id": int(caller.id),
+        "email": (caller.email or "").strip(),
+        "member_name": _owner_name(caller),
     }
 
 
