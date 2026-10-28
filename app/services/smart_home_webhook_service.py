@@ -1,11 +1,14 @@
 """Outbound smart-home webhook delivery for geo-propagated alarms/alerts.
 
 When a smart-home device has its own webhook and linked zones, Hex Zone POSTs
-each delivered geo message that matches one of those zones.
+each delivered geo message that matches that hub:
 
-Hubs are notified for owners in the delivery set whose account network appears
-in the message's routing networks (fanout matched networks and/or sender
-network). Failures never fail the originating request.
+- Zone-based types (Panic, Sensor, …): only hubs linked to the zones used in
+  the message event.
+- Unknown: every hub linked to a zone on the network used in the message event.
+- Guest / permission notices without zone record ids: network fallback.
+
+Owners must already be in the delivery set. Failures never fail the request.
 """
 from __future__ import annotations
 
@@ -17,7 +20,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.domain.message_types import is_pushable_geo_type
+from app.domain.message_types import CanonicalMessageType, is_pushable_geo_type
 from app.models import Device, Owner, Zone
 from app.services.device_entitlements import is_smart_home_hid
 
@@ -221,33 +224,58 @@ def message_zone_record_ids_for_owner(
     return found
 
 
+def is_unknown_hub_message(alarm_payload: dict[str, Any]) -> bool:
+    """Unknown has no message zones; hubs match by network instead."""
+    return str(alarm_payload.get("type") or "").strip().upper() == (
+        CanonicalMessageType.UNKNOWN.value
+    )
+
+
+def device_matches_message_network(
+    db: Session,
+    linked_zone_ids: set[int],
+    alarm_payload: dict[str, Any],
+) -> bool:
+    """True when a linked zone belongs to a network on the message event."""
+    if not linked_zone_ids:
+        return False
+    networks = {net.casefold() for net in message_related_network_ids(alarm_payload)}
+    if not networks:
+        return False
+    for zone_id in linked_zone_ids:
+        row = db.get(Zone, zone_id)
+        if row is None:
+            continue
+        label = str(getattr(row, "zone_id", "") or "").strip()
+        if label and label.casefold() in networks:
+            return True
+    return False
+
+
 def device_matches_message_zones(
     db: Session,
     device: Device,
     owner_id: int,
     alarm_payload: dict[str, Any],
 ) -> bool:
-    """True when the hub is linked to a zone this message is about.
+    """True when this hub should receive the message webhook.
 
-    Record ids win when the payload has them. Otherwise a linked zone whose
-    network id appears on the message still matches (guest and permission
-    notices often only carry the network id).
+    - Unknown: any linked zone on the message network.
+    - Zone-based with zone record ids: intersection with hub ``zone_ids``.
+    - Notices without zone records (guest / permission): network fallback.
     """
     linked = device_zone_record_ids(device)
     if not linked:
         return False
+
+    if is_unknown_hub_message(alarm_payload):
+        return device_matches_message_network(db, linked, alarm_payload)
+
     related = message_zone_record_ids_for_owner(alarm_payload, owner_id)
     if related:
         return bool(linked & related)
-    networks = {net.casefold() for net in message_related_network_ids(alarm_payload)}
-    if not networks:
-        return False
-    rows = db.query(Zone).filter(Zone.id.in_(list(linked))).all()
-    for row in rows:
-        label = str(getattr(row, "zone_id", "") or "").strip()
-        if label and label.casefold() in networks:
-            return True
-    return False
+
+    return device_matches_message_network(db, linked, alarm_payload)
 
 
 def owner_should_receive_webhook(owner: Owner, alarm_payload: dict[str, Any]) -> bool:
@@ -475,7 +503,7 @@ async def send_smart_home_webhooks(
     - owner is in ``owner_ids`` and passes delivery/network rules
     - registered smart-home HID (``DEV-`` device)
     - its own valid webhook
-    - linked to a zone this message is about
+    - zone match for zone-based types, or network match for Unknown
 
     When ``require_pushable`` is True (default), non-geo types such as
     ``PERMISSION`` and ``SERVICE`` are skipped. Guest-pass auto-approval and

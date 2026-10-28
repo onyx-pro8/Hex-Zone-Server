@@ -6,9 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.models import Device, Owner
+from app.models import Device, Owner, Zone
 from app.services.smart_home_webhook_service import (
     build_smart_home_webhook_payload,
+    device_matches_message_zones,
     is_valid_webhook_url,
     message_origin_network_id,
     message_related_network_ids,
@@ -29,14 +30,20 @@ def _hub(owner: SimpleNamespace, hid: str, *, zone_ids: list[int] | None = None,
     )
 
 
+def _zone(zone_id: int, network_id: str):
+    return SimpleNamespace(id=zone_id, zone_id=network_id, name=f"Zone {zone_id}")
+
+
 def _db_with_owner_and_hub(
     owner: SimpleNamespace,
     hid: str = "DEV-TEST1",
     *,
     sender: SimpleNamespace | None = None,
     hubs: list | None = None,
+    zones: list | None = None,
 ):
     hub_rows = hubs if hubs is not None else [_hub(owner, hid)]
+    zone_rows = list(zones or [])
 
     def query_side_effect(*models):
         q = MagicMock()
@@ -47,12 +54,25 @@ def _db_with_owner_and_hub(
         elif model is Device:
             q.filter.return_value.order_by.return_value.all.return_value = hub_rows
             q.filter.return_value.all.return_value = hub_rows
+        elif model is Zone:
+            q.filter.return_value.all.return_value = zone_rows
         else:
             q.filter.return_value.all.return_value = []
         return q
 
     db = MagicMock()
     db.query.side_effect = query_side_effect
+    zone_by_id = {int(row.id): row for row in zone_rows}
+
+    def get_side_effect(model, pk):
+        if model is Zone:
+            try:
+                return zone_by_id.get(int(pk))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    db.get.side_effect = get_side_effect
     return db
 
 
@@ -523,3 +543,105 @@ async def test_send_only_the_hub_linked_to_the_message_zone():
     assert stats["webhook_skipped_no_zone_count"] == 1
     args, _kwargs = mock_client.post.await_args
     assert args[0] == "https://hub.example/back"
+
+
+def test_zone_message_requires_linked_zone_not_only_network():
+    """SENSOR with zone records ignores a hub that only shares the network."""
+    owner = SimpleNamespace(id=9, zone_id="ZONE-ABC", sn_webhook="")
+    hub = _hub(owner, "DEV-FRONT", zone_ids=[11])
+    db = _db_with_owner_and_hub(
+        owner,
+        hubs=[hub],
+        zones=[_zone(11, "ZONE-ABC")],
+    )
+    payload = {
+        "type": "SENSOR",
+        "delivered_owner_ids": [9],
+        "metadata": {
+            "sender_network_id": "ZONE-ABC",
+            "recipient_zone_record_ids": {"9": 22},
+        },
+    }
+    assert device_matches_message_zones(db, hub, 9, payload) is False
+
+
+def test_unknown_matches_any_hub_on_message_network():
+    """UNKNOWN notifies every hub linked to a zone on the event network."""
+    owner = SimpleNamespace(id=9, zone_id="ZONE-ABC", sn_webhook="")
+    front = _hub(owner, "DEV-FRONT", zone_ids=[11])
+    back = _hub(owner, "DEV-BACK", zone_ids=[22])
+    other = _hub(owner, "DEV-OTHER", zone_ids=[33])
+    db = _db_with_owner_and_hub(
+        owner,
+        hubs=[front, back, other],
+        zones=[
+            _zone(11, "ZONE-ABC"),
+            _zone(22, "ZONE-ABC"),
+            _zone(33, "OTHER-NET"),
+        ],
+    )
+    payload = {
+        "type": "UNKNOWN",
+        "delivered_owner_ids": [9],
+        "metadata": {
+            "sender_network_id": "ZONE-ABC",
+            "fanout": {"strategy": "unknown_nearest_global"},
+        },
+    }
+    assert device_matches_message_zones(db, front, 9, payload) is True
+    assert device_matches_message_zones(db, back, 9, payload) is True
+    assert device_matches_message_zones(db, other, 9, payload) is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_posts_to_all_hubs_on_message_network():
+    owner = SimpleNamespace(
+        id=9,
+        active=True,
+        sn_webhook="",
+        sn_hid="",
+        zone_id="ZONE-ABC",
+    )
+    front = _hub(owner, "DEV-FRONT", zone_ids=[11], webhook="https://hub.example/front")
+    back = _hub(owner, "DEV-BACK", zone_ids=[22], webhook="https://hub.example/back")
+    other = _hub(owner, "DEV-OTHER", zone_ids=[33], webhook="https://hub.example/other")
+    db = _db_with_owner_and_hub(
+        owner,
+        hubs=[front, back, other],
+        zones=[
+            _zone(11, "ZONE-ABC"),
+            _zone(22, "ZONE-ABC"),
+            _zone(33, "OTHER-NET"),
+        ],
+    )
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "app.services.smart_home_webhook_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        stats = await send_smart_home_webhooks(
+            db,
+            [9],
+            {
+                "type": "UNKNOWN",
+                "text": "Something nearby",
+                "delivered_owner_ids": [9],
+                "metadata": {
+                    "sender_network_id": "ZONE-ABC",
+                    "position": {"latitude": 1.0, "longitude": 2.0},
+                    "fanout": {"strategy": "unknown_nearest_global"},
+                },
+            },
+        )
+
+    assert stats["webhook_sent"] == 2
+    assert stats["webhook_skipped_no_zone_count"] == 1
+    posted = sorted(call.args[0] for call in mock_client.post.await_args_list)
+    assert posted == ["https://hub.example/back", "https://hub.example/front"]
