@@ -117,17 +117,65 @@ def test_private_invite_generates_key_immediately(db):
         zone_ids=[shared_a, shared_b],
     )
     assert created["request_kind"] == "invite"
-    assert created["status"] == "approved"
+    assert created["status"] == "pending"
     assert created["key_type"] == "private"
-    assert created["code"]
-    assert created["enabled"] is True
+    assert created["code"] is None
 
-    visible = universal_access_service.universal_primary_zones(db, invitee, already_ids=set())
-    assert [row.id for row in visible] == [shared_a, shared_b]
+    before = universal_access_service.universal_primary_zones(db, invitee, already_ids=set())
+    assert before == []
 
     invitee_list = universal_access_service.list_requests(db, caller=invitee)
     assert len(invitee_list) == 1
+    assert invitee_list[0]["viewer_actions"]["can_approve"] is True
+    assert invitee_list[0]["viewer_actions"]["can_reject"] is True
     assert invitee_list[0]["viewer_actions"]["can_remove"] is False
+
+    approved = universal_access_service.approve_request(
+        db, caller=invitee, request_id=created["id"]
+    )
+    assert approved["status"] == "approved"
+    assert approved["code"]
+    visible = universal_access_service.universal_primary_zones(db, invitee, already_ids=set())
+    assert [row.id for row in visible] == [shared_a, shared_b]
+
+
+def test_private_invite_reject_does_not_add_zones(db):
+    admin = _owner(
+        db,
+        email="net@example.com",
+        zone_id="NET-A",
+        account_type=AccountType.PRIVATE_PLUS,
+        role=OwnerRole.ADMINISTRATOR,
+    )
+    invitee = _owner(
+        db,
+        email="worker@example.com",
+        zone_id="NET-B",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+    )
+    invitee.account_owner_id = invitee.id
+    shared = _insert_zone(db, owner_id=admin.id, zone_key="hall", name="Hall")
+    db.execute(text("UPDATE zones SET zone_id = 'NET-A' WHERE id = :id"), {"id": shared})
+    db.commit()
+
+    created = universal_access_service.generate_invite_key(
+        db,
+        admin=admin,
+        key_type="private",
+        invitee_email=invitee.email,
+        zone_ids=[shared],
+    )
+    rejected = universal_access_service.reject_request(
+        db,
+        caller=invitee,
+        request_id=created["id"],
+        reason="Not my site",
+    )
+    assert rejected["status"] == "rejected"
+    assert rejected["code"] is None
+    assert universal_access_service.universal_primary_zones(db, invitee, already_ids=set()) == []
+    assert universal_access_service.list_private_keys(db, caller=invitee) == []
 
 
 def test_public_invite_activates_on_zones_page(db):
@@ -494,6 +542,9 @@ def test_private_key_can_be_selected_and_cleared(db):
         invitee_email=invitee.email,
         zone_ids=[shared],
     )
+    created = universal_access_service.approve_request(
+        db, caller=invitee, request_id=created["id"]
+    )
     listed = universal_access_service.list_private_keys(db, caller=invitee)
     assert listed[0]["selected"] is True
     assert [row.id for row in universal_access_service.universal_primary_zones(db, invitee, already_ids=set())] == [
@@ -561,6 +612,9 @@ async def test_private_select_triggers_hub_open_only_when_new(db):
         key_type="private",
         invitee_email=invitee.email,
         zone_ids=[shared],
+    )
+    created = universal_access_service.approve_request(
+        db, caller=invitee, request_id=created["id"]
     )
     universal_access_service.set_private_key_selected(
         db,
