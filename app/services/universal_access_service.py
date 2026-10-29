@@ -521,7 +521,8 @@ def _record_permission_notice(
         return None
     kind = _request_kind(row)
     event = ZoneMessageEvent(
-        zone_id=(sender.zone_id or "").strip() or "universal-access",
+        # Not the accessed zone. Access keys must not create a message on that zone.
+        zone_id="universal-access",
         sender_id=sender.id,
         receiver_id=cleaned_targets[0],
         type=CanonicalMessageType.PERMISSION.value,
@@ -570,7 +571,7 @@ async def notify_event_recipients(
     if not targets:
         return
     try:
-        from app.services import push_notification_service, smart_home_webhook_service
+        from app.services import push_notification_service
         from app.services.guest_api_service import zone_message_event_to_member_zone_message_response
         from app.websocket.manager import ws_manager
 
@@ -592,25 +593,10 @@ async def notify_event_recipients(
                 "zone_id": str(event.zone_id or ""),
             },
         )
-        # Smart-home webhook when a hub/device is connected for the recipient.
-        zone = str(event.zone_id or "").strip()
-        webhook_payload = {
-            "type": CanonicalMessageType.PERMISSION.value,
-            "text": event.text,
-            "sender_id": event.sender_id,
-            "zone_id": zone,
-            "delivered_owner_ids": targets,
-            "metadata": {"sender_network_id": zone, "flow": flow},
-        }
-        webhook_stats = await smart_home_webhook_service.send_smart_home_webhooks(
-            db,
-            targets,
-            webhook_payload,
-            require_pushable=False,
-        )
-        await smart_home_webhook_service.notify_smart_home_webhook_owners(
-            list(webhook_stats.get("webhook_owner_results") or [])
-        )
+        # Access-key notices stay off the accessed zone and off its hub message feed.
+        # Joining still sends the separate open payload.
+        if str(flow or "").startswith("universal_access"):
+            return
     except Exception:
         logger.exception("Universal access notice failed for event %s", event_id)
 
