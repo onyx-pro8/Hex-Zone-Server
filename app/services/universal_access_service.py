@@ -67,17 +67,35 @@ def _int_ids(raw: object) -> list[int]:
     return ids
 
 
-def _image_document(value: str, *, label: str) -> str:
+_BUSINESS_DOC_TYPES = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain",
+}
+
+
+def _data_url_media_type(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw.lower().startswith("data:") or "," not in raw:
+        return ""
+    header = raw[5:].split(",", 1)[0]
+    return header.split(";", 1)[0].strip().lower()
+
+
+def _business_document(value: str) -> str:
     document = str(value or "").strip()
-    if not document.startswith("data:image/") and not document.startswith("data:application/pdf"):
+    media = _data_url_media_type(document)
+    allowed = media.startswith("image/") or media in _BUSINESS_DOC_TYPES
+    if not allowed:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"{label} must be an image or PDF.",
+            detail="Business document must be an image, PDF, Word document, or text file.",
         )
     if len(document) > _MAX_PHOTO_CHARS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"{label} is too large.",
+            detail="Business document is too large.",
         )
     return document
 
@@ -414,10 +432,10 @@ def _viewer_actions(
             "can_remove": is_admin or (is_member and pending),
             "can_view_detail": True,
         }
-    # Invite / generated keys: admin may remove; invitee is read-only.
+    # Private invite: the selected user reviews it. Public keys are issued immediately.
     return {
-        "can_approve": False,
-        "can_reject": False,
+        "can_approve": is_member and pending,
+        "can_reject": is_member and pending,
         "can_edit_docs": False,
         "can_remove": is_admin,
         "can_view_detail": True,
@@ -726,6 +744,7 @@ def generate_invite_key(
     else:
         member = admin
 
+    private_invite = visibility == UniversalAccessKeyType.PRIVATE.value
     row = UniversalAccessRequest(
         network_admin_id=admin.id,
         member_id=member.id,
@@ -740,47 +759,45 @@ def generate_invite_key(
         region="",
         city="",
         note=_clean(note, limit=1000),
-        status=UniversalAccessStatus.APPROVED,
-        reviewed_by_id=admin.id,
-        reviewed_at=datetime.utcnow(),
+        status=(
+            UniversalAccessStatus.PENDING
+            if private_invite
+            else UniversalAccessStatus.APPROVED
+        ),
+        reviewed_by_id=None if private_invite else admin.id,
+        reviewed_at=None if private_invite else datetime.utcnow(),
     )
     db.add(row)
     db.flush()
-    credential = UniversalAccessCredential(
-        request_id=row.id,
-        member_id=member.id,
-        network_admin_id=admin.id,
-        code=_new_code(db),
-        key_type=(
-            UniversalAccessKeyType.PRIVATE
-            if visibility == UniversalAccessKeyType.PRIVATE.value
-            else UniversalAccessKeyType.PUBLIC
-        ),
-        zone_ids=granted_ids,
-        country="",
-        region="",
-        city="",
-        enabled=True,
-        place_bbox=None,
-    )
-    db.add(credential)
-    db.flush()
-    if visibility == UniversalAccessKeyType.PRIVATE.value:
-        # Approved private keys start selected so the zones are on the member's list.
-        _select_private_credential(db, credential)
-
     notice = None
-    if visibility == UniversalAccessKeyType.PRIVATE.value:
+    if private_invite:
+        # The selected user must accept before a key or zone access exists.
         zone_label = ", ".join(zone.name for zone in zones) or "shared zones"
         notice = _record_permission_notice(
             db,
             row=row,
             sender=admin,
             targets=[int(member.id)],
-            text=f"{_owner_name(admin)} shared an access zone key ({zone_label}). Key: {credential.code}",
+            text=f"{_owner_name(admin)} sent a private access zone key for {zone_label}. Review it to accept or decline.",
             code="UNIVERSAL_ACCESS_INVITE_SHARED",
             flow="universal_access_invite",
         )
+    else:
+        credential = UniversalAccessCredential(
+            request_id=row.id,
+            member_id=member.id,
+            network_admin_id=admin.id,
+            code=_new_code(db),
+            key_type=UniversalAccessKeyType.PUBLIC,
+            zone_ids=granted_ids,
+            country="",
+            region="",
+            city="",
+            enabled=True,
+            place_bbox=None,
+        )
+        db.add(credential)
+        db.flush()
 
     db.commit()
     db.refresh(row)
@@ -847,7 +864,7 @@ def create_place_access_request(
             detail="Every requested zone must belong to that network.",
         )
     photo = _photo_id(photo_id)
-    document = _image_document(business_document, label="Business document")
+    document = _business_document(business_document)
 
     row = UniversalAccessRequest(
         network_admin_id=admin.id,
@@ -958,7 +975,7 @@ def update_request_docs(
             detail="Only pending requests can be edited.",
         )
     row.photo_id = _photo_id(photo_id)
-    row.business_document = _image_document(business_document, label="Business document")
+    row.business_document = _business_document(business_document)
     db.commit()
     db.refresh(row)
     return _request_row(db, row, caller=caller, include_docs=True)
@@ -1003,30 +1020,15 @@ def delete_request(db: Session, *, caller: Owner, request_id: int) -> dict[str, 
     return {"ok": True, "id": payload["id"]}
 
 
-def approve_request(
+def _grant_private_access(
     db: Session,
     *,
+    row: UniversalAccessRequest,
     caller: Owner,
-    request_id: int,
-    zone_ids: list[int] | None = None,
+    notice_owner_id: int,
+    notice_text: str,
 ) -> dict[str, Any]:
-    del zone_ids  # place-access zones are fixed on the request
-    _require_network_admin(caller)
-    row = db.get(UniversalAccessRequest, request_id)
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found.")
-    if int(row.network_admin_id) != int(caller.id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request not found.")
-    if row.status != UniversalAccessStatus.PENDING:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This request was already reviewed.",
-        )
-    if _request_kind(row) != UniversalAccessKind.PLACE_ACCESS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Only place-access requests need approval.",
-        )
+    """Mint the private key, select it for the member, and record the decision."""
     granted = _int_ids(row.zone_ids)
     if not granted:
         raise HTTPException(
@@ -1052,15 +1054,13 @@ def approve_request(
     row.reject_reason = ""
     db.add(credential)
     db.flush()
-    # Approval adds the private key to the member's zone list (selected).
     _select_private_credential(db, credential)
-    zone_label = ", ".join(zone.name for zone in _zones_by_ids(db, granted)) or "the shared zones"
     notice = _record_permission_notice(
         db,
         row=row,
         sender=caller,
-        targets=[int(row.member_id)],
-        text=f"Access Zone Key Request approved. Access includes {zone_label}. Key: {credential.code}",
+        targets=[int(notice_owner_id)],
+        text=notice_text.format(code=credential.code),
         code="UNIVERSAL_ACCESS_APPROVED",
         flow="universal_access_granted",
     )
@@ -1072,6 +1072,55 @@ def approve_request(
     return payload
 
 
+def approve_request(
+    db: Session,
+    *,
+    caller: Owner,
+    request_id: int,
+    zone_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    del zone_ids  # zones are fixed on the request
+    row = db.get(UniversalAccessRequest, request_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found.")
+    if row.status != UniversalAccessStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This request was already reviewed.",
+        )
+    kind = _request_kind(row)
+    granted = _int_ids(row.zone_ids)
+    zone_label = ", ".join(zone.name for zone in _zones_by_ids(db, granted)) or "the shared zones"
+    if kind == UniversalAccessKind.INVITE:
+        if int(row.member_id) != int(caller.id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request not found.")
+        return _grant_private_access(
+            db,
+            row=row,
+            caller=caller,
+            notice_owner_id=int(row.network_admin_id),
+            notice_text=(
+                f"{_owner_name(caller)} accepted the access zone key for {zone_label}. "
+                "Key: {code}"
+            ),
+        )
+    _require_network_admin(caller)
+    if int(row.network_admin_id) != int(caller.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request not found.")
+    if kind != UniversalAccessKind.PLACE_ACCESS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only place-access requests need approval.",
+        )
+    return _grant_private_access(
+        db,
+        row=row,
+        caller=caller,
+        notice_owner_id=int(row.member_id),
+        notice_text=f"Access Zone Key Request approved. Access includes {zone_label}. Key: {{code}}",
+    )
+
+
 def reject_request(
     db: Session,
     *,
@@ -1079,22 +1128,31 @@ def reject_request(
     request_id: int,
     reason: str,
 ) -> dict[str, Any]:
-    _require_network_admin(caller)
     row = db.get(UniversalAccessRequest, request_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found.")
-    if int(row.network_admin_id) != int(caller.id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request not found.")
     if row.status != UniversalAccessStatus.PENDING:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This request was already reviewed.",
         )
-    if _request_kind(row) != UniversalAccessKind.PLACE_ACCESS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Only place-access requests can be rejected.",
-        )
+    kind = _request_kind(row)
+    if kind == UniversalAccessKind.INVITE:
+        if int(row.member_id) != int(caller.id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request not found.")
+        notice_owner_id = int(row.network_admin_id)
+        decision = "declined the private access zone key"
+    else:
+        _require_network_admin(caller)
+        if int(row.network_admin_id) != int(caller.id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Request not found.")
+        if kind != UniversalAccessKind.PLACE_ACCESS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Only place-access requests can be rejected.",
+            )
+        notice_owner_id = int(row.member_id)
+        decision = "rejected the access zone key request"
     cleaned = _clean(reason, limit=500)
     row.status = UniversalAccessStatus.REJECTED
     row.reject_reason = cleaned
@@ -1106,8 +1164,8 @@ def reject_request(
         db,
         row=row,
         sender=caller,
-        targets=[int(row.member_id)],
-        text=f"Access Zone Key Request rejected. {reason_text}",
+        targets=[notice_owner_id],
+        text=f"{_owner_name(caller)} {decision}. {reason_text}",
         code="UNIVERSAL_ACCESS_REJECTED",
         flow="universal_access_granted",
     )

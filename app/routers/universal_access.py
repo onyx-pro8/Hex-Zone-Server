@@ -128,14 +128,19 @@ async def create_invite_request(
         await universal_access_service.notify_permission_recipients(
             db,
             str(notice_event_id),
-            title="Access Zone Key Shared",
+            title=(
+                "Access Zone Key Review"
+                if created.get("status") == "pending"
+                else "Access Zone Key Shared"
+            ),
         )
+    # Private keys join the user's zones only after that user accepts.
+    if created.get("status") == "approved":
         await universal_access_service.notify_granted_zones(
             db,
             member_id=int(created["member_id"]),
             zone_ids=list(created.get("zone_ids") or []),
         )
-        # Private invite immediately joins the member — notify hubs linked to those zones.
         await universal_access_service.notify_hubs_of_zone_join(
             db,
             hub_owner_id=int(created.get("network_admin_id") or caller.id),
