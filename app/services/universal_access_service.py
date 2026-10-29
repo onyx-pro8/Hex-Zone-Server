@@ -626,7 +626,7 @@ async def notify_permission_recipients(db: Session, event_id: str, *, title: str
 
 # Backward-compatible names used by the router / older call sites.
 async def notify_system_admins_of_request(db: Session, event_id: str) -> None:
-    await notify_permission_recipients(db, event_id, title="Universal access request")
+    await notify_permission_recipients(db, event_id, title="Access Zone Key Request")
 
 
 async def notify_decision_recipients(db: Session, event_id: str, *, title: str) -> None:
@@ -791,7 +791,7 @@ def generate_invite_key(
             row=row,
             sender=admin,
             targets=[int(member.id)],
-            text=f"{_owner_name(admin)} shared universal access ({zone_label}). Key: {credential.code}",
+            text=f"{_owner_name(admin)} shared an access zone key ({zone_label}). Key: {credential.code}",
             code="UNIVERSAL_ACCESS_INVITE_SHARED",
             flow="universal_access_invite",
         )
@@ -887,7 +887,7 @@ def create_place_access_request(
         row=row,
         sender=requester,
         targets=[int(admin.id)],
-        text=f"{_owner_name(requester)} requested universal access to {zone_label or 'your zones'}.",
+        text=f"{_owner_name(requester)} sent an Access Zone Key Request for {zone_label or 'your zones'}.",
         code="UNIVERSAL_ACCESS_PLACE_REQUESTED",
         flow="universal_access_request",
     )
@@ -1074,7 +1074,7 @@ def approve_request(
         row=row,
         sender=caller,
         targets=[int(row.member_id)],
-        text=f"Universal access approved. Access includes {zone_label}. Key: {credential.code}",
+        text=f"Access Zone Key Request approved. Access includes {zone_label}. Key: {credential.code}",
         code="UNIVERSAL_ACCESS_APPROVED",
         flow="universal_access_granted",
     )
@@ -1121,7 +1121,7 @@ def reject_request(
         row=row,
         sender=caller,
         targets=[int(row.member_id)],
-        text=f"Universal access rejected. {reason_text}",
+        text=f"Access Zone Key Request rejected. {reason_text}",
         code="UNIVERSAL_ACCESS_REJECTED",
         flow="universal_access_granted",
     )

@@ -128,7 +128,7 @@ async def create_invite_request(
         await universal_access_service.notify_permission_recipients(
             db,
             str(notice_event_id),
-            title="Universal access shared",
+            title="Access Zone Key Shared",
         )
         await universal_access_service.notify_granted_zones(
             db,
@@ -168,7 +168,7 @@ async def create_place_access_request(
         await universal_access_service.notify_permission_recipients(
             db,
             str(notice_event_id),
-            title="Universal access request",
+            title="Access Zone Key Request",
         )
     return created
 
@@ -248,7 +248,7 @@ async def approve_universal_access_request(
         await universal_access_service.notify_decision_recipients(
             db,
             str(notice_event_id),
-            title="Universal access approved",
+            title="Access Zone Key Approved",
         )
     await universal_access_service.notify_granted_zones(
         db,
@@ -286,7 +286,7 @@ async def reject_universal_access_request(
         await universal_access_service.notify_decision_recipients(
             db,
             str(notice_event_id),
-            title="Universal access rejected",
+            title="Access Zone Key Rejected",
         )
     return rejected
 
