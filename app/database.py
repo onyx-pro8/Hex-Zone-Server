@@ -341,6 +341,24 @@ def patch_universal_access_zone_share_columns() -> None:
                 "ON universal_access_activations (owner_id);"
             )
         )
+        # Private keys granted before selection existed stay on the member's zone list.
+        conn.execute(
+            text(
+                """
+                INSERT INTO universal_access_activations (credential_id, owner_id, created_at)
+                SELECT c.id, c.member_id, NOW()
+                FROM universal_access_credentials c
+                WHERE c.enabled IS TRUE
+                  AND (c.key_type = 'private' OR c.key_type IS NULL)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM universal_access_activations a
+                    WHERE a.credential_id = c.id
+                      AND a.owner_id = c.member_id
+                  );
+                """
+            )
+        )
     logger.info("Universal access zone share columns patch applied")
 
 

@@ -47,6 +47,10 @@ class ActivatePublicKey(BaseModel):
     code: str = Field(..., min_length=3, max_length=32)
 
 
+class PrivateKeySelection(BaseModel):
+    selected: bool
+
+
 def _caller(db: Session, current_user: dict):
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
@@ -310,6 +314,38 @@ def list_private_keys(
 ):
     caller = _caller(db, current_user)
     return universal_access_service.list_private_keys(db, caller=caller)
+
+
+@router.post("/keys/private/{credential_id}/selected")
+async def set_private_key_selected(
+    credential_id: int,
+    body: PrivateKeySelection,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    caller = _caller(db, current_user)
+    result = universal_access_service.set_private_key_selected(
+        db,
+        caller=caller,
+        credential_id=credential_id,
+        selected=body.selected,
+    )
+    await universal_access_service.notify_granted_zones(
+        db,
+        member_id=int(caller.id),
+        zone_ids=list(result.get("zone_ids") or []),
+    )
+    # Selecting a private key joins its zones, same as adding a public key.
+    if result.get("newly_selected"):
+        await universal_access_service.notify_hubs_of_zone_join(
+            db,
+            hub_owner_id=int(result.get("network_admin_id") or 0),
+            zone_ids=list(result.get("zone_ids") or []),
+            member_id=int(result.get("member_id") or caller.id),
+            member_email=str(result.get("email") or ""),
+            member_name=str(result.get("member_name") or ""),
+        )
+    return result
 
 
 @router.get("/keys/public")

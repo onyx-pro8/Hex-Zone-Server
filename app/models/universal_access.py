@@ -119,7 +119,11 @@ class UniversalAccessCredential(Base):
 
 
 class UniversalAccessActivation(Base):
-    """Public key entered by a user so those zones appear on their map."""
+    """Key the user has selected, so those zones appear on their map.
+
+    Public keys are selected when the code is entered. Private keys start
+    selected when they are approved, and the member can clear or restore that.
+    """
 
     __tablename__ = "universal_access_activations"
     __table_args__ = (

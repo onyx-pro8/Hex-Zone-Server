@@ -175,6 +175,41 @@ def _credential_key_type(credential: UniversalAccessCredential | None) -> str:
     return UniversalAccessKeyType.PRIVATE.value
 
 
+def _activation_for(
+    db: Session,
+    *,
+    credential_id: int,
+    owner_id: int,
+) -> UniversalAccessActivation | None:
+    return (
+        db.query(UniversalAccessActivation)
+        .filter(
+            UniversalAccessActivation.credential_id == int(credential_id),
+            UniversalAccessActivation.owner_id == int(owner_id),
+        )
+        .first()
+    )
+
+
+def _select_private_credential(db: Session, credential: UniversalAccessCredential) -> bool:
+    """Select a private key for the member it was issued to. True when new."""
+    existing = _activation_for(
+        db,
+        credential_id=int(credential.id),
+        owner_id=int(credential.member_id),
+    )
+    if existing is not None:
+        return False
+    db.add(
+        UniversalAccessActivation(
+            credential_id=int(credential.id),
+            owner_id=int(credential.member_id),
+        )
+    )
+    db.flush()
+    return True
+
+
 def _network_admins(db: Session, network_id: str) -> list[Owner]:
     network = (network_id or "").strip()
     if not network:
@@ -744,6 +779,9 @@ def generate_invite_key(
     )
     db.add(credential)
     db.flush()
+    if visibility == UniversalAccessKeyType.PRIVATE.value:
+        # Approved private keys start selected so the zones are on the member's list.
+        _select_private_credential(db, credential)
 
     notice = None
     if visibility == UniversalAccessKeyType.PRIVATE.value:
@@ -1028,6 +1066,8 @@ def approve_request(
     row.reject_reason = ""
     db.add(credential)
     db.flush()
+    # Approval adds the private key to the member's zone list (selected).
+    _select_private_credential(db, credential)
     zone_label = ", ".join(zone.name for zone in _zones_by_ids(db, granted)) or "the shared zones"
     notice = _record_permission_notice(
         db,
@@ -1126,6 +1166,17 @@ def list_private_keys(db: Session, *, caller: Owner) -> list[dict[str, Any]]:
         .order_by(UniversalAccessCredential.created_at.desc())
         .all()
     )
+    if not rows:
+        return []
+    selected_ids = {
+        int(item.credential_id)
+        for item in db.query(UniversalAccessActivation.credential_id)
+        .filter(
+            UniversalAccessActivation.owner_id == caller.id,
+            UniversalAccessActivation.credential_id.in_(tuple(int(row.id) for row in rows)),
+        )
+        .all()
+    }
     return [
         {
             "credential_id": row.id,
@@ -1134,10 +1185,73 @@ def list_private_keys(db: Session, *, caller: Owner) -> list[dict[str, Any]]:
             "zone_ids": _int_ids(row.zone_ids),
             "zones": [_zone_summary(zone) for zone in _zones_by_ids(db, _int_ids(row.zone_ids))],
             "enabled": bool(row.enabled),
+            "selected": int(row.id) in selected_ids,
+            "network_admin_id": int(row.network_admin_id),
             "created_at": row.created_at.isoformat() if row.created_at else None,
         }
         for row in rows
     ]
+
+
+def set_private_key_selected(
+    db: Session,
+    *,
+    caller: Owner,
+    credential_id: int,
+    selected: bool,
+) -> dict[str, Any]:
+    """Member selects or clears a private key the way a public key is activated."""
+    credential = db.get(UniversalAccessCredential, int(credential_id))
+    if (
+        credential is None
+        or _credential_key_type(credential) != UniversalAccessKeyType.PRIVATE.value
+        or int(credential.member_id) != int(caller.id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Private access key not found.",
+        )
+    if not credential.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This access key is turned off.",
+        )
+    existing = _activation_for(
+        db,
+        credential_id=int(credential.id),
+        owner_id=int(caller.id),
+    )
+    newly_selected = False
+    changed = False
+    if selected:
+        if existing is None:
+            db.add(
+                UniversalAccessActivation(
+                    credential_id=int(credential.id),
+                    owner_id=int(caller.id),
+                )
+            )
+            newly_selected = True
+            changed = True
+    elif existing is not None:
+        db.delete(existing)
+        changed = True
+    if changed:
+        db.commit()
+    zone_ids = _int_ids(credential.zone_ids)
+    return {
+        "credential_id": credential.id,
+        "code": credential.code,
+        "key_type": UniversalAccessKeyType.PRIVATE.value,
+        "zone_ids": zone_ids,
+        "zones": [_zone_summary(zone) for zone in _zones_by_ids(db, zone_ids)],
+        "selected": bool(selected),
+        "newly_selected": newly_selected,
+        "network_admin_id": int(credential.network_admin_id),
+        "member_id": int(caller.id),
+        "email": (caller.email or "").strip(),
+        "member_name": _owner_name(caller),
+    }
 
 
 def search_public_keys(db: Session, *, caller: Owner, query: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -1230,6 +1344,7 @@ def list_activated_keys(db: Session, *, caller: Owner) -> list[dict[str, Any]]:
         .filter(
             UniversalAccessActivation.owner_id == caller.id,
             UniversalAccessCredential.enabled.is_(True),
+            UniversalAccessCredential.key_type == UniversalAccessKeyType.PUBLIC.value,
         )
         .order_by(UniversalAccessActivation.created_at.desc())
         .all()
@@ -1266,6 +1381,11 @@ def deactivate_public_key(db: Session, *, caller: Owner, credential_id: int) -> 
             detail="Activated access key not found.",
         )
     row, credential = activation
+    if _credential_key_type(credential) != UniversalAccessKeyType.PUBLIC.value:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only public access keys can be removed here.",
+        )
     zone_ids = _int_ids(credential.zone_ids)
     db.delete(row)
     db.commit()
@@ -1279,37 +1399,41 @@ def deactivate_public_key(db: Session, *, caller: Owner, credential_id: int) -> 
 
 
 def enabled_credentials_for(db: Session, owner: Owner) -> list[UniversalAccessCredential]:
-    private_rows = (
-        db.query(UniversalAccessCredential)
-        .filter(
-            UniversalAccessCredential.member_id == owner.id,
-            UniversalAccessCredential.enabled.is_(True),
-            or_(
-                UniversalAccessCredential.key_type == UniversalAccessKeyType.PRIVATE.value,
-                UniversalAccessCredential.key_type.is_(None),
-            ),
-        )
-        .all()
-    )
+    """Credentials whose zones are on this owner's map.
+
+    Public keys count after the owner enters them. Private keys count while
+    the member has them selected (they start selected on approval).
+    """
     activated_ids = [
         int(row.credential_id)
-        for row in db.query(UniversalAccessActivation)
+        for row in db.query(UniversalAccessActivation.credential_id)
         .filter(UniversalAccessActivation.owner_id == owner.id)
         .all()
     ]
-    public_rows: list[UniversalAccessCredential] = []
-    if activated_ids:
-        public_rows = (
-            db.query(UniversalAccessCredential)
-            .filter(
-                UniversalAccessCredential.id.in_(tuple(activated_ids)),
-                UniversalAccessCredential.enabled.is_(True),
-                UniversalAccessCredential.key_type == UniversalAccessKeyType.PUBLIC.value,
-            )
-            .all()
+    if not activated_ids:
+        return []
+    rows = (
+        db.query(UniversalAccessCredential)
+        .filter(
+            UniversalAccessCredential.id.in_(tuple(activated_ids)),
+            UniversalAccessCredential.enabled.is_(True),
         )
-    by_id = {int(row.id): row for row in [*private_rows, *public_rows]}
-    return list(by_id.values())
+        .all()
+    )
+    kept: list[UniversalAccessCredential] = []
+    seen: set[int] = set()
+    for row in rows:
+        row_id = int(row.id)
+        if row_id in seen:
+            continue
+        if _credential_key_type(row) == UniversalAccessKeyType.PUBLIC.value:
+            seen.add(row_id)
+            kept.append(row)
+            continue
+        if int(row.member_id) == int(owner.id):
+            seen.add(row_id)
+            kept.append(row)
+    return kept
 
 
 def universal_primary_zones(
