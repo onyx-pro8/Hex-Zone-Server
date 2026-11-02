@@ -176,6 +176,12 @@ class Settings(BaseSettings):
     SMTP_USE_SSL: bool = True
     SMTP_TIMEOUT_SECONDS: int = 15
 
+    # LiveKit Cloud. Each connected call gets its own room token.
+    # The API secret stays on the server.
+    LIVEKIT_URL: str = ""
+    LIVEKIT_API_KEY: str = ""
+    LIVEKIT_API_SECRET: str = ""
+
     @property
     def sqlalchemy_database_url(self) -> str:
         """Resolved DB connection string with an explicit port.

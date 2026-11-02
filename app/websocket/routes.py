@@ -19,7 +19,9 @@ Server sends **`type`** + **`data`** envelopes. Common **`type`** values:
 - **`guest_zone_message`** — guest-thread CHAT push (member or guest clients)
 - **`GUEST_PRESENCE`** — `{ guest_id, online }` when a guest connects/disconnects WS or hits `/api/guest/*`
 - **`CALL_INVITE`**, **`CALL_ACCEPT`**, **`CALL_REJECT`**, **`CALL_CANCEL`**,
-  **`CALL_TIMEOUT`**, **`CALL_END`**, **`CALL_SIGNAL`** — guest↔admin voice call signaling
+  **`CALL_TIMEOUT`**, **`CALL_END`**, **`CALL_SIGNAL`**, **`CALL_LIVEKIT`** —
+  guest↔admin call signaling. **`CALL_LIVEKIT`** returns a LiveKit join token
+  for the requesting party only.
 
 Clients may also **send** call frames (same type names) after auth; the server relays
 them to the other party. Auth: member JWT (**`sub`** = owner id) or guest JWT
@@ -654,6 +656,41 @@ async def _handle_call_frame(
             return
         payload = guest_call_service.public_call_payload(accepted)
         await guest_call_service.broadcast_call_event("CALL_ACCEPT", accepted, payload)
+        return
+
+    if message_type == "CALL_LIVEKIT":
+        from app.services.livekit_call import mint_call_token
+
+        if call.state != "connected":
+            await websocket.send_json(
+                {
+                    "type": "ERROR",
+                    "error": {
+                        "message": "The call is not connected.",
+                        "error_code": "LIVEKIT_UNAVAILABLE",
+                    },
+                }
+            )
+            return
+        minted = mint_call_token(call, role=role)
+        if minted is None:
+            await websocket.send_json(
+                {
+                    "type": "ERROR",
+                    "error": {
+                        "message": "Voice is not configured on the server.",
+                        "error_code": "LIVEKIT_UNAVAILABLE",
+                    },
+                }
+            )
+            return
+        logger.info("CALL_LIVEKIT room=hz-%s role=%s", call.call_id, role)
+        await websocket.send_json(
+            {
+                "type": "CALL_LIVEKIT",
+                "data": guest_call_service.public_call_payload(call, **minted),
+            }
+        )
         return
 
     if message_type == "CALL_SIGNAL":

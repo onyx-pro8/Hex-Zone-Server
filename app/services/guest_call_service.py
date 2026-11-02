@@ -1,8 +1,8 @@
 """In-memory guest↔admin voice-call signaling state.
 
-Calls are relayed over the existing realtime WebSocket. Media (WebRTC) is
-negotiated client-side via CALL_SIGNAL frames; this module only tracks
-ringing/connected state, ring timeouts, and access-reject escalation close.
+Calls are relayed over the existing realtime WebSocket. Voice media is a
+LiveKit room joined with a per-party token. This module tracks ringing,
+connected state, ring timeouts, and access-reject escalation close.
 """
 from __future__ import annotations
 
