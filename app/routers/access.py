@@ -77,7 +77,6 @@ from app.services import (
     guest_arrival_zone_messages as guest_arrival_zone_messages_service,
     guest_call_service,
     guest_pass_service,
-    push_notification_service,
     smart_home_webhook_service,
 )
 from app.websocket.manager import ws_manager
@@ -909,20 +908,6 @@ async def guest_permission(
                 "status": "APPROVED",
             },
         )
-        guest_name = str(event_payload.get("guest_name") or "Guest").strip() or "Guest"
-        zone = str(event_payload.get("zone_id") or effective_zone_id or "").strip()
-        await push_notification_service.send_plain_push_to_owners(
-            db,
-            user_ids,
-            title=f"{zone} · Expected guest" if zone else "Expected guest arrived",
-            body=f"{guest_name} has arrived.",
-            data={
-                "event": "guest_is_here",
-                "type": "PERMISSION",
-                "guest_id": str(event_payload.get("guest_id") or ""),
-                "zone_id": zone,
-            },
-        )
     for user_ids, event_payload in result.get("ws_unexpected_guest") or []:
         await ws_manager.broadcast_to_users(user_ids, "unexpected_guest", event_payload)
         await ws_manager.broadcast_to_users(
@@ -934,20 +919,6 @@ async def guest_permission(
                 "status": "PENDING",
                 "call_fullscreen": bool(event_payload.get("call_fullscreen")),
                 "access_reject_count": event_payload.get("access_reject_count"),
-            },
-        )
-        guest_name = str(event_payload.get("guest_name") or "Guest").strip() or "Guest"
-        zone = str(event_payload.get("zone_id") or effective_zone_id or "").strip()
-        await push_notification_service.send_plain_push_to_owners(
-            db,
-            user_ids,
-            title=f"{zone} · Guest access request" if zone else "Guest access request",
-            body=f"{guest_name} is requesting access and awaiting approval.",
-            data={
-                "event": "unexpected_guest",
-                "type": "PERMISSION",
-                "guest_id": str(event_payload.get("guest_id") or ""),
-                "zone_id": zone,
             },
         )
 

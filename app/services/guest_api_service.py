@@ -886,36 +886,6 @@ async def notify_access_chat_inbox_ws(db: Session, row: ZoneMessageEvent) -> Non
             "GUEST_PRESENCE",
             {"guest_id": guest_sender, "online": True},
         )
-        # Background / other-tab admins need a device push; WS alone is easy to miss.
-        guest_name = ""
-        body = row.body_json if isinstance(row.body_json, dict) else {}
-        raw_name = body.get("guest_name") or body.get("guestName")
-        if isinstance(raw_name, str) and raw_name.strip():
-            guest_name = raw_name.strip()
-        if not guest_name:
-            meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
-            raw_meta = meta.get("guest_name") or meta.get("broadcast_name")
-            if isinstance(raw_meta, str) and raw_meta.strip():
-                guest_name = raw_meta.strip()
-        if not guest_name:
-            guest_name = "Guest"
-        text = (row.text or "").strip() or "New guest message"
-        zone = (row.zone_id or "").strip()
-        from app.services import push_notification_service
-
-        await push_notification_service.send_plain_push_to_owners(
-            db,
-            deliver_to,
-            title=f"{guest_name} · Guest chat" if guest_name else "Guest chat",
-            body=text[:240],
-            data={
-                "event": "NEW_MESSAGE",
-                "type": str(row.type or "CHAT"),
-                "guest_id": guest_sender,
-                "zone_id": zone,
-                "id": str(row.id),
-            },
-        )
 
 
 def create_member_to_guest_zone_message(

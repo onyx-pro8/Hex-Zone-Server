@@ -577,6 +577,12 @@ async def notify_event_recipients(
     title: str,
     flow: str,
 ) -> None:
+    """Deliver the saved PERMISSION row over the websocket.
+
+    ``title`` remains for existing callers. The separate device push that used
+    it was removed so this row is the only notification.
+    """
+    del title
     event = db.get(ZoneMessageEvent, event_id)
     if event is None:
         return
@@ -589,7 +595,6 @@ async def notify_event_recipients(
     if not targets:
         return
     try:
-        from app.services import push_notification_service
         from app.services.guest_api_service import zone_message_event_to_member_zone_message_response
         from app.websocket.manager import ws_manager
 
@@ -599,18 +604,6 @@ async def notify_event_recipients(
             viewer_owner_id=targets[0],
         ).model_dump(mode="json")
         await ws_manager.broadcast_to_users(targets, "NEW_MESSAGE", payload)
-        await push_notification_service.send_plain_push_to_owners(
-            db,
-            targets,
-            title=title,
-            body=(event.text or title)[:240],
-            data={
-                "event": "NEW_MESSAGE",
-                "type": "PERMISSION",
-                "id": str(event.id),
-                "zone_id": str(event.zone_id or ""),
-            },
-        )
         # Access-key notices stay off the accessed zone and off its hub message feed.
         # Joining still sends the separate open payload.
         if str(flow or "").startswith("universal_access"):
