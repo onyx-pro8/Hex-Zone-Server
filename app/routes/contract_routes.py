@@ -98,6 +98,17 @@ class RegisterRequest(BaseModel):
         validation_alias=AliasChoices("communalId", "communal_id"),
     )
     address: str = Field(min_length=1, description="Street/city/province/country")
+    tierLevel: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+        description=(
+            "Organization (ENHANCED_PLUS) capacity level 1–5, chosen at signup. "
+            "Ignored when the registration code already carries a level, and ignored "
+            "for every other account type."
+        ),
+        validation_alias=AliasChoices("tierLevel", "tier_level"),
+    )
 
     @model_validator(mode="before")
     @classmethod

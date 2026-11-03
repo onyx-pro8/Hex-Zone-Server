@@ -26,6 +26,7 @@ from app.services.access_policy import (
 from app.services.registration_code_service import (
     mint_registration_code,
     require_and_consume_admin_registration_code,
+    resolve_organization_signup_tier_level,
 )
 from app.services.account_type_policy import (
     assert_account_type_allowed_for_public_registration,
@@ -125,8 +126,9 @@ async def register_owner(
         )
         preallocated_api_key = consumed.api_key
         if owner.account_type == AccountTypeEnum.ENHANCED_PLUS:
-            owner.tier_level = (
-                int(consumed.tier_level) if consumed.tier_level is not None else 1
+            owner.tier_level = resolve_organization_signup_tier_level(
+                code_tier_level=consumed.tier_level,
+                requested_tier_level=owner.tier_level,
             )
         else:
             owner.tier_level = None

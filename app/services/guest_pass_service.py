@@ -233,6 +233,79 @@ def revoke_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
     return {"ok": True, "row": row}
 
 
+def _can_delete_guest_pass(owner: Owner, row: GuestPass) -> bool:
+    if _is_zone_admin(owner, row.zone_id):
+        return True
+    return _is_zone_member(owner, row.zone_id) and row.requested_by == owner.id
+
+
+def delete_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
+    """Permanently remove an expired guest pass (frees the zone event_id)."""
+    row = db.query(GuestPass).filter(GuestPass.id == pass_id).first()
+    if not row:
+        return {"error": "NOT_FOUND", "message": "Guest pass not found.", "http_status": 404}
+
+    if not _can_delete_guest_pass(owner, row):
+        return {
+            "error": "FORBIDDEN",
+            "message": "Administrator role or ownership of this pass is required.",
+            "http_status": 403,
+        }
+
+    now = datetime.utcnow()
+    if not row.expires_at or now < row.expires_at:
+        return {
+            "error": "NOT_EXPIRED",
+            "message": "Only expired guest passes can be deleted. Revoke an active pass instead.",
+            "http_status": 409,
+        }
+
+    pass_id_out = row.id
+    zone_id_out = row.zone_id
+    event_id_out = row.event_id
+    db.delete(row)
+    db.flush()
+    logger.info(
+        "guest_pass_deleted id=%s zone_id=%s event_id=%s by=%d",
+        pass_id_out,
+        zone_id_out,
+        event_id_out,
+        owner.id,
+    )
+    return {
+        "ok": True,
+        "id": pass_id_out,
+        "zone_id": zone_id_out,
+        "event_id": event_id_out,
+    }
+
+
+def delete_expired_guest_passes(db: Session, *, owner: Owner, zone_id: str) -> dict:
+    """Delete all expired guest passes in a zone the caller may manage."""
+    zid = zone_id.strip()
+    if not _is_zone_member(owner, zid):
+        return {"error": "FORBIDDEN", "message": "You are not a member of this zone.", "http_status": 403}
+
+    now = datetime.utcnow()
+    q = db.query(GuestPass).filter(GuestPass.zone_id == zid, GuestPass.expires_at <= now)
+    if not _is_zone_admin(owner, zid):
+        q = q.filter(GuestPass.requested_by == owner.id)
+
+    rows = q.all()
+    deleted_ids = [r.id for r in rows]
+    for row in rows:
+        db.delete(row)
+    if rows:
+        db.flush()
+    logger.info(
+        "guest_passes_expired_cleared zone_id=%s count=%d by=%d",
+        zid,
+        len(deleted_ids),
+        owner.id,
+    )
+    return {"ok": True, "deleted_ids": deleted_ids, "deleted_count": len(deleted_ids)}
+
+
 def find_accepted_guest_pass_for_event(
     db: Session,
     *,

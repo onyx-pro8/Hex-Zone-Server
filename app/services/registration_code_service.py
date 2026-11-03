@@ -494,6 +494,40 @@ def require_and_consume_admin_registration_code(
     )
 
 
+def resolve_organization_signup_tier_level(
+    *,
+    code_tier_level: int | None,
+    requested_tier_level: int | None,
+) -> int:
+    """Capacity level for a new Organization administrator.
+
+    A registration code that already carries a level wins. Otherwise the level
+    chosen on the signup form is stored. Omitting the choice stays at level 1.
+    """
+    if code_tier_level is not None:
+        try:
+            level = int(code_tier_level)
+        except (TypeError, ValueError):
+            level = 1
+        return level if level in ENHANCED_PLUS_LEVELS else 1
+
+    if requested_tier_level is None:
+        return 1
+    try:
+        level = int(requested_tier_level)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Organization level must be an integer between 1 and 5",
+        ) from exc
+    if level not in ENHANCED_PLUS_LEVELS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Organization level must be between 1 and 5",
+        )
+    return level
+
+
 def _candidate_price_tier_keys_for_email(db: Session, email: str) -> list[str]:
     """Recent issuance rows for an email — used to re-validate HMAC at register time."""
     rows = registration_code_crud.list_active_codes_for_email(db, normalize_email(email))

@@ -212,3 +212,39 @@ class GuestPassAdminRequest(BaseModel):
             ]
         }
     )
+
+
+class GuestPassDeletedData(BaseModel):
+    """Response data from **`DELETE /api/access/guest-passes/{pass_id}`**."""
+
+    id: str = Field(description="UUID of the deleted guest pass.")
+    zone_id: str = Field(description="Zone the pass belonged to.")
+    event_id: str = Field(description="Event identifier that was freed by the delete.")
+    deleted: Literal[True] = True
+
+
+class GuestPassDeletedEnvelope(BaseModel):
+    """Success envelope for deleting one expired guest pass."""
+
+    status: Literal["success"] = "success"
+    data: GuestPassDeletedData
+
+
+class GuestPassClearExpiredRequest(BaseModel):
+    """Body for **`POST /api/access/guest-passes/clear-expired`**."""
+
+    zone_id: str = Field(..., min_length=1, max_length=100, description="Zone to clear expired passes from.")
+
+
+class GuestPassClearExpiredData(BaseModel):
+    """Response data from clearing expired guest passes."""
+
+    deleted_ids: list[str] = Field(description="UUIDs of deleted guest passes.")
+    deleted_count: int = Field(description="Number of expired passes removed.")
+
+
+class GuestPassClearExpiredEnvelope(BaseModel):
+    """Success envelope for clearing expired guest passes."""
+
+    status: Literal["success"] = "success"
+    data: GuestPassClearExpiredData

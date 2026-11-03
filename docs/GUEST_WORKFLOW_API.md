@@ -103,6 +103,8 @@ Treat **`401`** + **`GUEST_ACCESS_INVALIDATED`** like an expired or invalid toke
 | Action | Route / behavior |
 |--------|------------------|
 | Revoke accepted guest pass (after arrival) | **`POST /api/access/guest-passes/{pass_id}/revoke`** — sets pass **`REVOKED`** and **`guest_access_sessions.access_revoked_at`** for the consumed session when **`used_by_guest_id`** is set. |
+| Delete expired guest pass | **`DELETE /api/access/guest-passes/{pass_id}`** — permanently removes an expired pass and frees its **`event_id`**. Admins or the creating member may delete. |
+| Clear expired guest passes | **`POST /api/access/guest-passes/clear-expired`** with **`zone_id`** — deletes all expired passes the caller may manage in that zone. |
 | Reject pending unexpected guest | **`POST /api/access/reject`** (or message-feature **`…/reject`**) — **`resolution`** → **`rejected`** (guest never had a valid exchange if still pending; if race, JWT check fails on **`rejected`**). |
 | Revoke approved unexpected guest (after JWT issued) | Same **`POST /api/access/reject`** — allowed when **`resolution`** was **`approved`**; sets **`rejected`** and invalidates Bearer. |
 | Revoke expected session (schedule / guest-pass auto-expected) | Same **`POST /api/access/reject`** on an **`expected`** session — sets **`access_revoked_at`**. |

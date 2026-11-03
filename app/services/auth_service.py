@@ -14,7 +14,10 @@ from app.services.owner_home_service import (
     get_owner_home_coordinates,
     sync_owner_home_from_address,
 )
-from app.services.registration_code_service import require_and_consume_admin_registration_code
+from app.services.registration_code_service import (
+    require_and_consume_admin_registration_code,
+    resolve_organization_signup_tier_level,
+)
 from app.services.account_type_policy import (
     assert_account_type_allowed_for_public_registration,
     coerce_individual_registration_role,
@@ -131,11 +134,20 @@ def register_user(db: Session, payload: dict) -> dict:
         )
     owner_tier_level: int | None = None
     if account_type_value == "enhanced_plus":
-        owner_tier_level = (
-            int(registration_tier_level)
-            if registration_tier_level is not None
-            else 1
-        )
+        if role_value == OwnerRole.ADMINISTRATOR:
+            requested = payload.get("tierLevel")
+            if requested is None:
+                requested = payload.get("tier_level")
+            owner_tier_level = resolve_organization_signup_tier_level(
+                code_tier_level=registration_tier_level,
+                requested_tier_level=requested,
+            )
+        else:
+            owner_tier_level = (
+                int(registration_tier_level)
+                if registration_tier_level is not None
+                else 1
+            )
     owner = Owner(
         email=payload["email"],
         zone_id=payload.get("zoneId") or f"user-{payload['email']}",

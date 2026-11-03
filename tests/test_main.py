@@ -1259,6 +1259,50 @@ async def test_admin_register_with_minted_code_succeeds_once(test_db, override_g
 
 
 @pytest.mark.asyncio
+async def test_organization_register_stores_selected_level(test_db, override_get_db):
+    """Signup level is stored when the registration code has no tier of its own."""
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        code = (await client.get("/utils/registration-code")).json()["registration_code"]
+        created = await client.post(
+            "/owners/register",
+            json={
+                "email": "org-level@example.com",
+                "zone_id": "zone-org-level",
+                "first_name": "Org",
+                "last_name": "Admin",
+                "account_type": "enhanced_plus",
+                "role": "administrator",
+                "tier_level": 3,
+                "password": "SecurePassword123",
+                "registration_code": code,
+                "address": "Addr",
+            },
+        )
+        assert created.status_code == 201
+        assert created.json()["tier_level"] == 3
+
+        contract_code = (await client.get("/utils/registration-code")).json()[
+            "registration_code"
+        ]
+        contract = await client.post(
+            "/register",
+            json={
+                "name": "Org Contract",
+                "email": "org-level-contract@example.com",
+                "password": "SecurePassword123",
+                "accountType": "ENHANCED_PLUS",
+                "registrationType": "ADMINISTRATOR",
+                "zoneId": "zone-org-level-contract",
+                "address": "Addr",
+                "registrationCode": contract_code,
+                "tierLevel": 4,
+            },
+        )
+        assert contract.status_code == 201
+        assert contract.json()["data"]["tier_level"] == 4
+
+
+@pytest.mark.asyncio
 async def test_contract_register_admin_requires_registration_code(test_db, override_get_db):
     """POST /register (contract) requires registrationCode for administrator."""
     async with AsyncClient(app=app, base_url="http://test") as client:

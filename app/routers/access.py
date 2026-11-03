@@ -54,11 +54,16 @@ from app.schemas.access_guest import (
 )
 from app.schemas.guest_pass import (
     GuestPassAdminRequest,
+    GuestPassClearExpiredData,
+    GuestPassClearExpiredEnvelope,
+    GuestPassClearExpiredRequest,
     GuestPassCreateRequest,
     GuestPassCreatedData,
     GuestPassCreatedEnvelope,
     GuestPassDecisionData,
     GuestPassDecisionEnvelope,
+    GuestPassDeletedData,
+    GuestPassDeletedEnvelope,
     GuestPassListEnvelope,
     GuestPassListItem,
 )
@@ -620,6 +625,116 @@ async def revoke_guest_pass(
     return GuestPassDecisionEnvelope(
         data=GuestPassDecisionData(
             id=row.id, status="REVOKED", reviewed_by=row.reviewed_by, updated_at=row.updated_at,
+        )
+    )
+
+
+@router.delete(
+    "/guest-passes/{pass_id}",
+    response_model=GuestPassDeletedEnvelope,
+    status_code=status.HTTP_200_OK,
+    operation_id="access_delete_guest_pass",
+    summary="Delete an expired guest pass",
+    description=(
+        "**Bearer** JWT. Zone administrators, or the member who created the pass, may permanently "
+        "delete an **expired** guest pass. Live passes must be revoked instead.\n\n"
+        "Deleting frees the zone **`event_id`** so it can be reused."
+    ),
+    response_description="Deleted guest pass identifiers.",
+    responses={
+        status.HTTP_200_OK: {
+            "description": "Expired guest pass removed.",
+            "model": GuestPassDeletedEnvelope,
+        },
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not allowed to delete this pass (**FORBIDDEN**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Guest pass not found (**NOT_FOUND**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_409_CONFLICT: {
+            "description": "Guest pass has not expired yet (**NOT_EXPIRED**).",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def delete_guest_pass(
+    pass_id: str = Path(..., min_length=1, max_length=36, description="UUID of the expired guest pass to delete."),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+
+    result = guest_pass_service.delete_guest_pass(db, owner=owner, pass_id=pass_id)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+
+    db.commit()
+    return GuestPassDeletedEnvelope(
+        data=GuestPassDeletedData(
+            id=result["id"],
+            zone_id=result["zone_id"],
+            event_id=result["event_id"],
+            deleted=True,
+        )
+    )
+
+
+@router.post(
+    "/guest-passes/clear-expired",
+    response_model=GuestPassClearExpiredEnvelope,
+    status_code=status.HTTP_200_OK,
+    operation_id="access_clear_expired_guest_passes",
+    summary="Delete all expired guest passes for a zone",
+    description=(
+        "**Bearer** JWT. Zone administrators clear every expired pass in the zone. "
+        "Non-admin members clear only the expired passes they created. "
+        "Frees those **`event_id`** values for reuse."
+    ),
+    response_description="Count and ids of deleted expired guest passes.",
+    responses={
+        status.HTTP_200_OK: {
+            "description": "Expired guest passes removed (count may be zero).",
+            "model": GuestPassClearExpiredEnvelope,
+        },
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not a member of the zone (**FORBIDDEN**).",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def clear_expired_guest_passes(
+    payload: GuestPassClearExpiredRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error_code": "NOT_FOUND", "message": "Owner not found"})
+
+    result = guest_pass_service.delete_expired_guest_passes(
+        db, owner=owner, zone_id=payload.zone_id,
+    )
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+
+    db.commit()
+    return GuestPassClearExpiredEnvelope(
+        data=GuestPassClearExpiredData(
+            deleted_ids=result["deleted_ids"],
+            deleted_count=result["deleted_count"],
         )
     )
 
