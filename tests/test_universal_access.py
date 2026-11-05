@@ -135,8 +135,12 @@ def test_private_invite_generates_key_immediately(db):
     )
     assert approved["status"] == "approved"
     assert approved["code"]
-    visible = universal_access_service.universal_primary_zones(db, invitee, already_ids=set())
-    assert [row.id for row in visible] == [shared_a, shared_b]
+    private_keys = universal_access_service.list_private_keys(db, caller=invitee)
+    assert len(private_keys) == 1
+    assert private_keys[0]["selected"] is False
+    assert private_keys[0]["credential_id"] == approved["credential_id"]
+    # Keys no longer add zones to the map/list after approval.
+    assert universal_access_service.universal_primary_zones(db, invitee, already_ids=set()) == []
 
 
 def test_private_invite_reject_does_not_add_zones(db):
@@ -178,7 +182,7 @@ def test_private_invite_reject_does_not_add_zones(db):
     assert universal_access_service.list_private_keys(db, caller=invitee) == []
 
 
-def test_public_invite_activates_on_zones_page(db):
+def test_public_invite_is_searchable_without_map_zones(db):
     admin = _owner(
         db,
         email="net@example.com",
@@ -207,25 +211,18 @@ def test_public_invite_activates_on_zones_page(db):
     assert created["key_type"] == "public"
     assert created["code"]
 
-    before = universal_access_service.universal_primary_zones(db, outsider, already_ids=set())
-    assert before == []
+    found = universal_access_service.search_public_keys(
+        db, caller=outsider, query=created["code"][:4]
+    )
+    assert any(int(row["credential_id"]) == int(created["credential_id"]) for row in found)
+    assert universal_access_service.universal_primary_zones(db, outsider, already_ids=set()) == []
 
-    activated = universal_access_service.activate_public_key(
-        db, caller=outsider, code=created["code"]
+    prepared = universal_access_service.prepare_send_key(
+        db, caller=outsider, credential_id=int(created["credential_id"])
     )
-    assert activated["credential_id"] == created["credential_id"]
-    visible = universal_access_service.universal_primary_zones(db, outsider, already_ids=set())
-    assert [row.id for row in visible] == [shared]
-
-    removed = universal_access_service.deactivate_public_key(
-        db, caller=outsider, credential_id=created["credential_id"]
-    )
-    assert removed["credential_id"] == created["credential_id"]
-    after_remove = universal_access_service.universal_primary_zones(
-        db, outsider, already_ids=set()
-    )
-    assert after_remove == []
-    assert universal_access_service.list_activated_keys(db, caller=outsider) == []
+    assert prepared["credential_id"] == created["credential_id"]
+    assert prepared["zone_ids"] == [shared]
+    assert universal_access_service.universal_primary_zones(db, outsider, already_ids=set()) == []
 
 
 def test_place_access_network_admin_approves(db):
@@ -273,22 +270,19 @@ def test_place_access_network_admin_approves(db):
     assert approved["key_type"] == "private"
     assert approved["code"]
     private_keys = universal_access_service.list_private_keys(db, caller=requester)
-    assert private_keys[0]["selected"] is True
-    visible = universal_access_service.universal_primary_zones(db, requester, already_ids=set())
-    assert [row.id for row in visible] == [austin]
+    assert private_keys[0]["selected"] is False
+    assert private_keys[0]["credential_id"] == approved["credential_id"]
+    assert universal_access_service.universal_primary_zones(db, requester, already_ids=set()) == []
 
     from app.services import zone_service
 
     listed = zone_service.list_zones(db, requester)
-    assert any(int(row["id"]) == austin and row["config"].get("universal_access") for row in listed)
+    assert not any(int(row["id"]) == austin for row in listed)
 
     admin_rows = universal_access_service.list_requests(db, caller=other)
     assert admin_rows[0]["viewer_actions"]["can_remove"] is True
     universal_access_service.delete_request(db, caller=other, request_id=created["id"])
-    after_remove = universal_access_service.universal_primary_zones(
-        db, requester, already_ids=set()
-    )
-    assert after_remove == []
+    assert universal_access_service.list_private_keys(db, caller=requester) == []
 
 
 def test_place_access_reject_and_edit_docs(db):
@@ -401,7 +395,7 @@ def test_admin_can_remove_generated_key(db):
 
 
 @pytest.mark.asyncio
-async def test_approve_triggers_hub_open_notify(db):
+async def test_send_key_triggers_hub_open_for_private(db):
     requester = _owner(
         db,
         email="req@example.com",
@@ -438,6 +432,13 @@ async def test_approve_triggers_hub_open_notify(db):
         caller=other,
         request_id=created["id"],
     )
+    prepared = universal_access_service.prepare_send_key(
+        db,
+        caller=requester,
+        credential_id=int(approved["credential_id"]),
+    )
+    assert prepared["network_admin_id"] == other.id
+    assert prepared["zone_ids"] == [austin]
 
     with patch(
         "app.services.smart_home_webhook_service.send_universal_access_open_webhooks",
@@ -446,11 +447,11 @@ async def test_approve_triggers_hub_open_notify(db):
         send_open.return_value = {"ua_open_sent": 1}
         await universal_access_service.notify_hubs_of_zone_join(
             db,
-            hub_owner_id=int(approved["network_admin_id"]),
-            zone_ids=list(approved["zone_ids"]),
-            member_id=int(approved["member_id"]),
-            member_email=str(approved["email"]),
-            member_name=str(approved["member_name"]),
+            hub_owner_id=int(prepared["network_admin_id"]),
+            zone_ids=list(prepared["zone_ids"]),
+            member_id=int(prepared["member_id"]),
+            member_email=str(prepared["email"]),
+            member_name=str(prepared["member_name"]),
         )
 
     send_open.assert_awaited_once()
@@ -462,7 +463,7 @@ async def test_approve_triggers_hub_open_notify(db):
 
 
 @pytest.mark.asyncio
-async def test_public_activate_triggers_hub_open_only_when_new(db):
+async def test_send_key_triggers_hub_open_for_public(db):
     admin = _owner(
         db,
         email="net@example.com",
@@ -488,11 +489,10 @@ async def test_public_activate_triggers_hub_open_only_when_new(db):
         key_type="public",
         zone_ids=[shared],
     )
-    first = universal_access_service.activate_public_key(
-        db, caller=outsider, code=created["code"]
+    prepared = universal_access_service.prepare_send_key(
+        db, caller=outsider, credential_id=int(created["credential_id"])
     )
-    assert first["newly_activated"] is True
-    assert first["network_admin_id"] == admin.id
+    assert prepared["network_admin_id"] == admin.id
 
     with patch(
         "app.services.smart_home_webhook_service.send_universal_access_open_webhooks",
@@ -501,21 +501,20 @@ async def test_public_activate_triggers_hub_open_only_when_new(db):
         send_open.return_value = {"ua_open_sent": 1}
         await universal_access_service.notify_hubs_of_zone_join(
             db,
-            hub_owner_id=int(first["network_admin_id"]),
-            zone_ids=list(first["zone_ids"]),
-            member_id=int(first["member_id"]),
-            member_email=str(first["email"]),
-            member_name=str(first["member_name"]),
+            hub_owner_id=int(prepared["network_admin_id"]),
+            zone_ids=list(prepared["zone_ids"]),
+            member_id=int(prepared["member_id"]),
+            member_email=str(prepared["email"]),
+            member_name=str(prepared["member_name"]),
         )
     send_open.assert_awaited_once()
+    kwargs = send_open.await_args.kwargs
+    assert kwargs["hub_owner_id"] == admin.id
+    assert kwargs["zone_record_ids"] == [shared]
+    assert kwargs["member_email"] == "out@example.com"
 
-    second = universal_access_service.activate_public_key(
-        db, caller=outsider, code=created["code"]
-    )
-    assert second["newly_activated"] is False
 
-
-def test_private_key_can_be_selected_and_cleared(db):
+def test_prepare_send_key_rejects_foreign_private_key(db):
     admin = _owner(
         db,
         email="net@example.com",
@@ -531,6 +530,14 @@ def test_private_key_can_be_selected_and_cleared(db):
         role=OwnerRole.USER,
     )
     invitee.account_owner_id = invitee.id
+    stranger = _owner(
+        db,
+        email="stranger@example.com",
+        zone_id="NET-C",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+    )
+    stranger.account_owner_id = stranger.id
     shared = _insert_zone(db, owner_id=admin.id, zone_key="hall", name="City hall")
     db.execute(text("UPDATE zones SET zone_id = 'NET-A' WHERE id = :id"), {"id": shared})
     db.commit()
@@ -546,105 +553,15 @@ def test_private_key_can_be_selected_and_cleared(db):
         db, caller=invitee, request_id=created["id"]
     )
     listed = universal_access_service.list_private_keys(db, caller=invitee)
-    assert listed[0]["selected"] is True
-    assert [row.id for row in universal_access_service.universal_primary_zones(db, invitee, already_ids=set())] == [
-        shared
-    ]
-
-    cleared = universal_access_service.set_private_key_selected(
-        db,
-        caller=invitee,
-        credential_id=created["credential_id"],
-        selected=False,
-    )
-    assert cleared["selected"] is False
-    assert cleared["newly_selected"] is False
+    assert listed[0]["selected"] is False
     assert universal_access_service.universal_primary_zones(db, invitee, already_ids=set()) == []
-    assert universal_access_service.list_activated_keys(db, caller=invitee) == []
 
-    chosen = universal_access_service.set_private_key_selected(
-        db,
-        caller=invitee,
-        credential_id=created["credential_id"],
-        selected=True,
-    )
-    assert chosen["newly_selected"] is True
-    assert chosen["selected"] is True
-    assert chosen["network_admin_id"] == admin.id
-    assert chosen["email"] == "worker@example.com"
-    assert [row.id for row in universal_access_service.universal_primary_zones(db, invitee, already_ids=set())] == [
-        shared
-    ]
+    from fastapi import HTTPException
 
-    again = universal_access_service.set_private_key_selected(
-        db,
-        caller=invitee,
-        credential_id=created["credential_id"],
-        selected=True,
-    )
-    assert again["newly_selected"] is False
-
-
-@pytest.mark.asyncio
-async def test_private_select_triggers_hub_open_only_when_new(db):
-    admin = _owner(
-        db,
-        email="net@example.com",
-        zone_id="NET-A",
-        account_type=AccountType.PRIVATE_PLUS,
-        role=OwnerRole.ADMINISTRATOR,
-    )
-    invitee = _owner(
-        db,
-        email="worker@example.com",
-        zone_id="NET-B",
-        account_type=AccountType.EXCLUSIVE,
-        role=OwnerRole.USER,
-    )
-    invitee.account_owner_id = invitee.id
-    shared = _insert_zone(db, owner_id=admin.id, zone_key="hall", name="City hall")
-    db.execute(text("UPDATE zones SET zone_id = 'NET-A' WHERE id = :id"), {"id": shared})
-    db.commit()
-
-    created = universal_access_service.generate_invite_key(
-        db,
-        admin=admin,
-        key_type="private",
-        invitee_email=invitee.email,
-        zone_ids=[shared],
-    )
-    created = universal_access_service.approve_request(
-        db, caller=invitee, request_id=created["id"]
-    )
-    universal_access_service.set_private_key_selected(
-        db,
-        caller=invitee,
-        credential_id=created["credential_id"],
-        selected=False,
-    )
-    chosen = universal_access_service.set_private_key_selected(
-        db,
-        caller=invitee,
-        credential_id=created["credential_id"],
-        selected=True,
-    )
-    assert chosen["newly_selected"] is True
-
-    with patch(
-        "app.services.smart_home_webhook_service.send_universal_access_open_webhooks",
-        new_callable=AsyncMock,
-    ) as send_open:
-        send_open.return_value = {"ua_open_sent": 1}
-        await universal_access_service.notify_hubs_of_zone_join(
+    with pytest.raises(HTTPException) as exc:
+        universal_access_service.prepare_send_key(
             db,
-            hub_owner_id=int(chosen["network_admin_id"]),
-            zone_ids=list(chosen["zone_ids"]),
-            member_id=int(chosen["member_id"]),
-            member_email=str(chosen["email"]),
-            member_name=str(chosen["member_name"]),
+            caller=stranger,
+            credential_id=int(created["credential_id"]),
         )
-    send_open.assert_awaited_once()
-    kwargs = send_open.await_args.kwargs
-    assert kwargs["hub_owner_id"] == admin.id
-    assert kwargs["zone_record_ids"] == [shared]
-    assert kwargs["member_email"] == "worker@example.com"
+    assert exc.value.status_code == 404

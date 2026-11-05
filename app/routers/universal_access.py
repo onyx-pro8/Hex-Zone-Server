@@ -51,6 +51,10 @@ class PrivateKeySelection(BaseModel):
     selected: bool
 
 
+class SendAccessKey(BaseModel):
+    credential_id: int = Field(..., ge=1)
+
+
 def _caller(db: Session, current_user: dict):
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
@@ -134,21 +138,7 @@ async def create_invite_request(
                 else "Access Zone Key Shared"
             ),
         )
-    # Private keys join the user's zones only after that user accepts.
-    if created.get("status") == "approved":
-        await universal_access_service.notify_granted_zones(
-            db,
-            member_id=int(created["member_id"]),
-            zone_ids=list(created.get("zone_ids") or []),
-        )
-        await universal_access_service.notify_hubs_of_zone_join(
-            db,
-            hub_owner_id=int(created.get("network_admin_id") or caller.id),
-            zone_ids=list(created.get("zone_ids") or []),
-            member_id=int(created["member_id"]),
-            member_email=str(created.get("email") or ""),
-            member_name=str(created.get("member_name") or ""),
-        )
+    # Hub open payload is only sent when the member uses Send key.
     return created
 
 
@@ -255,20 +245,7 @@ async def approve_universal_access_request(
             str(notice_event_id),
             title="Access Zone Key Approved",
         )
-    await universal_access_service.notify_granted_zones(
-        db,
-        member_id=int(approved["member_id"]),
-        zone_ids=list(approved.get("zone_ids") or []),
-    )
-    # Private-key place access: after approval the member has joined — open hubs.
-    await universal_access_service.notify_hubs_of_zone_join(
-        db,
-        hub_owner_id=int(approved.get("network_admin_id") or caller.id),
-        zone_ids=list(approved.get("zone_ids") or []),
-        member_id=int(approved["member_id"]),
-        member_email=str(approved.get("email") or ""),
-        member_name=str(approved.get("member_name") or ""),
-    )
+    # Approval mints the key only. Hub open waits for Send key.
     return approved
 
 
@@ -328,29 +305,14 @@ async def set_private_key_selected(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Legacy endpoint. Prefer Send key; no hub notify and no map zones."""
     caller = _caller(db, current_user)
-    result = universal_access_service.set_private_key_selected(
+    return universal_access_service.set_private_key_selected(
         db,
         caller=caller,
         credential_id=credential_id,
         selected=body.selected,
     )
-    await universal_access_service.notify_granted_zones(
-        db,
-        member_id=int(caller.id),
-        zone_ids=list(result.get("zone_ids") or []),
-    )
-    # Selecting a private key joins its zones, same as adding a public key.
-    if result.get("newly_selected"):
-        await universal_access_service.notify_hubs_of_zone_join(
-            db,
-            hub_owner_id=int(result.get("network_admin_id") or 0),
-            zone_ids=list(result.get("zone_ids") or []),
-            member_id=int(result.get("member_id") or caller.id),
-            member_email=str(result.get("email") or ""),
-            member_name=str(result.get("member_name") or ""),
-        )
-    return result
 
 
 @router.get("/keys/public")
@@ -361,6 +323,30 @@ def search_public_keys(
 ):
     caller = _caller(db, current_user)
     return universal_access_service.search_public_keys(db, caller=caller, query=q, limit=10)
+
+
+@router.post("/keys/send")
+async def send_universal_access_key(
+    body: SendAccessKey,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send the smart-hub open payload for one selected private or public key."""
+    caller = _caller(db, current_user)
+    result = universal_access_service.prepare_send_key(
+        db,
+        caller=caller,
+        credential_id=body.credential_id,
+    )
+    await universal_access_service.notify_hubs_of_zone_join(
+        db,
+        hub_owner_id=int(result.get("network_admin_id") or 0),
+        zone_ids=list(result.get("zone_ids") or []),
+        member_id=int(result.get("member_id") or caller.id),
+        member_email=str(result.get("email") or ""),
+        member_name=str(result.get("member_name") or ""),
+    )
+    return {**result, "sent": True}
 
 
 @router.get("/keys/activated")
@@ -378,26 +364,11 @@ async def activate_public_key(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Legacy endpoint. Prefer Send key; no hub notify and no map zones."""
     caller = _caller(db, current_user)
-    activated = universal_access_service.activate_public_key(
+    return universal_access_service.activate_public_key(
         db, caller=caller, code=body.code
     )
-    await universal_access_service.notify_granted_zones(
-        db,
-        member_id=int(caller.id),
-        zone_ids=list(activated.get("zone_ids") or []),
-    )
-    # Public key: first activate/add joins the zones — open hubs linked to them.
-    if activated.get("newly_activated"):
-        await universal_access_service.notify_hubs_of_zone_join(
-            db,
-            hub_owner_id=int(activated.get("network_admin_id") or 0),
-            zone_ids=list(activated.get("zone_ids") or []),
-            member_id=int(activated.get("member_id") or caller.id),
-            member_email=str(activated.get("email") or ""),
-            member_name=str(activated.get("member_name") or ""),
-        )
-    return activated
 
 
 @router.delete("/keys/activated/{credential_id}")
@@ -407,12 +378,6 @@ async def deactivate_public_key(
     db: Session = Depends(get_db),
 ):
     caller = _caller(db, current_user)
-    removed = universal_access_service.deactivate_public_key(
+    return universal_access_service.deactivate_public_key(
         db, caller=caller, credential_id=credential_id
     )
-    await universal_access_service.notify_granted_zones(
-        db,
-        member_id=int(caller.id),
-        zone_ids=list(removed.get("zone_ids") or []),
-    )
-    return removed

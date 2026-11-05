@@ -119,10 +119,9 @@ class UniversalAccessCredential(Base):
 
 
 class UniversalAccessActivation(Base):
-    """Key the user has selected, so those zones appear on their map.
+    """Legacy activation row. Keys no longer add zones to the map or zone list.
 
-    Public keys are selected when the code is entered. Private keys start
-    selected when they are approved, and the member can clear or restore that.
+    Hub open payloads are sent only via the Send key action.
     """
 
     __tablename__ = "universal_access_activations"
