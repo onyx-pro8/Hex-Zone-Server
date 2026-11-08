@@ -261,9 +261,14 @@ async def list_in_zone_members(
     members = [
         {
             "id": row.id,
-            "name": f"{row.first_name or ''} {row.last_name or ''}".strip() or row.email,
+            "name": (
+                f"{row.first_name or ''} {row.last_name or ''}".strip()
+                or (getattr(row, "username", None) or "").strip()
+                or "Member"
+            ),
             "first_name": row.first_name,
             "last_name": row.last_name,
+            "username": (getattr(row, "username", None) or "").strip() or None,
             "email": row.email,
             "zone_id": row.zone_id,
         }

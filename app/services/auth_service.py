@@ -148,8 +148,12 @@ def register_user(db: Session, payload: dict) -> dict:
                 if registration_tier_level is not None
                 else 1
             )
+    from app.services.username_service import generate_unique_username
+
+    username = generate_unique_username(db, first_name, last_name)
     owner = Owner(
         email=payload["email"],
+        username=username,
         zone_id=payload.get("zoneId") or f"user-{payload['email']}",
         first_name=first_name,
         last_name=last_name,
@@ -187,6 +191,7 @@ def register_user(db: Session, payload: dict) -> dict:
     return {
         "id": str(owner.id),
         "email": owner.email,
+        "username": owner.username,
         "zone_id": owner.zone_id,
         "first_name": owner.first_name,
         "last_name": owner.last_name,

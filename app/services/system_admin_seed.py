@@ -38,11 +38,14 @@ def _apply_system_admin_defaults(owner: Owner) -> None:
 
 def ensure_system_admin(db: Session) -> Owner:
     """Create or refresh the default Private system administrator."""
+    from app.services.username_service import ensure_owner_username
+
     existing = owner_crud.get_owner_by_email(db, SYSTEM_ADMIN_EMAIL)
     if existing:
         _apply_system_admin_defaults(existing)
         if existing.account_owner_id is None:
             existing.account_owner_id = existing.id
+        ensure_owner_username(db, existing)
         db.commit()
         db.refresh(existing)
         logger.info("Refreshed system administrator %s", SYSTEM_ADMIN_EMAIL)
@@ -61,6 +64,8 @@ def ensure_system_admin(db: Session) -> Owner:
         active=True,
         expired=False,
     )
+    # Username is assigned in Owner.before_insert; keep a stable public handle when possible.
+    owner.username = "systemadmin1"
     db.add(owner)
     db.flush()
     owner.account_owner_id = owner.id

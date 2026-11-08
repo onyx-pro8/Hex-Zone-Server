@@ -294,6 +294,10 @@ class MemberListItemResponse(BaseModel):
     name: str = Field(description="Owner full name (first + last)")
     first_name: str
     last_name: str
+    username: str | None = Field(
+        default=None,
+        description="Public unique username (lowercase letters, numbers, underscore).",
+    )
     email: EmailStr
     account_owner_id: int
     role: Literal["administrator", "user"]
@@ -340,6 +344,10 @@ class PushTokenRequest(BaseModel):
 class OwnerContractResponse(BaseModel):
     id: str
     email: EmailStr
+    username: str = Field(
+        ...,
+        description="Public unique username (lowercase letters, numbers, underscore).",
+    )
     zone_id: str
     first_name: str
     last_name: str
@@ -393,6 +401,7 @@ class ContractSuccessLoginResponse(BaseModel):
 class ContractRegisterDataResponse(BaseModel):
     id: str
     email: EmailStr
+    username: str
     zone_id: str
     first_name: str
     last_name: str
@@ -530,9 +539,18 @@ async def get_me(
             longitude=owner.longitude,
         )
 
+    from app.services.username_service import ensure_owner_username
+
+    prior_username = (getattr(owner, "username", None) or "").strip()
+    ensure_owner_username(db, owner)
+    if (getattr(owner, "username", None) or "").strip() != prior_username:
+        db.commit()
+        db.refresh(owner)
+
     data = OwnerContractResponse(
         id=str(owner.id),
         email=owner.email,
+        username=(owner.username or "").strip(),
         zone_id=owner.zone_id,
         first_name=owner.first_name,
         last_name=owner.last_name,

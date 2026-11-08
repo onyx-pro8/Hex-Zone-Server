@@ -116,6 +116,16 @@ def _init_db_background() -> None:
                 )
 
 
+def _owner_username_backfill_background() -> None:
+    """Assign public usernames for legacy owners after schema patch / init_db."""
+    try:
+        time.sleep(5)
+        from app.services.startup_jobs import backfill_owner_usernames
+        backfill_owner_usernames()
+    except Exception:  # pragma: no cover - never crash the worker thread
+        logging.exception("Owner username backfill thread failed")
+
+
 def _owner_geocode_backfill_background() -> None:
     """Backfill `owners.latitude/longitude` for legacy rows after init_db completes.
 
@@ -175,6 +185,8 @@ async def lifespan(app: FastAPI):
     print("Database initialization started in background")
     threading.Thread(target=_ensure_system_admin_background, daemon=True).start()
     print("System administrator bootstrap scheduled in background")
+    threading.Thread(target=_owner_username_backfill_background, daemon=True).start()
+    print("Owner username backfill scheduled in background")
     threading.Thread(target=_owner_geocode_backfill_background, daemon=True).start()
     print("Owner geocode backfill scheduled in background")
     threading.Thread(target=_wellness_reminder_background, daemon=True).start()

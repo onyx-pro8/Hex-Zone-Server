@@ -53,8 +53,12 @@ def create_owner(
 
             assert_exclusive_communal_id_selectable(db, reserved)
 
+    from app.services.username_service import generate_unique_username
+
+    username = generate_unique_username(db, owner.first_name, owner.last_name)
     db_owner = Owner(
         email=owner.email,
+        username=username,
         zone_id=owner.zone_id,
         first_name=owner.first_name,
         last_name=owner.last_name,
@@ -134,6 +138,17 @@ def get_owner_by_email(db: Session, email: str) -> Optional[Owner]:
     return result.scalars().first()
 
 
+def get_owner_by_username(db: Session, username: str) -> Optional[Owner]:
+    """Get an owner by public username (case-insensitive)."""
+    normalized = username.strip().lower()
+    if not normalized:
+        return None
+    result = db.execute(
+        select(Owner).where(func.lower(Owner.username) == normalized)
+    )
+    return result.scalars().first()
+
+
 def get_owner_by_api_key(db: Session, api_key: str) -> Optional[Owner]:
     """Get an owner by API key."""
     result = db.execute(select(Owner).where(Owner.api_key == api_key))
@@ -194,6 +209,8 @@ def update_owner(db: Session, owner_id: int, owner_update: OwnerUpdate) -> Optio
     new_role = update_data.pop("role", None)
     if "email" in update_data and isinstance(update_data["email"], str):
         update_data["email"] = update_data["email"].strip().lower()
+    if "username" in update_data and isinstance(update_data["username"], str):
+        update_data["username"] = update_data["username"].strip().lower()
     if "avatar_url" in update_data:
         raw_avatar = update_data["avatar_url"]
         if raw_avatar is None or str(raw_avatar).strip() == "":

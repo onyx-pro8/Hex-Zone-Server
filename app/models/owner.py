@@ -1,8 +1,10 @@
 """Owner/User model."""
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, Float, ForeignKey, Index, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, Float, ForeignKey, Index, Text, event
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
+import re
+import uuid
 from app.database import Base
 
 
@@ -27,6 +29,8 @@ class Owner(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
+    # Public unique handle (lowercase letters, digits, underscore). Never treat as login email.
+    username = Column(String(64), unique=True, nullable=False, index=True, default="")
     zone_id = Column(String(100), nullable=False, index=True)
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
@@ -98,6 +102,7 @@ class Owner(Base):
 
     __table_args__ = (
         Index("ix_owner_email", "email"),
+        Index("ix_owner_username", "username"),
         Index("ix_owner_zone_id", "zone_id"),
         Index("ix_owner_api_key", "api_key"),
     )
@@ -109,7 +114,39 @@ class Owner(Base):
         if configured:
             return configured
         full = f"{self.first_name} {self.last_name}".strip()
-        return full or self.email or "Member"
+        return full or (self.username or "").strip() or "Member"
 
     def __repr__(self) -> str:
-        return f"<Owner(id={self.id}, email={self.email}, account_type={self.account_type})>"
+        return (
+            f"<Owner(id={self.id}, username={self.username}, "
+            f"account_type={self.account_type})>"
+        )
+
+
+@event.listens_for(Owner, "before_insert")
+def _assign_username_before_insert(mapper, connection, target: Owner) -> None:
+    """Guarantee a unique username for every new owner row (tests/seeds included).
+
+    Tries ``firstname`` + ``lastname`` + ``1``, then ``2``, and so on.
+    """
+    from sqlalchemy import text
+
+    current = (getattr(target, "username", None) or "").strip().lower()
+    if current:
+        target.username = current
+        return
+    first = re.sub(r"[^a-z0-9]", "", (target.first_name or "").lower())
+    last = re.sub(r"[^a-z0-9]", "", (target.last_name or "").lower())
+    base = (f"{first}{last}" or "user")[:58]
+    for n in range(1, 100_000):
+        candidate = f"{base}{n}"[:64]
+        exists = connection.execute(
+            text(
+                "SELECT 1 FROM owners WHERE lower(username) = lower(:username) LIMIT 1"
+            ),
+            {"username": candidate},
+        ).first()
+        if not exists:
+            target.username = candidate
+            return
+    target.username = f"user{uuid.uuid4().hex[:8]}"

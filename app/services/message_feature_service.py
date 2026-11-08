@@ -443,6 +443,7 @@ def _private_search_members(
                 func.lower(Owner.broadcast_name).like(pattern),
                 func.lower(Owner.first_name).like(pattern),
                 func.lower(Owner.last_name).like(pattern),
+                func.lower(Owner.username).like(pattern),
                 func.lower(Owner.email).like(pattern),
                 full_name.like(pattern),
             )
@@ -480,6 +481,7 @@ def _private_search_members(
                 "broadcast_name": broadcast,
                 "first_name": row.first_name,
                 "last_name": row.last_name,
+                "username": (getattr(row, "username", None) or "").strip() or None,
                 "email": row.email,
                 "zone_id": row.zone_id,
                 "distance_meters": round(distance_m, 1) if distance_m is not None else None,

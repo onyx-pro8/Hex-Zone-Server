@@ -36,6 +36,11 @@ class ZoneTypeEnum(str, Enum):
 class OwnerBase(BaseModel):
     """Base owner schema."""
     email: EmailStr
+    username: str = Field(
+        default="",
+        max_length=64,
+        description="Public unique handle (lowercase letters, numbers, underscore).",
+    )
     zone_id: str = Field(..., min_length=1, max_length=100)
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
@@ -175,7 +180,15 @@ class OwnerUpdate(BaseModel):
     last_name: Optional[str] = Field(None, min_length=1, max_length=100)
     email: Optional[EmailStr] = Field(
         None,
-        description="Login email. Must remain unique across owners.",
+        description="Private login email. Must remain unique across owners.",
+    )
+    username: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=64,
+        description=(
+            "Public unique handle. Lowercase letters, numbers, and underscore only."
+        ),
     )
     role: Optional[OwnerRoleEnum] = Field(
         None,
@@ -237,7 +250,11 @@ class OwnerListResponse(BaseModel):
     id: int
     first_name: str
     last_name: str
-    email: EmailStr
+    username: str
+    email: Optional[EmailStr] = Field(
+        None,
+        description="Private login email. Omitted from public discovery when possible.",
+    )
     zone_id: str
     active: bool
     account_type: AccountTypeEnum
@@ -363,7 +380,8 @@ class DeviceUpdate(BaseModel):
 class DeviceOwnerBrief(BaseModel):
     """Minimal owner info returned with device payloads."""
     id: int
-    email: EmailStr
+    username: str = ""
+    email: Optional[EmailStr] = None
     first_name: str
     last_name: str
     role: OwnerRoleEnum

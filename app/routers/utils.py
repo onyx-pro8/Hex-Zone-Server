@@ -162,6 +162,53 @@ async def check_email_available(
     )
 
 
+class UsernameAvailableResponse(BaseModel):
+    username: str
+    available: bool
+    message: str
+
+
+@router.get(
+    "/username-available",
+    response_model=UsernameAvailableResponse,
+    summary="Check whether a username can be used",
+    description=(
+        "Public endpoint (no Authorization). Validates format "
+        "(lowercase letters, numbers, underscore) and uniqueness."
+    ),
+)
+async def check_username_available(
+    username: str = Query(..., min_length=1, max_length=64, description="Username to check"),
+    db: Session = Depends(get_db),
+):
+    from app.services.username_service import (
+        USERNAME_INFO_MESSAGE,
+        is_username_available,
+        normalize_username,
+        validate_username_format,
+    )
+
+    normalized = normalize_username(username)
+    format_error = validate_username_format(normalized)
+    if format_error:
+        return UsernameAvailableResponse(
+            username=normalized,
+            available=False,
+            message=format_error or USERNAME_INFO_MESSAGE,
+        )
+    if not is_username_available(db, normalized):
+        return UsernameAvailableResponse(
+            username=normalized,
+            available=False,
+            message="Username is already taken",
+        )
+    return UsernameAvailableResponse(
+        username=normalized,
+        available=True,
+        message="Username is available.",
+    )
+
+
 @router.get(
     "/registration-code",
     response_model=RegistrationCodeResponse,

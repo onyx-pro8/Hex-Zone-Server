@@ -53,6 +53,23 @@ def _select_owners_needing_geocode(db: Session) -> Iterable[Owner]:
     )
 
 
+def backfill_owner_usernames() -> None:
+    """Assign public usernames to owners that still lack one."""
+    db = session_maker()
+    try:
+        from app.services.username_service import backfill_missing_usernames
+
+        updated = backfill_missing_usernames(db)
+        if updated:
+            logger.info("Owner username backfill: %d owner(s) updated", updated)
+        else:
+            logger.info("Owner username backfill: nothing to do")
+    except Exception:  # pragma: no cover - never crash the worker thread
+        logger.exception("Owner username backfill failed")
+    finally:
+        db.close()
+
+
 def backfill_owner_coordinates() -> None:
     """Re-geocode ``owners.latitude/longitude`` from ``owners.address`` for all owners.
 

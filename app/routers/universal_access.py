@@ -13,7 +13,12 @@ router = APIRouter(prefix="/universal-access", tags=["universal-access"])
 
 class InviteCreate(BaseModel):
     key_type: str = Field("private", max_length=16)
-    invitee_email: str = Field("", max_length=255)
+    invitee_username: str = Field("", max_length=64)
+    invitee_email: str = Field(
+        "",
+        max_length=255,
+        description="Legacy field; prefer invitee_username.",
+    )
     zone_ids: list[int] = Field(..., min_length=1)
     note: str = Field("", max_length=1000)
 
@@ -124,6 +129,7 @@ async def create_invite_request(
         admin=caller,
         key_type=body.key_type,
         zone_ids=body.zone_ids,
+        invitee_username=body.invitee_username,
         invitee_email=body.invitee_email,
         note=body.note,
     )

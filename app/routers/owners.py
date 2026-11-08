@@ -262,7 +262,14 @@ async def get_current_owner(
 
     prior = getattr(owner, "communal_id", None)
     assign_owner_communal_id(db, owner)
-    if getattr(owner, "communal_id", None) != prior:
+    from app.services.username_service import ensure_owner_username
+
+    prior_username = (getattr(owner, "username", None) or "").strip()
+    ensure_owner_username(db, owner)
+    if (
+        getattr(owner, "communal_id", None) != prior
+        or (getattr(owner, "username", None) or "").strip() != prior_username
+    ):
         db.commit()
         db.refresh(owner)
     payload = OwnerDetailResponse.model_validate(_normalize_owner_name(owner)).model_dump()
@@ -500,6 +507,12 @@ async def update_owner(
         )
 
     if owner_update.email is not None:
+        # Login email is private; only the account owner (or a system admin) may change it.
+        if current_user["user_id"] != owner_id and not is_system_administrator(caller):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to change this owner's email",
+            )
         normalized_email = str(owner_update.email).strip().lower()
         existing = owner_crud.get_owner_by_email(db, normalized_email)
         if existing and existing.id != owner_id:
@@ -507,6 +520,30 @@ async def update_owner(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email is already in use",
             )
+
+    if owner_update.username is not None:
+        from app.services.username_service import (
+            USERNAME_INFO_MESSAGE,
+            is_username_available,
+            normalize_username,
+            validate_username_format,
+        )
+
+        normalized_username = normalize_username(str(owner_update.username))
+        format_error = validate_username_format(normalized_username)
+        if format_error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=format_error or USERNAME_INFO_MESSAGE,
+            )
+        if not is_username_available(
+            db, normalized_username, exclude_owner_id=owner_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username is already taken",
+            )
+        owner_update.username = normalized_username
 
     if owner_update.role is not None and not is_system_administrator(caller):
         raise HTTPException(

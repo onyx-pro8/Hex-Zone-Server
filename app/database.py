@@ -125,6 +125,19 @@ def patch_owner_location_columns() -> None:
                 "TEXT NOT NULL DEFAULT '';"
             )
         )
+        conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS username "
+                "VARCHAR(64) NOT NULL DEFAULT '';"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_owners_username_unique "
+                "ON owners (username) "
+                "WHERE username IS NOT NULL AND username <> '';"
+            )
+        )
         # Migrate any data from the now-removed owner_settings table into the
         # canonical owners columns, then drop it. Idempotent: the table is gone
         # after the first successful run.

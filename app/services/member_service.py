@@ -88,6 +88,7 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
                 "name": f"{member.first_name} {member.last_name}".strip(),
                 "first_name": member.first_name,
                 "last_name": member.last_name,
+                "username": (getattr(member, "username", None) or "").strip() or None,
                 "email": member.email,
                 "account_owner_id": member.account_owner_id or member.id,
                 "role": member.role.value,

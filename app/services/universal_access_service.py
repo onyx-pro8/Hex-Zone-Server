@@ -119,7 +119,7 @@ def _owner_name(owner: Owner | None) -> str:
     if owner is None:
         return ""
     full = f"{owner.first_name} {owner.last_name}".strip()
-    return full or owner.email
+    return full or (getattr(owner, "username", None) or "").strip() or "Member"
 
 
 def _new_code(db: Session) -> str:
@@ -271,7 +271,7 @@ def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) ->
     filters = [
         Owner.id != admin.id,
         or_(
-            func.lower(Owner.email).like(like, escape="\\"),
+            func.lower(Owner.username).like(like, escape="\\"),
             func.lower(Owner.first_name).like(like, escape="\\"),
             func.lower(Owner.last_name).like(like, escape="\\"),
             func.lower(Owner.broadcast_name).like(like, escape="\\"),
@@ -289,7 +289,7 @@ def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) ->
     rows = (
         db.query(Owner)
         .filter(*filters)
-        .order_by(Owner.email.asc())
+        .order_by(Owner.username.asc(), Owner.id.asc())
         .limit(max(1, min(int(limit), 8)))
         .all()
     )
@@ -297,7 +297,7 @@ def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) ->
         {
             "id": row.id,
             "name": _owner_name(row),
-            "email": row.email,
+            "username": (getattr(row, "username", None) or "").strip() or None,
             "network_id": (row.zone_id or "").strip(),
         }
         for row in rows
@@ -347,6 +347,7 @@ def lookup_target_network(db: Session, *, caller: Owner, network_id: str) -> dic
     return {
         "network_id": network,
         "admin_id": int(admin.id),
+        "admin_username": (getattr(admin, "username", None) or "").strip() or None,
         "admin_email": admin.email,
         "admin_name": _owner_name(admin),
         "zones": shareable,
@@ -460,6 +461,12 @@ def _request_row(
         "member_name": row.member_name,
         "first_name": (member.first_name if member else "") or "",
         "last_name": (member.last_name if member else "") or "",
+        "username": (
+            (getattr(member, "username", None) or "").strip()
+            if member
+            else ""
+        )
+        or None,
         "email": row.email,
         "address": row.address or (member.address if member else "") or "",
         "country": row.country or "",
@@ -474,6 +481,9 @@ def _request_row(
         "network_id": admin.zone_id if admin else "",
         "network_admin_id": int(row.network_admin_id),
         "network_admin_name": _owner_name(admin),
+        "network_admin_username": (
+            (getattr(admin, "username", None) or "").strip() if admin else None
+        ),
         "network_admin_email": admin.email if admin else "",
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "code": credential.code if credential else None,
@@ -679,12 +689,31 @@ async def notify_granted_zones(db: Session, *, member_id: int, zone_ids: list[in
         logger.exception("Universal zone grant push failed for owner %s", member_id)
 
 
+def _resolve_invitee(
+    db: Session,
+    *,
+    invitee_username: str = "",
+    invitee_email: str = "",
+) -> Owner | None:
+    """Resolve an invitee by public username first, then legacy email."""
+    username = (invitee_username or "").strip()
+    if username:
+        found = owner_crud.get_owner_by_username(db, username)
+        if found is not None:
+            return found
+    email = (invitee_email or "").strip()
+    if email:
+        return owner_crud.get_owner_by_email(db, email)
+    return None
+
+
 def generate_invite_key(
     db: Session,
     *,
     admin: Owner,
     key_type: str,
     zone_ids: list[int],
+    invitee_username: str = "",
     invitee_email: str = "",
     note: str = "",
 ) -> dict[str, Any]:
@@ -700,11 +729,15 @@ def generate_invite_key(
     granted_ids = [int(zone.id) for zone in zones]
 
     if visibility == UniversalAccessKeyType.PRIVATE.value:
-        invitee = owner_crud.get_owner_by_email(db, invitee_email)
+        invitee = _resolve_invitee(
+            db,
+            invitee_username=invitee_username,
+            invitee_email=invitee_email,
+        )
         if invitee is None or int(invitee.id) == int(admin.id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="No account uses that email.",
+                detail="No account uses that username.",
             )
         admin_network = (admin.zone_id or "").strip().lower()
         invitee_network = (invitee.zone_id or "").strip().lower()
@@ -784,7 +817,8 @@ def create_invite_request(
     db: Session,
     *,
     admin: Owner,
-    invitee_email: str,
+    invitee_email: str = "",
+    invitee_username: str = "",
     zone_ids: list[int],
     note: str = "",
     key_type: str = "private",
@@ -795,6 +829,7 @@ def create_invite_request(
         admin=admin,
         key_type=key_type or "private",
         zone_ids=zone_ids,
+        invitee_username=invitee_username,
         invitee_email=invitee_email,
         note=note,
     )
