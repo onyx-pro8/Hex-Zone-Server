@@ -27,13 +27,13 @@ class PlaceAccessCreate(BaseModel):
     network_id: str = Field(..., min_length=1, max_length=100)
     zone_ids: list[int] = Field(..., min_length=1)
     photo_id: str = Field(..., min_length=1)
-    business_document: str = Field(..., min_length=1)
+    business_document: str = Field("")
     note: str = Field("", max_length=1000)
 
 
 class PlaceAccessDocsUpdate(BaseModel):
     photo_id: str = Field(..., min_length=1)
-    business_document: str = Field(..., min_length=1)
+    business_document: str = Field("")
 
 
 class UniversalAccessApprove(BaseModel):
