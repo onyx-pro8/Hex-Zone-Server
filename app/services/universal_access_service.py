@@ -286,6 +286,8 @@ def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) ->
                 func.lower(Owner.zone_id) != admin_network,
             )
         )
+    from app.services.username_service import ensure_owner_username
+
     rows = (
         db.query(Owner)
         .filter(*filters)
@@ -293,16 +295,26 @@ def search_invitees(db: Session, *, admin: Owner, query: str, limit: int = 5) ->
         .limit(max(1, min(int(limit), 8)))
         .all()
     )
-    return [
-        {
-            "id": row.id,
-            "name": _owner_name(row),
-            "username": (getattr(row, "username", None) or "").strip() or None,
-            "network_id": (row.zone_id or "").strip(),
-        }
-        for row in rows
-        if (row.zone_id or "").strip().lower() != admin_network or not admin_network
-    ]
+    results: list[dict[str, Any]] = []
+    assigned = False
+    for row in rows:
+        if (row.zone_id or "").strip().lower() == admin_network and admin_network:
+            continue
+        prior = (getattr(row, "username", None) or "").strip()
+        username = ensure_owner_username(db, row)
+        if username != prior:
+            assigned = True
+        results.append(
+            {
+                "id": row.id,
+                "name": _owner_name(row),
+                "username": username,
+                "network_id": (row.zone_id or "").strip(),
+            }
+        )
+    if assigned:
+        db.commit()
+    return results
 
 
 def _selected_shareable_zones(db: Session, admin: Owner, zone_ids: list[int]) -> list[Zone]:
@@ -344,10 +356,16 @@ def lookup_target_network(db: Session, *, caller: Owner, network_id: str) -> dic
         .all()
     )
     shareable = [_zone_summary(zone) for zone in zones if _zone_is_shareable(zone)]
+    from app.services.username_service import ensure_owner_username
+
+    prior_username = (getattr(admin, "username", None) or "").strip()
+    admin_username = ensure_owner_username(db, admin)
+    if admin_username != prior_username:
+        db.commit()
     return {
         "network_id": network,
         "admin_id": int(admin.id),
-        "admin_username": (getattr(admin, "username", None) or "").strip() or None,
+        "admin_username": admin_username,
         "admin_email": admin.email,
         "admin_name": _owner_name(admin),
         "zones": shareable,
@@ -431,8 +449,13 @@ def _request_row(
     caller: Owner | None,
     include_docs: bool,
 ) -> dict[str, Any]:
+    from app.services.username_service import ensure_owner_username
+
     admin = db.get(Owner, row.network_admin_id)
     member = db.get(Owner, row.member_id)
+    member_username = ensure_owner_username(db, member) if member is not None else None
+    if admin is not None:
+        ensure_owner_username(db, admin)
     credential = (
         db.query(UniversalAccessCredential)
         .filter(UniversalAccessCredential.request_id == row.id)
@@ -461,12 +484,7 @@ def _request_row(
         "member_name": row.member_name,
         "first_name": (member.first_name if member else "") or "",
         "last_name": (member.last_name if member else "") or "",
-        "username": (
-            (getattr(member, "username", None) or "").strip()
-            if member
-            else ""
-        )
-        or None,
+        "username": member_username,
         "email": row.email,
         "address": row.address or (member.address if member else "") or "",
         "country": row.country or "",
@@ -482,7 +500,7 @@ def _request_row(
         "network_admin_id": int(row.network_admin_id),
         "network_admin_name": _owner_name(admin),
         "network_admin_username": (
-            (getattr(admin, "username", None) or "").strip() if admin else None
+            (getattr(admin, "username", None) or "").strip() or None if admin else None
         ),
         "network_admin_email": admin.email if admin else "",
         "created_at": row.created_at.isoformat() if row.created_at else None,

@@ -61,6 +61,9 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
         query = query.filter(Owner.active.is_(active))
     members = query.all()
     output: list[dict] = []
+    from app.services.username_service import ensure_owner_username
+
+    assigned = False
     for member in members:
         location = db.get(MemberLocation, member.id)
         if location is None:
@@ -82,13 +85,17 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
             .first()
             is not None
         )
+        prior = (getattr(member, "username", None) or "").strip()
+        username = ensure_owner_username(db, member)
+        if username != prior:
+            assigned = True
         output.append(
             {
                 "id": str(member.id),
                 "name": f"{member.first_name} {member.last_name}".strip(),
                 "first_name": member.first_name,
                 "last_name": member.last_name,
-                "username": (getattr(member, "username", None) or "").strip() or None,
+                "username": username,
                 "email": member.email,
                 "account_owner_id": member.account_owner_id or member.id,
                 "role": member.role.value,
@@ -110,6 +117,8 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
                 "zones": [row[0] for row in zones],
             }
         )
+    if assigned:
+        db.commit()
     return output
 
 
