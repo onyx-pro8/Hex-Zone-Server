@@ -85,6 +85,8 @@ def _data_url_media_type(value: str) -> str:
 
 def _business_document(value: str) -> str:
     document = str(value or "").strip()
+    if not document:
+        return ""
     media = _data_url_media_type(document)
     allowed = media.startswith("image/") or media in _BUSINESS_DOC_TYPES
     if not allowed:

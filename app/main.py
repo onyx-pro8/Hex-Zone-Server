@@ -1,4 +1,6 @@
 """Main FastAPI application."""
+import utils.transport
+import utils.session
 import logging
 import threading
 import time
