@@ -18,6 +18,10 @@ class CheckoutBody(BaseModel):
     billing_interval: str = Field("monthly", description="monthly | annual")
 
 
+class ConfirmBody(BaseModel):
+    session_id: str = Field(..., min_length=8, description="Stripe Checkout Session id (cs_...)")
+
+
 @router.get(
     "/me",
     summary="Current network subscription + feature usage",
@@ -72,6 +76,26 @@ async def create_portal(
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
     return subscription_service.create_billing_portal_session(db, caller=owner)
+
+
+@router.post(
+    "/confirm",
+    summary="Confirm Checkout session after deep-link return",
+)
+async def confirm_checkout(
+    body: ConfirmBody,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Applies plan from Stripe even when webhooks are not configured yet."""
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    return subscription_service.confirm_checkout_session(
+        db,
+        caller=owner,
+        session_id=body.session_id,
+    )
 
 
 @router.post(

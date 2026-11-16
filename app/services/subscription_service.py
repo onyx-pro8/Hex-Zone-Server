@@ -482,9 +482,15 @@ def create_checkout_session(
     price_id = _price_id_for_plan(key, interval)
     success = (settings.STRIPE_SUCCESS_URL or settings.MOBILE_SUBSCRIPTION_RETURN_URL or "").strip()
     cancel = (settings.STRIPE_CANCEL_URL or settings.MOBILE_SUBSCRIPTION_RETURN_URL or "").strip()
-    if not success or not cancel:
-        success = success or "safezonepatrol://subscription?checkout=success"
-        cancel = cancel or "safezonepatrol://subscription?checkout=cancel"
+    if not success:
+        success = (
+            "safezonepatrol://subscription?checkout=success&session_id={CHECKOUT_SESSION_ID}"
+        )
+    if "{CHECKOUT_SESSION_ID}" not in success:
+        joiner = "&" if "?" in success else "?"
+        success = f"{success}{joiner}session_id={{CHECKOUT_SESSION_ID}}"
+    if not cancel:
+        cancel = "safezonepatrol://subscription?checkout=cancel"
 
     session = stripe.checkout.Session.create(
         mode="subscription",
@@ -570,25 +576,138 @@ def _apply_plan_to_owner(db: Session, root: Owner, plan_key: str) -> None:
     db.add(root)
 
 
-def apply_checkout_completed(db: Session, session_obj: dict[str, Any]) -> None:
-    metadata = session_obj.get("metadata") or {}
-    owner_id = int(metadata.get("owner_id") or session_obj.get("client_reference_id") or 0)
+def _session_get(session_obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(session_obj, dict):
+        return session_obj.get(key, default)
+    try:
+        value = session_obj[key]
+    except Exception:
+        value = getattr(session_obj, key, default)
+    return default if value is None else value
+
+
+def apply_checkout_completed(db: Session, session_obj: Any) -> Owner | None:
+    """Persist subscription + upgrade owner account_type/role. Returns owner or None."""
+    metadata = _session_get(session_obj, "metadata") or {}
+    if not isinstance(metadata, dict):
+        try:
+            metadata = dict(metadata)
+        except Exception:
+            metadata = {}
+    owner_raw = metadata.get("owner_id") or _session_get(session_obj, "client_reference_id") or 0
+    try:
+        owner_id = int(owner_raw)
+    except (TypeError, ValueError):
+        owner_id = 0
     plan_key = str(metadata.get("plan_key") or "").strip().lower()
     interval = str(metadata.get("billing_interval") or "monthly").strip().lower()
     if not owner_id or plan_key not in PAID_CHECKOUT_PLAN_KEYS:
         logger.warning("Stripe checkout missing owner/plan metadata: %s", metadata)
-        return
+        return None
     root = db.query(Owner).filter(Owner.id == owner_id).first()
     if not root:
-        return
+        return None
     sub = get_or_create_subscription_row(db, root)
-    sub.stripe_customer_id = session_obj.get("customer") or sub.stripe_customer_id
-    sub.stripe_subscription_id = session_obj.get("subscription") or sub.stripe_subscription_id
+    customer = _session_get(session_obj, "customer")
+    subscription_id = _session_get(session_obj, "subscription")
+    if customer:
+        sub.stripe_customer_id = str(customer)
+    if subscription_id:
+        sub.stripe_subscription_id = str(subscription_id)
     sub.plan_key = plan_key
     sub.billing_interval = interval
     sub.status = "active"
     _apply_plan_to_owner(db, root, plan_key)
     db.commit()
+    db.refresh(root)
+    logger.info(
+        "Applied Stripe checkout for owner=%s plan_key=%s account_type=%s role=%s",
+        root.id,
+        plan_key,
+        root.account_type.value,
+        root.role.value,
+    )
+    return root
+
+
+def confirm_checkout_session(
+    db: Session,
+    *,
+    caller: Owner,
+    session_id: str,
+) -> dict[str, Any]:
+    """Confirm Checkout after mobile deep-link return (works without webhook)."""
+    if not caller_may_manage_billing(db, caller):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the account holder can confirm checkout.",
+        )
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="session_id is required.",
+        )
+    stripe = _stripe_client()
+    try:
+        session_obj = stripe.checkout.Session.retrieve(sid)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not load Checkout session: {exc}",
+        ) from exc
+
+    metadata = _session_get(session_obj, "metadata") or {}
+    if not isinstance(metadata, dict):
+        try:
+            metadata = dict(metadata)
+        except Exception:
+            metadata = {}
+    try:
+        meta_owner_id = int(metadata.get("owner_id") or _session_get(session_obj, "client_reference_id") or 0)
+    except (TypeError, ValueError):
+        meta_owner_id = 0
+    root = resolve_account_root(db, caller)
+    if meta_owner_id and meta_owner_id != int(root.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This Checkout session belongs to a different account.",
+        )
+
+    status_value = str(_session_get(session_obj, "status") or "")
+    payment_status = str(_session_get(session_obj, "payment_status") or "")
+    paid = status_value == "complete" and payment_status in {
+        "paid",
+        "no_payment_required",
+    }
+    if not paid:
+        return {
+            "ok": False,
+            "status": status_value or "open",
+            "payment_status": payment_status or "unpaid",
+            "message": "Payment was not completed.",
+            "plan": entitlements_to_dict(
+                entitlements_for(root.account_type.value, getattr(root, "tier_level", None))
+            ),
+            "account_type": root.account_type.value,
+            "role": root.role.value,
+            "tier_level": getattr(root, "tier_level", None),
+        }
+
+    updated = apply_checkout_completed(db, session_obj)
+    owner = updated or root
+    db.refresh(owner)
+    plan = entitlements_for(owner.account_type.value, getattr(owner, "tier_level", None))
+    return {
+        "ok": True,
+        "status": "complete",
+        "payment_status": payment_status,
+        "message": "Subscription activated.",
+        "plan": entitlements_to_dict(plan),
+        "account_type": owner.account_type.value,
+        "role": owner.role.value,
+        "tier_level": getattr(owner, "tier_level", None),
+    }
 
 
 def apply_subscription_updated(db: Session, subscription_obj: dict[str, Any]) -> None:

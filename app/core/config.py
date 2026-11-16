@@ -186,7 +186,10 @@ class Settings(BaseSettings):
     # still work; Checkout / Portal / webhooks return 503 until configured.
     STRIPE_SECRET_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
-    STRIPE_SUCCESS_URL: str = "safezonepatrol://subscription?checkout=success"
+    # {CHECKOUT_SESSION_ID} is replaced by Stripe on redirect.
+    STRIPE_SUCCESS_URL: str = (
+        "safezonepatrol://subscription?checkout=success&session_id={CHECKOUT_SESSION_ID}"
+    )
     STRIPE_CANCEL_URL: str = "safezonepatrol://subscription?checkout=cancel"
     STRIPE_PORTAL_RETURN_URL: str = "safezonepatrol://subscription"
     MOBILE_SUBSCRIPTION_RETURN_URL: str = "safezonepatrol://subscription"
