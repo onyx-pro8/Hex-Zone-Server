@@ -401,6 +401,30 @@ class GuestQrTokenCreatedResponse(GuestQrTokenListItem):
     )
 
 
+class GuestQrTokenPreviewData(BaseModel):
+    """Public preview of an opaque guest QR token (no auth). Used to show Event ID on check-in."""
+
+    zone_id: str = Field(description="Zone / network id bound to the token.")
+    event_id: str | None = Field(
+        default=None,
+        description="Event id stored on the token (for display). Not required in the QR URL.",
+    )
+    is_network_access: bool = Field(
+        default=False,
+        description="True when this is the reusable network guest QR.",
+    )
+    has_event_id: bool = Field(
+        description="Convenience flag: true when event_id is present.",
+    )
+
+
+class GuestQrTokenPreviewEnvelope(BaseModel):
+    """Success envelope for **`GET /api/access/qr-tokens/preview`**."""
+
+    status: Literal["success"] = "success"
+    data: GuestQrTokenPreviewData
+
+
 class GuestQrTokenLinkBundle(BaseModel):
     """Resolved URL for an existing stored token (admin); secret never appears in list APIs."""
 

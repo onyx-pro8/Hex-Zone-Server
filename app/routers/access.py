@@ -46,6 +46,8 @@ from app.schemas.access_guest import (
     GuestQrTokenCreatedResponse,
     GuestQrTokenLinkBundle,
     GuestQrTokenListItem,
+    GuestQrTokenPreviewData,
+    GuestQrTokenPreviewEnvelope,
     GuestRequestListEnvelope,
     GuestScanResponse,
     GuestSessionExchangeRequest,
@@ -1247,6 +1249,56 @@ async def guest_access_qr_png(
         headers={
             "Cache-Control": "private, max-age=300",
         },
+    )
+
+
+@router.get(
+    "/qr-tokens/preview",
+    response_model=GuestQrTokenPreviewEnvelope,
+    status_code=status.HTTP_200_OK,
+    summary="Preview guest QR token (public)",
+    description=(
+        "No authentication. Resolves an opaque **`guest_qr_token`** (**`gt`**) so the check-in form can "
+        "show a **disabled Event ID** when the token is pass-bound. Does not consume uses. "
+        "The QR URL itself never needs to embed **`eid`**."
+    ),
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Token revoked, expired, or depleted.",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Unknown guest QR token.",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            "description": "Missing guest_qr_token.",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def preview_guest_qr_token(
+    guest_qr_token: str = Query(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="Opaque **gt** value from the scanned guest QR URL.",
+    ),
+    db: Session = Depends(get_db),
+):
+    result = guest_access_qr_token_service.preview_guest_qr_token(db, guest_qr_token)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+    return GuestQrTokenPreviewEnvelope(
+        data=GuestQrTokenPreviewData(
+            zone_id=result["zone_id"],
+            event_id=result.get("event_id"),
+            is_network_access=bool(result.get("is_network_access")),
+            has_event_id=bool(result.get("has_event_id")),
+        )
     )
 
 

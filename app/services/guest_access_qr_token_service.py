@@ -354,6 +354,39 @@ def validate_locked_guest_qr_token(row: GuestAccessQrToken | None) -> dict | Non
     return None
 
 
+def preview_guest_qr_token(db: Session, secret: str) -> dict:
+    """
+    Public read-only preview for check-in UI.
+
+    Returns zone_id + event_id (when bound) so guests can see a disabled Event ID
+    without embedding eid in the QR URL. Does not consume uses.
+    """
+    sec = (secret or "").strip()
+    if not sec:
+        return {
+            "error": "INVALID_GUEST_TOKEN",
+            "message": "guest_qr_token is required.",
+            "http_status": 422,
+        }
+    row = (
+        db.query(GuestAccessQrToken)
+        .filter(GuestAccessQrToken.token == sec)
+        .first()
+    )
+    verr = validate_locked_guest_qr_token(row)
+    if verr:
+        return verr
+    assert row is not None
+    eid = (row.event_id or "").strip() or None
+    return {
+        "ok": True,
+        "zone_id": row.zone_id,
+        "event_id": eid,
+        "is_network_access": bool(getattr(row, "is_network_access", False)),
+        "has_event_id": bool(eid),
+    }
+
+
 def merge_event_id_for_arrival(*, token_event_id: str | None, payload_event_id: str | None) -> tuple[str | None, dict | None]:
     te = (token_event_id or "").strip()
     pe = (payload_event_id or "").strip()
