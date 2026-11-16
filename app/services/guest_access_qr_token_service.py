@@ -80,6 +80,90 @@ def compute_expires_at(
     return datetime.utcnow() + timedelta(hours=hours), None
 
 
+def create_pass_bound_guest_qr_token(
+    db: Session,
+    acting_owner: Owner,
+    *,
+    zone_id: str,
+    event_id: str,
+    expires_at: datetime,
+    label: str | None = None,
+    max_uses: int | None = 1,
+) -> dict:
+    """
+    Mint a unique QR token for a guest pass.
+
+    Any active zone member may create these (pass create already authorizes membership).
+    Event id is stored on the token row for server-side arrival matching; callers must
+    build the public URL **without** embedding ``eid``.
+    """
+    zid = zone_id.strip()
+    if acting_owner.zone_id != zid or not acting_owner.active:
+        return {
+            "error": "FORBIDDEN",
+            "message": "You may only create guest pass QR tokens for your own zone.",
+            "http_status": 403,
+        }
+    eid = (event_id or "").strip()
+    if not eid:
+        return {
+            "error": "INVALID_PAYLOAD",
+            "message": "event_id is required for guest pass QR tokens.",
+            "http_status": 422,
+        }
+    when = expires_at
+    if when.tzinfo is not None:
+        when = when.replace(tzinfo=None)
+    if when <= datetime.utcnow():
+        return {"error": "INVALID_EXPIRY", "message": "Expiry must be in the future.", "http_status": 422}
+
+    raw = secrets.token_urlsafe(32)
+    row = GuestAccessQrToken(
+        token=raw,
+        zone_id=zid,
+        event_id=eid,
+        label=(label or "").strip() or f"Pass {eid}",
+        created_by_owner_id=acting_owner.id,
+        expires_at=when,
+        revoked_at=None,
+        is_primary=False,
+        is_network_access=False,
+        max_uses=max_uses,
+        use_count=0,
+    )
+    db.add(row)
+    db.flush()
+    _audit_qr_token_action(
+        db,
+        token_row=row,
+        action="created_pass_bound",
+        actor_owner_id=acting_owner.id,
+        metadata={"event_id": eid, "max_uses": max_uses},
+    )
+    return {"row": row}
+
+
+def revoke_guest_qr_token_row(
+    db: Session,
+    row: GuestAccessQrToken | None,
+    *,
+    actor_owner_id: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """Revoke a token row in-place (no auth check — caller already authorized)."""
+    if row is None or row.revoked_at is not None:
+        return
+    row.revoked_at = datetime.utcnow()
+    db.flush()
+    _audit_qr_token_action(
+        db,
+        token_row=row,
+        action="revoked",
+        actor_owner_id=actor_owner_id,
+        reason=reason,
+    )
+
+
 def create_guest_qr_token(
     db: Session,
     acting_owner: Owner,

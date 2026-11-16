@@ -66,6 +66,8 @@ from app.schemas.guest_pass import (
     GuestPassDeletedEnvelope,
     GuestPassListEnvelope,
     GuestPassListItem,
+    GuestPassQrLinkData,
+    GuestPassQrLinkEnvelope,
 )
 from app.schemas.guest_api import (
     GuestApiHttpError,
@@ -272,8 +274,12 @@ def _network_token_contract_payload(row) -> NetworkGuestQrTokenData:
         "auto-approval — no administrator review. Duplicate **`event_id`** values for the same zone "
         "are rejected (**`DUPLICATE_EVENT_ID`**). A zone administrator may later revoke the pass "
         "(**`POST /api/access/guest-passes/{id}/revoke`**).\n\n"
-        "When a guest later arrives at **`POST /api/access/permission`** with the same **`event_id`**, "
+        "When a guest later arrives at **`POST /api/access/permission`** with the same **`event_id`** "
+        "(or via a pass-bound opaque **`gt`** token), "
         "the server automatically approves the guest if a valid accepted pass exists.\n\n"
+        "Each create also mints a unique pass-bound guest QR token. The public QR URL uses "
+        "**`/access?gt=&zid=`** and does **not** embed **`eid`**. QR URL fields are returned only to "
+        "**network administrators**; members see their Event ID without QR material.\n\n"
         "**Side effects** (same DB transaction as this response): a **`ZoneMessageEvent`** row with **`type`** "
         "**`PERMISSION`** is persisted (`metadata.flow` = **`guest_pass_lifecycle`**, **`body.code`** = **`GUEST_PASS_CREATED`**). "
         "Callers who receive merged guest-access **`PERMISSION`** lines will see it on **`GET /messages?owner_id=...`**.\n\n"
@@ -347,6 +353,9 @@ async def create_guest_pass(
             requested_by=row.requested_by,
             expires_at=row.expires_at,
             created_at=row.created_at,
+            has_qr=bool(result.get("has_qr")) and bool(result.get("is_admin")),
+            url=result.get("url") if result.get("is_admin") else None,
+            path_with_query=result.get("path_with_query") if result.get("is_admin") else None,
         )
     )
 
@@ -358,8 +367,12 @@ async def create_guest_pass(
     operation_id="access_list_guest_passes",
     summary="List guest passes for a zone",
     description=(
-        "**Bearer** member JWT. Returns all guest passes for the specified **`zone_id`**, "
+        "**Bearer** member JWT. Returns guest passes for the specified **`zone_id`**, "
         "sorted by **`created_at`** descending (newest first).\n\n"
+        "**Visibility:** network administrators see every pass in the network; "
+        "members see only Event IDs they created. "
+        "**`has_qr`** is true only for admin responses when a pass-bound QR exists "
+        "(members never receive QR URLs from this list — use **`GET …/qr-link`**, admin-only).\n\n"
         "Each item includes a computed **`is_expired`** boolean (`true` when `now > expires_at`) "
         "and **`requested_by_name`** (display name of the member who created the pass).\n\n"
         "**Query params:**\n"
@@ -405,6 +418,62 @@ async def list_guest_passes(
 
     items = [GuestPassListItem.model_validate(i) for i in result["items"]]
     return GuestPassListEnvelope(data=items)
+
+
+@router.get(
+    "/guest-passes/{pass_id}/qr-link",
+    response_model=GuestPassQrLinkEnvelope,
+    status_code=status.HTTP_200_OK,
+    operation_id="access_guest_pass_qr_link",
+    summary="Get guest pass QR link (admin only)",
+    description=(
+        "**Bearer** JWT; **network administrator** only. Returns the unique pass-bound guest QR URL "
+        "(**`/access?gt=&zid=`**). The Event ID is **not** embedded in the link; arrival matching uses "
+        "the opaque token’s stored **`event_id`**. Legacy passes without a token are minted lazily."
+    ),
+    response_description="Pass QR link without eid.",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {"description": "Missing or invalid bearer token."},
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not the network administrator (**FORBIDDEN**).",
+            "model": GuestAccessHttpError,
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Guest pass not found (**NOT_FOUND**).",
+            "model": GuestAccessHttpError,
+        },
+    },
+)
+async def get_guest_pass_qr_link(
+    pass_id: str = Path(..., min_length=1, max_length=36, description="UUID of the guest pass."),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "NOT_FOUND", "message": "Owner not found"},
+        )
+
+    result = guest_pass_service.get_guest_pass_qr_link(db, owner=owner, pass_id=pass_id)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=result["http_status"],
+            detail={"error_code": result["error"], "message": result["message"]},
+        )
+
+    db.commit()
+    return GuestPassQrLinkEnvelope(
+        data=GuestPassQrLinkData(
+            id=result["id"],
+            zone_id=result["zone_id"],
+            event_id=result["event_id"],
+            path_with_query=result["path_with_query"],
+            url=result.get("url"),
+            token_suffix=result.get("token_suffix"),
+        )
+    )
 
 
 @router.post(

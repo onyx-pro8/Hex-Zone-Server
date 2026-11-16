@@ -57,6 +57,10 @@ class GuestPassCreatedData(BaseModel):
 
     The server also persists a **`ZoneMessageEvent`** with **`type`** **`PERMISSION`** (`metadata.flow` **`guest_pass_lifecycle`**,
     **`body.code`** **`GUEST_PASS_CREATED`**) for the merged **`GET /messages`** inbox (same transaction as this row).
+
+    A unique pass-bound guest QR token is minted at create time. **QR URL fields are returned only to
+    network administrators**; members receive the Event ID list entry without QR material. The QR link
+    never embeds **`eid`** — event matching uses the stored token row.
     """
 
     id: str = Field(description="UUID primary key of the new guest pass.")
@@ -71,6 +75,18 @@ class GuestPassCreatedData(BaseModel):
     requested_by: int = Field(description="owner_id of the member who created the pass.")
     expires_at: datetime = Field(description="ISO 8601 UTC expiry.")
     created_at: datetime = Field(description="ISO 8601 UTC creation timestamp.")
+    has_qr: bool = Field(
+        default=False,
+        description="True when a pass-bound QR token was minted. Always false for non-admin create responses.",
+    )
+    url: str | None = Field(
+        default=None,
+        description="Absolute guest check-in URL (**admin only**). Omits eid; uses opaque gt + zid.",
+    )
+    path_with_query: str | None = Field(
+        default=None,
+        description="SPA path with query (**admin only**), e.g. `/access?gt=…&zid=…` (no eid).",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -85,6 +101,9 @@ class GuestPassCreatedData(BaseModel):
                     "requested_by": 123,
                     "expires_at": "2026-05-15T18:00:00",
                     "created_at": "2026-05-12T10:30:00",
+                    "has_qr": False,
+                    "url": None,
+                    "path_with_query": None,
                 }
             ]
         }
@@ -120,6 +139,13 @@ class GuestPassListItem(BaseModel):
     created_at: datetime = Field(description="ISO 8601 UTC creation timestamp.")
     updated_at: datetime = Field(description="ISO 8601 UTC last-updated timestamp.")
     is_expired: bool = Field(description="Computed: true if now > expires_at, regardless of status.")
+    has_qr: bool = Field(
+        default=False,
+        description=(
+            "Admin only: true when this pass has a linked QR token. "
+            "Always false for non-admin list responses (members never receive QR metadata)."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -139,10 +165,39 @@ class GuestPassListItem(BaseModel):
                     "created_at": "2026-05-12T10:30:00",
                     "updated_at": "2026-05-12T11:00:00",
                     "is_expired": False,
+                    "has_qr": True,
                 }
             ]
         }
     )
+
+
+class GuestPassQrLinkData(BaseModel):
+    """Admin-only QR link for one guest pass (`GET …/guest-passes/{id}/qr-link`)."""
+
+    id: str = Field(description="Guest pass UUID.")
+    zone_id: str = Field(description="Zone / network id.")
+    event_id: str = Field(
+        description="Event id for admin display only — never embedded in the QR URL."
+    )
+    path_with_query: str = Field(
+        description="SPA path `/access?gt=…&zid=…` (no eid query param)."
+    )
+    url: str | None = Field(
+        default=None,
+        description="Absolute URL when guest-access web base is configured.",
+    )
+    token_suffix: str | None = Field(
+        default=None,
+        description="Last characters of the opaque gt for admin confirmation.",
+    )
+
+
+class GuestPassQrLinkEnvelope(BaseModel):
+    """Success envelope for **`GET /api/access/guest-passes/{pass_id}/qr-link`**."""
+
+    status: Literal["success"] = "success"
+    data: GuestPassQrLinkData
 
 
 class GuestPassListEnvelope(BaseModel):

@@ -1113,6 +1113,18 @@ def init_db():
             conn.execute(
                 text("CREATE INDEX IF NOT EXISTS ix_guest_passes_created_at ON guest_passes (created_at);")
             )
+            conn.execute(
+                text(
+                    "ALTER TABLE guest_passes ADD COLUMN IF NOT EXISTS qr_token_id INTEGER "
+                    "REFERENCES guest_access_qr_tokens(id) ON DELETE SET NULL;"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_guest_passes_qr_token_id "
+                    "ON guest_passes (qr_token_id);"
+                )
+            )
 
             # Access schedule approval workflow (PENDING → ACCEPTED / REJECTED / REVOKED)
             conn.execute(

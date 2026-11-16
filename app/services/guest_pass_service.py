@@ -12,8 +12,10 @@ from app.domain.event_id import canonical_event_id, event_id_lowercase_sql_in_va
 from app.domain.message_types import CanonicalMessageType, type_category, type_scope
 from app.domain.permission_visibility import PERMISSION_VISIBILITY_DIRECT
 from app.models import GuestAccessSession, ZoneMessageEvent
+from app.models.guest_access_qr_token import GuestAccessQrToken
 from app.models.guest_pass import GuestPass, GuestPassStatus
 from app.models.owner import Owner, OwnerRole
+from app.services import guest_access_qr, guest_access_qr_token_service
 from app.services.guest_access_service import pick_co_owner_for_direct_permission, zone_exists
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,70 @@ def _is_zone_member(owner: Owner, zone_id: str) -> bool:
 
 def _is_zone_admin(owner: Owner, zone_id: str) -> bool:
     return _is_zone_member(owner, zone_id) and owner.role == OwnerRole.ADMINISTRATOR
+
+
+def _pass_qr_urls(token_row: GuestAccessQrToken | None) -> tuple[str | None, str | None]:
+    """Public pass QR URLs intentionally omit eid (event id stays on the token row)."""
+    if token_row is None or not (token_row.token or "").strip():
+        return None, None
+    path = guest_access_qr.guest_access_path_with_guest_token(
+        token_row.token,
+        zone_id=token_row.zone_id,
+        event_id=None,
+    )
+    url = guest_access_qr.guest_access_absolute_url_with_guest_token(
+        token_row.token,
+        zone_id=token_row.zone_id,
+        event_id=None,
+    )
+    return path, url
+
+
+def _mint_pass_qr_token(
+    db: Session,
+    *,
+    owner: Owner,
+    pass_row: GuestPass,
+) -> GuestAccessQrToken | None:
+    created = guest_access_qr_token_service.create_pass_bound_guest_qr_token(
+        db,
+        owner,
+        zone_id=pass_row.zone_id,
+        event_id=pass_row.event_id,
+        expires_at=pass_row.expires_at,
+        label=f"Pass {pass_row.event_id}",
+        max_uses=1,
+    )
+    if created.get("error"):
+        logger.warning(
+            "guest_pass_qr_mint_failed pass_id=%s error=%s",
+            pass_row.id,
+            created.get("error"),
+        )
+        return None
+    token_row = created["row"]
+    pass_row.qr_token_id = token_row.id
+    db.flush()
+    return token_row
+
+
+def _revoke_linked_pass_qr(
+    db: Session,
+    *,
+    pass_row: GuestPass,
+    actor_owner_id: int | None,
+    reason: str,
+) -> None:
+    token_id = getattr(pass_row, "qr_token_id", None)
+    if not token_id:
+        return
+    token_row = db.get(GuestAccessQrToken, token_id)
+    guest_access_qr_token_service.revoke_guest_qr_token_row(
+        db,
+        token_row,
+        actor_owner_id=actor_owner_id,
+        reason=reason,
+    )
 
 
 def create_guest_pass(
@@ -82,14 +148,30 @@ def create_guest_pass(
     db.add(row)
     db.flush()
 
-    logger.info("guest_pass_created id=%s zone_id=%s event_id=%s by=%d", row.id, zid, eid, owner.id)
+    token_row = _mint_pass_qr_token(db, owner=owner, pass_row=row)
+
+    logger.info(
+        "guest_pass_created id=%s zone_id=%s event_id=%s qr_token_id=%s by=%d",
+        row.id,
+        zid,
+        eid,
+        getattr(token_row, "id", None),
+        owner.id,
+    )
 
     _record_guest_pass_permission_zone_event(db, guest_pass=row, code="GUEST_PASS_CREATED")
+
+    is_admin = _is_zone_admin(owner, zid)
+    path, url = _pass_qr_urls(token_row) if is_admin else (None, None)
 
     return {
         "ok": True,
         "row": row,
         "requester_name": _owner_display_name(owner),
+        "is_admin": is_admin,
+        "has_qr": bool(token_row),
+        "path_with_query": path if is_admin else None,
+        "url": url if is_admin else None,
     }
 
 
@@ -105,7 +187,11 @@ def list_guest_passes(
     if not _is_zone_member(owner, zid):
         return {"error": "FORBIDDEN", "message": "You are not a member of this zone.", "http_status": 403}
 
+    is_admin = _is_zone_admin(owner, zid)
     q = db.query(GuestPass).filter(GuestPass.zone_id == zid)
+    # Members only see Event IDs they created; admins see the whole network.
+    if not is_admin:
+        q = q.filter(GuestPass.requested_by == owner.id)
 
     if status_filter and status_filter.upper() != "ALL":
         sf = status_filter.upper()
@@ -123,7 +209,7 @@ def list_guest_passes(
     now = datetime.utcnow()
     items = []
     for r in rows:
-        items.append({
+        item = {
             "id": r.id,
             "zone_id": r.zone_id,
             "event_id": r.event_id,
@@ -138,9 +224,63 @@ def list_guest_passes(
             "created_at": r.created_at,
             "updated_at": r.updated_at,
             "is_expired": now > r.expires_at if r.expires_at else False,
-        })
+            # QR metadata is admin-only; members never receive has_qr/url fields.
+            "has_qr": bool(getattr(r, "qr_token_id", None)) if is_admin else False,
+        }
+        items.append(item)
 
-    return {"ok": True, "items": items}
+    return {"ok": True, "items": items, "is_admin": is_admin}
+
+
+def get_guest_pass_qr_link(
+    db: Session,
+    *,
+    owner: Owner,
+    pass_id: str,
+) -> dict:
+    """Network admin only: resolve (or lazily mint) the pass QR without embedding eid."""
+    row = db.query(GuestPass).filter(GuestPass.id == pass_id).first()
+    if not row:
+        return {"error": "NOT_FOUND", "message": "Guest pass not found.", "http_status": 404}
+
+    if not _is_zone_admin(owner, row.zone_id):
+        return {
+            "error": "FORBIDDEN",
+            "message": "Only the network administrator can view guest pass QR codes.",
+            "http_status": 403,
+        }
+
+    token_row: GuestAccessQrToken | None = None
+    token_id = getattr(row, "qr_token_id", None)
+    if token_id:
+        token_row = db.get(GuestAccessQrToken, token_id)
+
+    if token_row is None or token_row.revoked_at is not None:
+        token_row = _mint_pass_qr_token(db, owner=owner, pass_row=row)
+        if token_row is None:
+            return {
+                "error": "QR_MINT_FAILED",
+                "message": "Could not create a QR code for this guest pass.",
+                "http_status": 500,
+            }
+
+    path, url = _pass_qr_urls(token_row)
+    if not path:
+        return {
+            "error": "QR_UNAVAILABLE",
+            "message": "Could not build the guest pass QR link.",
+            "http_status": 500,
+        }
+
+    return {
+        "ok": True,
+        "id": row.id,
+        "zone_id": row.zone_id,
+        "event_id": row.event_id,
+        "path_with_query": path,
+        "url": url,
+        "token_suffix": token_row.token[-6:] if len(token_row.token) >= 6 else token_row.token,
+    }
 
 
 def accept_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
@@ -215,6 +355,13 @@ def revoke_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
     row.updated_at = now
     db.flush()
 
+    _revoke_linked_pass_qr(
+        db,
+        pass_row=row,
+        actor_owner_id=owner.id,
+        reason="guest_pass_revoked",
+    )
+
     gid = (row.used_by_guest_id or "").strip()
     if gid:
         sess = (
@@ -263,6 +410,12 @@ def delete_guest_pass(db: Session, *, owner: Owner, pass_id: str) -> dict:
     pass_id_out = row.id
     zone_id_out = row.zone_id
     event_id_out = row.event_id
+    _revoke_linked_pass_qr(
+        db,
+        pass_row=row,
+        actor_owner_id=owner.id,
+        reason="guest_pass_deleted",
+    )
     db.delete(row)
     db.flush()
     logger.info(
@@ -294,6 +447,12 @@ def delete_expired_guest_passes(db: Session, *, owner: Owner, zone_id: str) -> d
     rows = q.all()
     deleted_ids = [r.id for r in rows]
     for row in rows:
+        _revoke_linked_pass_qr(
+            db,
+            pass_row=row,
+            actor_owner_id=owner.id,
+            reason="guest_pass_expired_cleared",
+        )
         db.delete(row)
     if rows:
         db.flush()

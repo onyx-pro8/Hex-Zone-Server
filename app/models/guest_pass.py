@@ -32,6 +32,14 @@ class GuestPass(Base):
     )
     reviewed_by = Column(Integer, ForeignKey("owners.id", ondelete="SET NULL"), nullable=True, index=True)
     used_by_guest_id = Column(String(36), nullable=True, index=True)
+    # Opaque guest QR token for this pass. Event id stays on the token row only —
+    # the public QR URL must not embed eid.
+    qr_token_id = Column(
+        Integer,
+        ForeignKey("guest_access_qr_tokens.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
