@@ -38,6 +38,16 @@ def resolve_account_root(db: Session, owner: Owner) -> Owner:
     return root or owner
 
 
+def caller_may_manage_billing(db: Session, caller: Owner) -> bool:
+    """True for the account holder (network admin OR solo Individual).
+
+    Invited Family/Organization members cannot manage billing — only the
+    account root. Free Individual (user role) may upgrade their own account.
+    """
+    root = resolve_account_root(db, caller)
+    return int(caller.id) == int(root.id)
+
+
 def current_year_month(now: datetime | None = None) -> str:
     dt = now or datetime.now(timezone.utc)
     return f"{dt.year:04d}-{dt.month:02d}"
@@ -277,16 +287,35 @@ def build_subscription_overview(db: Session, caller: Owner) -> dict[str, Any]:
         ),
     ]
 
-    is_admin = str(caller.role.value).lower() == "administrator"
-    manages_billing = is_admin and caller.id == root.id
+    manages_billing = caller_may_manage_billing(db, caller)
+    is_individual = plan.plan_key == "exclusive"
+    is_member = int(caller.id) != int(root.id)
 
     db.commit()
+
+    if is_member:
+        scope_note = (
+            "This network plan is managed by the account holder. "
+            "Limits are shared across the whole network."
+        )
+    elif is_individual:
+        scope_note = (
+            "Individual is free (user role). Upgrade to Individual Pro, Family, "
+            "or Organization — after payment your account type and role update automatically. "
+            "Guests have no subscription."
+        )
+    else:
+        scope_note = (
+            "Limits are shared across the whole network account. "
+            "Guest call minutes belong to this plan — guests have no subscription. "
+            "Account type changes automatically after a successful upgrade."
+        )
 
     return {
         "network_owner_id": root.id,
         "viewer_owner_id": caller.id,
-        "viewer_is_network_admin": manages_billing,
-        "viewer_is_member": caller.id != root.id,
+        "viewer_is_network_admin": manages_billing and not is_individual,
+        "viewer_is_member": is_member,
         "plan": entitlements_to_dict(plan),
         "subscription": {
             "plan_key": sub.plan_key or plan.plan_key,
@@ -304,10 +333,7 @@ def build_subscription_overview(db: Session, caller: Owner) -> dict[str, Any]:
         "features": features,
         "can_manage_billing": manages_billing,
         "upgrade_plans": list_public_plans(),
-        "scope_note": (
-            "Limits are shared across the whole network account. "
-            "Guest call minutes belong to the network administrator's plan — guests have no subscription."
-        ),
+        "scope_note": scope_note,
     }
 
 
@@ -425,17 +451,15 @@ def create_checkout_session(
     plan_key: str,
     billing_interval: str = "monthly",
 ) -> dict[str, Any]:
-    if str(caller.role.value).lower() != "administrator":
+    if not caller_may_manage_billing(db, caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the network administrator can manage billing.",
+            detail=(
+                "Only the account holder can manage billing. "
+                "Invited members cannot upgrade the network plan."
+            ),
         )
     root = resolve_account_root(db, caller)
-    if caller.id != root.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the network account holder can open Checkout.",
-        )
     key = str(plan_key or "").strip().lower()
     if key not in PAID_CHECKOUT_PLAN_KEYS:
         raise HTTPException(
@@ -492,17 +516,15 @@ def create_checkout_session(
 
 
 def create_billing_portal_session(db: Session, *, caller: Owner) -> dict[str, Any]:
-    if str(caller.role.value).lower() != "administrator":
+    if not caller_may_manage_billing(db, caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the network administrator can manage billing.",
+            detail=(
+                "Only the account holder can manage billing. "
+                "Invited members cannot open the billing portal."
+            ),
         )
     root = resolve_account_root(db, caller)
-    if caller.id != root.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the network account holder can open the billing portal.",
-        )
     stripe = _stripe_client()
     sub = get_or_create_subscription_row(db, root)
     if not sub.stripe_customer_id:
@@ -522,15 +544,29 @@ def create_billing_portal_session(db: Session, *, caller: Owner) -> dict[str, An
 
 
 def _apply_plan_to_owner(db: Session, root: Owner, plan_key: str) -> None:
-    from app.models.owner import AccountType
+    """Apply paid plan entitlements and lock role to the plan rules.
+
+    Individual (exclusive) stays user-role. Individual Pro / Family /
+    Organization become administrator. No manual account-type picker needed.
+    """
+    from app.models.owner import AccountType, OwnerRole
     from app.services.plan_entitlements import PLAN_CATALOG
 
     entitlements = PLAN_CATALOG.get(plan_key)
     if entitlements is None:
         entitlements = entitlements_for(plan_key)
-    root.account_type = AccountType(entitlements.account_type)
+    new_type = entitlements.account_type
+    root.account_type = AccountType(new_type)
     root.tier_level = entitlements.tier_level
     root.expired = False
+    if new_type == "exclusive":
+        root.role = OwnerRole.USER
+    else:
+        # enhanced / private_plus / enhanced_plus / private
+        root.role = OwnerRole.ADMINISTRATOR
+    # Solo upgraded accounts are their own network root.
+    if root.account_owner_id is None or int(root.account_owner_id) == int(root.id):
+        root.account_owner_id = root.id
     db.add(root)
 
 
