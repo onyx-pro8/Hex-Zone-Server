@@ -133,6 +133,16 @@ def create_pass_bound_guest_qr_token(
     )
     db.add(row)
     db.flush()
+    try:
+        from app.services.subscription_service import (
+            record_access_qr_mint,
+            resolve_account_root,
+        )
+
+        root = resolve_account_root(db, acting_owner)
+        record_access_qr_mint(db, root.id, 1)
+    except Exception:
+        pass
     _audit_qr_token_action(
         db,
         token_row=row,
@@ -254,6 +264,16 @@ def create_guest_qr_token(
     )
     db.add(row)
     db.flush()
+    try:
+        from app.services.subscription_service import (
+            record_access_qr_mint,
+            resolve_account_root,
+        )
+
+        root = resolve_account_root(db, acting_owner)
+        record_access_qr_mint(db, root.id, 1)
+    except Exception:
+        pass
     action = "created"
     if is_primary:
         action = "created_primary"

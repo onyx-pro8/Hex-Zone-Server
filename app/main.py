@@ -16,6 +16,7 @@ from app.routers import (
     message_feature,
     messages,
     owners,
+    subscription,
     universal_access,
     utils,
     zones,
@@ -449,6 +450,7 @@ app.include_router(message_feature.router)
 app.include_router(access.router)
 app.include_router(guest.router)
 app.include_router(app_links.router)
+app.include_router(subscription.router)
 app.include_router(contract_router)
 app.include_router(websocket_router)
 

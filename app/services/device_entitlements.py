@@ -16,7 +16,16 @@ DEVICE_LIMITS_BY_ACCOUNT_TYPE: dict[str, int | None] = {
     "exclusive": 0,  # Individual: smart-home hubs disabled
     "private_plus": 10,  # Private+
     "enhanced": 1,
-    "enhanced_plus": None,  # Enhanced+: no cap
+    "enhanced_plus": None,  # resolved via ENHANCED_PLUS_DEVICE_LIMITS + tier_level
+}
+
+# Organization smart-home hub caps by level (subscription catalog).
+ENHANCED_PLUS_DEVICE_LIMITS: dict[int, int] = {
+    1: 25,
+    2: 50,
+    3: 100,
+    4: 250,
+    5: 500,
 }
 
 
@@ -53,9 +62,30 @@ def account_type_supports_member_invite(account_type: str) -> bool:
     return limit is None or limit > 1
 
 
-def max_devices_for_account_type(account_type: str) -> int | None:
-    """Return max devices allowed per owner for an account type."""
-    return DEVICE_LIMITS_BY_ACCOUNT_TYPE.get(str(account_type).strip().lower())
+def max_devices_for_account_type(
+    account_type: str,
+    *,
+    tier_level: int | None = None,
+) -> int | None:
+    """Return max smart-home hubs for an account type (and org tier)."""
+    key = str(account_type).strip().lower()
+    if key == "enhanced_plus":
+        try:
+            level = int(tier_level) if tier_level is not None else 1
+        except (TypeError, ValueError):
+            level = 1
+        if level not in ENHANCED_PLUS_DEVICE_LIMITS:
+            level = 1
+        return ENHANCED_PLUS_DEVICE_LIMITS[level]
+    return DEVICE_LIMITS_BY_ACCOUNT_TYPE.get(key)
+
+
+def max_devices_for_owner(owner: Owner) -> int | None:
+    """Resolve smart-home hub cap for this account holder."""
+    return max_devices_for_account_type(
+        owner.account_type.value,
+        tier_level=getattr(owner, "tier_level", None),
+    )
 
 
 def max_user_members_for_account_type(
@@ -191,11 +221,11 @@ def count_smart_home_devices(db: Session, owner_id: int) -> int:
 def evict_offline_devices_to_make_room(db: Session, owner: Owner) -> None:
     """Remove oldest offline smart-home hubs until under the tier cap.
 
-    Phone/web login clients (MOB-/WEB-) never count toward the smart-home
+    Phone/web login clients (MOB-/WEB-) never count toward the smart-home hub
     capacity and are never evicted by this helper.
     """
     expire_stale_device_sessions(db, owner.id)
-    max_devices = max_devices_for_account_type(owner.account_type.value)
+    max_devices = max_devices_for_owner(owner)
     if max_devices is None:
         return
     smart_homes = [
@@ -220,7 +250,7 @@ def evict_offline_devices_to_make_room(db: Session, owner: Owner) -> None:
 
 def assert_owner_device_capacity(owner: Owner, current_device_count: int) -> None:
     """Ensure owner has capacity to enroll another smart-home device."""
-    max_devices = max_devices_for_account_type(owner.account_type.value)
+    max_devices = max_devices_for_owner(owner)
     if max_devices is None:
         return
     if current_device_count >= max_devices:

@@ -182,6 +182,29 @@ class Settings(BaseSettings):
     LIVEKIT_API_KEY: str = ""
     LIVEKIT_API_SECRET: str = ""
 
+    # Stripe billing (optional). When STRIPE_SECRET_KEY is empty, entitlements
+    # still work; Checkout / Portal / webhooks return 503 until configured.
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_SUCCESS_URL: str = "safezonepatrol://subscription?checkout=success"
+    STRIPE_CANCEL_URL: str = "safezonepatrol://subscription?checkout=cancel"
+    STRIPE_PORTAL_RETURN_URL: str = "safezonepatrol://subscription"
+    MOBILE_SUBSCRIPTION_RETURN_URL: str = "safezonepatrol://subscription"
+    STRIPE_PRICE_ENHANCED_MONTHLY: str = ""
+    STRIPE_PRICE_ENHANCED_ANNUAL: str = ""
+    STRIPE_PRICE_PRIVATE_PLUS_MONTHLY: str = ""
+    STRIPE_PRICE_PRIVATE_PLUS_ANNUAL: str = ""
+    STRIPE_PRICE_ORG_1_MONTHLY: str = ""
+    STRIPE_PRICE_ORG_1_ANNUAL: str = ""
+    STRIPE_PRICE_ORG_2_MONTHLY: str = ""
+    STRIPE_PRICE_ORG_2_ANNUAL: str = ""
+    STRIPE_PRICE_ORG_3_MONTHLY: str = ""
+    STRIPE_PRICE_ORG_3_ANNUAL: str = ""
+    STRIPE_PRICE_ORG_4_MONTHLY: str = ""
+    STRIPE_PRICE_ORG_4_ANNUAL: str = ""
+    STRIPE_PRICE_ORG_5_MONTHLY: str = ""
+    STRIPE_PRICE_ORG_5_ANNUAL: str = ""
+
     @property
     def sqlalchemy_database_url(self) -> str:
         """Resolved DB connection string with an explicit port.

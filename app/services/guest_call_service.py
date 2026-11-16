@@ -155,6 +155,51 @@ def party_user_ids(call: GuestCallSession) -> list[str]:
     return ids
 
 
+def _assert_network_guest_call_quota(admin_owner_id: int) -> str | None:
+    """Guest has no plan — minutes come from the host network admin subscription."""
+    from app.database import session_maker
+    from app.models import Owner
+    from app.services.subscription_service import guest_call_minutes_remaining
+
+    db = session_maker()
+    try:
+        admin = db.get(Owner, int(admin_owner_id))
+        if not admin:
+            return "ADMIN_NOT_FOUND"
+        remaining = guest_call_minutes_remaining(db, admin)
+        if remaining is not None and remaining <= 0:
+            return "GUEST_CALL_QUOTA_EXCEEDED"
+    except Exception:
+        logger.exception("Guest call quota check failed for admin %s", admin_owner_id)
+    finally:
+        db.close()
+    return None
+
+
+def _record_connected_guest_call_seconds(call: GuestCallSession) -> None:
+    if not call.accepted_at:
+        return
+    ended_at = datetime.now(timezone.utc)
+    started = call.accepted_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    seconds = int(max(0, (ended_at - started).total_seconds()))
+    if seconds <= 0:
+        return
+    from app.database import session_maker
+    from app.services.subscription_service import record_guest_call_seconds
+
+    db = session_maker()
+    try:
+        record_guest_call_seconds(db, admin_owner_id=int(call.admin_owner_id), seconds=seconds)
+    except Exception:
+        logger.exception(
+            "Failed to record guest call seconds for admin %s", call.admin_owner_id
+        )
+    finally:
+        db.close()
+
+
 async def create_call(
     *,
     zone_id: str,
@@ -176,6 +221,10 @@ async def create_call(
     existing = active_call_for_guest(gid)
     if existing and existing.state in ("ringing", "connected"):
         return None, "CALL_ALREADY_ACTIVE"
+
+    quota_error = _assert_network_guest_call_quota(int(admin_owner_id))
+    if quota_error:
+        return None, quota_error
 
     call = GuestCallSession(
         call_id=uuid.uuid4().hex,
@@ -249,7 +298,10 @@ async def end_call(
         return call, None
 
     was_ringing = call.state == "ringing"
+    was_connected = call.state == "connected"
     call.state = "ended"
+    if was_connected:
+        _record_connected_guest_call_seconds(call)
     payload = public_call_payload(
         call,
         reason=reason,
