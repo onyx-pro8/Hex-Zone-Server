@@ -86,7 +86,7 @@ async def create_checkout(
     summary="Create Stripe Customer Portal session (network admin)",
 )
 async def create_portal(
-    body: PortalBody | None = None,
+    body: PortalBody = PortalBody(),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -96,7 +96,7 @@ async def create_portal(
     return subscription_service.create_billing_portal_session(
         db,
         caller=owner,
-        return_url=(body.return_url if body else None),
+        return_url=body.return_url,
     )
 
 
