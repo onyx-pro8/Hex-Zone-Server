@@ -12,7 +12,7 @@ from app.models import Owner
 
 
 DEVICE_LIMITS_BY_ACCOUNT_TYPE: dict[str, int | None] = {
-    "private": 1,
+    "private": None,  # System admin: unlimited smart-home hubs
     "exclusive": 0,  # Individual: smart-home hubs disabled
     "private_plus": 10,  # Private+
     "enhanced": 1,

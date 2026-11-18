@@ -87,13 +87,21 @@ def resolve_account_root(db: Session, owner: Owner) -> Owner:
     return root or owner
 
 
+def is_system_private_account(owner: Owner) -> bool:
+    """True for the Private (system administrator) tier — not a paid subscription."""
+    return str(owner.account_type.value).strip().lower() == "private"
+
+
 def caller_may_manage_billing(db: Session, caller: Owner) -> bool:
     """True for the account holder (network admin OR solo Individual).
 
     Invited Family/Organization members cannot manage billing — only the
     account root. Free Individual (user role) may upgrade their own account.
+    Private (system) accounts have no Stripe subscription and cannot bill.
     """
     root = resolve_account_root(db, caller)
+    if is_system_private_account(root):
+        return False
     return int(caller.id) == int(root.id)
 
 
@@ -338,11 +346,21 @@ def build_subscription_overview(db: Session, caller: Owner) -> dict[str, Any]:
 
     manages_billing = caller_may_manage_billing(db, caller)
     is_individual = plan.plan_key == "exclusive"
+    is_system = plan.plan_key == "private" or is_system_private_account(root)
     is_member = int(caller.id) != int(root.id)
+
+    if is_system and sub.status in {None, "", "none"}:
+        sub.status = "system"
+        sub.plan_key = "private"
 
     db.commit()
 
-    if is_member:
+    if is_system:
+        scope_note = (
+            "System administrator account. There is no subscription or billing — "
+            "you have full access to every feature and unlimited limits."
+        )
+    elif is_member:
         scope_note = (
             "This network plan is managed by the account holder. "
             "Limits are shared across the whole network."
@@ -363,25 +381,31 @@ def build_subscription_overview(db: Session, caller: Owner) -> dict[str, Any]:
     return {
         "network_owner_id": root.id,
         "viewer_owner_id": caller.id,
-        "viewer_is_network_admin": manages_billing and not is_individual,
+        "viewer_is_network_admin": (manages_billing and not is_individual) or is_system,
         "viewer_is_member": is_member,
         "plan": entitlements_to_dict(plan),
         "subscription": {
             "plan_key": sub.plan_key or plan.plan_key,
-            "status": sub.status,
-            "billing_interval": sub.billing_interval,
-            "stripe_customer_id": sub.stripe_customer_id,
-            "stripe_subscription_id": sub.stripe_subscription_id,
+            "status": "system" if is_system else sub.status,
+            "billing_interval": None if is_system else sub.billing_interval,
+            "stripe_customer_id": None if is_system else sub.stripe_customer_id,
+            "stripe_subscription_id": None if is_system else sub.stripe_subscription_id,
             "current_period_end": (
-                sub.current_period_end.isoformat() + "Z" if sub.current_period_end else None
+                None
+                if is_system
+                else (
+                    sub.current_period_end.isoformat() + "Z"
+                    if sub.current_period_end
+                    else None
+                )
             ),
-            "cancel_at_period_end": bool(sub.cancel_at_period_end),
+            "cancel_at_period_end": False if is_system else bool(sub.cancel_at_period_end),
         },
-        "stripe_configured": stripe_configured(),
+        "stripe_configured": False if is_system else stripe_configured(),
         "year_month": ym,
         "features": features,
         "can_manage_billing": manages_billing,
-        "upgrade_plans": list_public_plans(),
+        "upgrade_plans": [] if is_system else list_public_plans(),
         "scope_note": scope_note,
     }
 
@@ -507,10 +531,16 @@ def create_checkout_session(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
                 "Only the account holder can manage billing. "
-                "Invited members cannot upgrade the network plan."
+                "Invited members cannot upgrade the network plan. "
+                "System administrator (Private) accounts have no subscription."
             ),
         )
     root = resolve_account_root(db, caller)
+    if is_system_private_account(root):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System administrator (Private) accounts do not use Stripe subscriptions.",
+        )
     key = str(plan_key or "").strip().lower()
     if key not in PAID_CHECKOUT_PLAN_KEYS:
         raise HTTPException(
