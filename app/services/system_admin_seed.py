@@ -16,6 +16,25 @@ SYSTEM_ADMIN_PASSWORD = "123456"
 SYSTEM_ADMIN_FIRST_NAME = "System"
 SYSTEM_ADMIN_LAST_NAME = "Admin"
 SYSTEM_ADMIN_ZONE_ID = "DISTRICT-11"
+# Home address placeholder — never a role/title string.
+SYSTEM_ADMIN_ADDRESS = "1 District Plaza, Metro City"
+_LEGACY_BAD_ADDRESSES = frozenset(
+    {
+        "",
+        "system administrator",
+        "system admin",
+        "administrator",
+        "n/a",
+        "na",
+        "none",
+        "null",
+    }
+)
+
+
+def _is_placeholder_address(value: str | None) -> bool:
+    normalized = " ".join(str(value or "").strip().lower().split())
+    return normalized in _LEGACY_BAD_ADDRESSES
 
 
 def _apply_system_admin_defaults(owner: Owner) -> None:
@@ -28,8 +47,8 @@ def _apply_system_admin_defaults(owner: Owner) -> None:
     owner.expired = False
     if not (owner.zone_id or "").strip():
         owner.zone_id = SYSTEM_ADMIN_ZONE_ID
-    if not (owner.address or "").strip():
-        owner.address = "System Administrator"
+    if _is_placeholder_address(owner.address):
+        owner.address = SYSTEM_ADMIN_ADDRESS
     if not owner.api_key:
         owner.api_key = generate_api_key()
     if not verify_password(SYSTEM_ADMIN_PASSWORD, owner.hashed_password):
@@ -60,7 +79,7 @@ def ensure_system_admin(db: Session) -> Owner:
         role=OwnerRole.ADMINISTRATOR,
         hashed_password=get_password_hash(SYSTEM_ADMIN_PASSWORD),
         api_key=generate_api_key(),
-        address="System Administrator",
+        address=SYSTEM_ADMIN_ADDRESS,
         active=True,
         expired=False,
     )
