@@ -86,8 +86,6 @@ async def register_owner(
             detail="Email already registered",
         )
 
-    assert_account_type_allowed_for_public_registration(owner.account_type.value)
-
     # Individual accounts are always user-role account roots.
     from app.models import Owner as OwnerModel
     from app.models.owner import OwnerRole as ModelOwnerRole
@@ -98,6 +96,10 @@ async def register_owner(
         ModelOwnerRole(owner.role.value),
     )
     owner.role = OwnerRoleEnum(coerced_role.value)
+    assert_account_type_allowed_for_public_registration(
+        owner.account_type.value,
+        role=owner.role,
+    )
 
     owner.account_owner_id = resolve_account_owner_id(
         db,

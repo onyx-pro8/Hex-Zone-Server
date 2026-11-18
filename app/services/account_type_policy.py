@@ -16,6 +16,12 @@ PRIVATE_ACCOUNT_PUBLIC_REGISTRATION_DETAIL = (
     "Private accounts are provisioned by the system administrator only."
 )
 
+PAID_PLAN_PUBLIC_ADMIN_REGISTRATION_DETAIL = (
+    "Create a free Individual account first, then subscribe from Pricing "
+    "or User settings. Administrator registration codes are not used for "
+    "self-serve plan selection."
+)
+
 INDIVIDUAL_ACCOUNT_USER_ROLE_ONLY_DETAIL = (
     "Individual accounts always use the user role and cannot be administrators."
 )
@@ -49,12 +55,30 @@ def is_individual_pro_account_type(account_type: str | AccountType | None) -> bo
     return normalize_pricing_tier_key(value) == "enhanced"
 
 
-def assert_account_type_allowed_for_public_registration(account_type: str) -> None:
-    """Reject self-service registration for the Private (system admin) tier."""
+def assert_account_type_allowed_for_public_registration(
+    account_type: str,
+    *,
+    role: str | OwnerRole | None = None,
+) -> None:
+    """Reject self-service registration for Private and paid admin plans.
+
+    Public signup is free Individual (user) only. Paid plans activate through
+    Stripe after signup. Invited members may still register as ``user`` on a
+    Family / Organization network.
+    """
     if normalize_pricing_tier_key(account_type) == PRICING_TIER_PRIVATE:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=PRIVATE_ACCOUNT_PUBLIC_REGISTRATION_DETAIL,
+        )
+    if role is None:
+        return
+    role_value = role.value if isinstance(role, OwnerRole) else str(role)
+    normalized_role = role_value.strip().lower().replace("-", "_")
+    if normalized_role in {"admin", "administrator"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=PAID_PLAN_PUBLIC_ADMIN_REGISTRATION_DETAIL,
         )
 
 

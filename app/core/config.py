@@ -193,6 +193,10 @@ class Settings(BaseSettings):
     STRIPE_CANCEL_URL: str = "safezonepatrol://subscription?checkout=cancel"
     STRIPE_PORTAL_RETURN_URL: str = "safezonepatrol://subscription"
     MOBILE_SUBSCRIPTION_RETURN_URL: str = "safezonepatrol://subscription"
+    # Comma-separated https origins allowed as Checkout/Portal return URLs from
+    # web clients (e.g. marketing site). Empty = allow any https origin plus
+    # localhost and the mobile deep-link scheme.
+    STRIPE_ALLOWED_RETURN_ORIGINS: str = ""
     STRIPE_PRICE_ENHANCED_MONTHLY: str = ""
     STRIPE_PRICE_ENHANCED_ANNUAL: str = ""
     STRIPE_PRICE_PRIVATE_PLUS_MONTHLY: str = ""

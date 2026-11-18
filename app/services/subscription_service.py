@@ -5,6 +5,7 @@ import logging
 from calendar import monthrange
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -28,6 +29,54 @@ from app.services.plan_entitlements import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_APP_SCHEMES = frozenset({"safezonepatrol", "hexzone", "exp"})
+
+
+def _allowed_return_origins() -> set[str]:
+    raw = (settings.STRIPE_ALLOWED_RETURN_ORIGINS or "").strip()
+    if not raw:
+        return set()
+    return {part.strip().rstrip("/") for part in raw.split(",") if part.strip()}
+
+
+def _normalize_return_url(raw: str | None, *, require_session_placeholder: bool = False) -> str | None:
+    """Validate optional client-supplied Stripe return URLs."""
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    scheme = (parsed.scheme or "").lower()
+    if scheme in _ALLOWED_APP_SCHEMES:
+        if require_session_placeholder and "{CHECKOUT_SESSION_ID}" not in value:
+            joiner = "&" if "?" in value else "?"
+            value = f"{value}{joiner}session_id={{CHECKOUT_SESSION_ID}}"
+        return value
+    if scheme not in {"http", "https"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Return URL must be https, http (localhost), or an app deep link.",
+        )
+    host = (parsed.hostname or "").lower()
+    is_local = host in {"localhost", "127.0.0.1"} or host.endswith(".localhost")
+    if scheme == "http" and not is_local:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="HTTP return URLs are only allowed for localhost.",
+        )
+    origin = f"{scheme}://{parsed.netloc}".rstrip("/")
+    allowed = _allowed_return_origins()
+    if allowed and origin not in allowed and not is_local:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Return URL origin is not allowed for Stripe redirects.",
+        )
+    if require_session_placeholder and "{CHECKOUT_SESSION_ID}" not in value:
+        joiner = "&" if "?" in value else "?"
+        value = f"{value}{joiner}session_id={{CHECKOUT_SESSION_ID}}"
+    return value
 
 
 def resolve_account_root(db: Session, owner: Owner) -> Owner:
@@ -450,6 +499,8 @@ def create_checkout_session(
     caller: Owner,
     plan_key: str,
     billing_interval: str = "monthly",
+    success_url: str | None = None,
+    cancel_url: str | None = None,
 ) -> dict[str, Any]:
     if not caller_may_manage_billing(db, caller):
         raise HTTPException(
@@ -480,8 +531,12 @@ def create_checkout_session(
         db.commit()
 
     price_id = _price_id_for_plan(key, interval)
-    success = (settings.STRIPE_SUCCESS_URL or settings.MOBILE_SUBSCRIPTION_RETURN_URL or "").strip()
-    cancel = (settings.STRIPE_CANCEL_URL or settings.MOBILE_SUBSCRIPTION_RETURN_URL or "").strip()
+    success = _normalize_return_url(success_url, require_session_placeholder=True) or (
+        settings.STRIPE_SUCCESS_URL or settings.MOBILE_SUBSCRIPTION_RETURN_URL or ""
+    ).strip()
+    cancel = _normalize_return_url(cancel_url) or (
+        settings.STRIPE_CANCEL_URL or settings.MOBILE_SUBSCRIPTION_RETURN_URL or ""
+    ).strip()
     if not success:
         success = (
             "safezonepatrol://subscription?checkout=success&session_id={CHECKOUT_SESSION_ID}"
@@ -521,7 +576,12 @@ def create_checkout_session(
     }
 
 
-def create_billing_portal_session(db: Session, *, caller: Owner) -> dict[str, Any]:
+def create_billing_portal_session(
+    db: Session,
+    *,
+    caller: Owner,
+    return_url: str | None = None,
+) -> dict[str, Any]:
     if not caller_may_manage_billing(db, caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -538,13 +598,13 @@ def create_billing_portal_session(db: Session, *, caller: Owner) -> dict[str, An
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No Stripe customer yet. Start a checkout first.",
         )
-    return_url = (
+    portal_return = _normalize_return_url(return_url) or (
         (settings.STRIPE_PORTAL_RETURN_URL or settings.MOBILE_SUBSCRIPTION_RETURN_URL or "").strip()
         or "safezonepatrol://subscription"
     )
     portal = stripe.billing_portal.Session.create(
         customer=sub.stripe_customer_id,
-        return_url=return_url,
+        return_url=portal_return,
     )
     return {"portal_url": portal["url"]}
 

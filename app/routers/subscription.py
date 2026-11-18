@@ -16,6 +16,21 @@ router = APIRouter(prefix="/subscription", tags=["subscription"])
 class CheckoutBody(BaseModel):
     plan_key: str = Field(..., description="e.g. enhanced, private_plus, enhanced_plus_2")
     billing_interval: str = Field("monthly", description="monthly | annual")
+    success_url: str | None = Field(
+        None,
+        description="Optional web/app return URL after paid Checkout (may include {CHECKOUT_SESSION_ID})",
+    )
+    cancel_url: str | None = Field(
+        None,
+        description="Optional web/app return URL when Checkout is cancelled",
+    )
+
+
+class PortalBody(BaseModel):
+    return_url: str | None = Field(
+        None,
+        description="Optional web/app URL after leaving the Stripe Customer Portal",
+    )
 
 
 class ConfirmBody(BaseModel):
@@ -61,6 +76,8 @@ async def create_checkout(
         caller=owner,
         plan_key=body.plan_key,
         billing_interval=body.billing_interval,
+        success_url=body.success_url,
+        cancel_url=body.cancel_url,
     )
 
 
@@ -69,13 +86,18 @@ async def create_checkout(
     summary="Create Stripe Customer Portal session (network admin)",
 )
 async def create_portal(
+    body: PortalBody | None = None,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
-    return subscription_service.create_billing_portal_session(db, caller=owner)
+    return subscription_service.create_billing_portal_session(
+        db,
+        caller=owner,
+        return_url=(body.return_url if body else None),
+    )
 
 
 @router.post(

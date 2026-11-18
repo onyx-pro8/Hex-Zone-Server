@@ -89,14 +89,18 @@ def register_user(db: Session, payload: dict) -> dict:
 
     first_name, last_name = _split_name(payload["name"])
     account_type_value = _to_contract_account_type(payload["accountType"]).lower()
-    assert_account_type_allowed_for_public_registration(account_type_value)
     role_value = coerce_individual_registration_role(
         account_type_value,
         _to_owner_role(payload.get("registrationType")),
     )
+    assert_account_type_allowed_for_public_registration(
+        account_type_value,
+        role=role_value,
+    )
     preallocated_api_key: str | None = None
     registration_tier_level: int | None = None
     if role_value == OwnerRole.ADMINISTRATOR:
+        # Kept for legacy/admin tooling paths; public clients no longer issue codes.
         consumed = require_and_consume_admin_registration_code(
             db,
             payload.get("registrationCode"),
