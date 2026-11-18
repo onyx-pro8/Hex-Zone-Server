@@ -43,10 +43,11 @@ def create_owner(
     from_payload = normalize_reference_id(getattr(owner, "communal_id", None) or "") or None
     reserved = normalize_reference_id(communal_id or "") or from_payload
 
-    # Validate Communal subscription before writing the owner row (solo Exclusive only).
+    # Optional Communal subscription: validate only when a code was provided
+    # (solo Exclusive). Invited members skip this.
     if provision_communal_primary and account_key == "exclusive":
         invited = owner.account_owner_id is not None
-        if not invited:
+        if not invited and reserved:
             from app.services.individual_communal_signup import (
                 assert_exclusive_communal_id_selectable,
             )
@@ -84,13 +85,13 @@ def create_owner(
             apply_individual_communal_subscription,
         )
 
-        # Solo Exclusive must select a Communal ID; invited members skip this.
-        is_solo = int(db_owner.account_owner_id or 0) == int(db_owner.id)
+        # Solo Exclusive may optionally select a Communal ID for a calculated
+        # primary; without one they create secondary zones only.
         apply_individual_communal_subscription(
             db,
             db_owner,
             reserved,
-            required=is_solo,
+            required=False,
         )
     else:
         from app.services.communal_zone_service import assign_owner_communal_id

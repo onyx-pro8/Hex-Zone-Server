@@ -127,15 +127,16 @@ def register_user(db: Session, payload: dict) -> dict:
         if administrator is not None:
             account_type_value = account_type_for_invited_member(administrator).value
     solo_exclusive = account_type_value == "exclusive" and account_owner_id is None
+    # Communal ID is optional for solo Individuals. When provided it must be
+    # selectable; when omitted they get no primary and may create secondaries only.
     if solo_exclusive:
-        from app.services.individual_communal_signup import (
-            assert_exclusive_communal_id_selectable,
-        )
+        raw_communal = payload.get("communalId") or payload.get("communal_id")
+        if str(raw_communal or "").strip():
+            from app.services.individual_communal_signup import (
+                assert_exclusive_communal_id_selectable,
+            )
 
-        assert_exclusive_communal_id_selectable(
-            db,
-            payload.get("communalId") or payload.get("communal_id"),
-        )
+            assert_exclusive_communal_id_selectable(db, raw_communal)
     owner_tier_level: int | None = None
     if account_type_value == "enhanced_plus":
         if role_value == OwnerRole.ADMINISTRATOR:
@@ -184,7 +185,7 @@ def register_user(db: Session, payload: dict) -> dict:
             db,
             owner,
             payload.get("communalId") or payload.get("communal_id"),
-            required=solo_exclusive,
+            required=False,
         )
     try:
         _try_geocode_owner_address(owner)

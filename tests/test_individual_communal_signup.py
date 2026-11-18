@@ -1,4 +1,4 @@
-"""Individual signup with Communal ID → calculated primary + 2 secondaries."""
+"""Individual signup: optional Communal ID → primary; otherwise secondaries only."""
 from __future__ import annotations
 
 import uuid
@@ -202,3 +202,41 @@ async def test_exclusive_register_rejects_unknown_communal(
             },
         )
         assert reg.status_code == 422
+
+
+def test_apply_subscription_optional_when_omitted(test_db):
+    """Solo Individual may skip Communal ID — no primary provisioned."""
+    owner = Owner(
+        email=_unique("nocomm") + "@example.com",
+        zone_id=_unique("indiv-net"),
+        first_name="Solo",
+        last_name="User",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+        hashed_password=_TEST_PASSWORD_HASH,
+        api_key=_unique("key"),
+        address="3 Side St",
+        active=True,
+    )
+    test_db.add(owner)
+    test_db.flush()
+    owner.account_owner_id = owner.id
+    test_db.flush()
+
+    applied = apply_individual_communal_subscription(
+        test_db, owner, None, required=False
+    )
+    assert applied is None
+    assert getattr(owner, "communal_id", None) in (None, "")
+
+    caps = build_capabilities(
+        "user",
+        total_zones=0,
+        admin_primary_count=0,
+        account_type="exclusive",
+        is_invited_member=False,
+    )
+    assert caps.can_create_primary is False
+    assert caps.can_create_secondary is True
+    assert caps.next_zone_is_primary is False
+    assert caps.max_total == INDIVIDUAL_SECONDARY_ZONE_LIMIT

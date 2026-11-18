@@ -1,8 +1,9 @@
-"""Individual (Exclusive) signup: subscribe to a public Communal ID as primary.
+"""Individual (Exclusive) signup: optionally subscribe to a public Communal ID.
 
-Solo Individuals (self sign-up or system-admin QR) select an existing Communal ID.
-All zones tagged with that ID are calculated into **one** owned primary zone.
-They may then create up to ``INDIVIDUAL_SECONDARY_ZONE_LIMIT`` secondary zones.
+Solo Individuals (self sign-up or system-admin QR) may select an existing Communal ID.
+When provided, all zones tagged with that ID are calculated into **one** owned
+primary zone. When omitted, the account has no primary and may only create
+secondary zones (up to ``INDIVIDUAL_SECONDARY_ZONE_LIMIT``).
 """
 from __future__ import annotations
 
@@ -289,7 +290,9 @@ def apply_individual_communal_subscription(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={
                     "error_code": "COMMUNAL_ID_REQUIRED",
-                    "message": "Individual accounts must select a Communal ID.",
+                    "message": (
+                        "A Communal ID is required for this registration path."
+                    ),
                 },
             )
         return None

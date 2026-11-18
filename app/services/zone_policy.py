@@ -195,8 +195,8 @@ def build_capabilities(
     account_key = str(account_type or "").strip().lower()
 
     # Solo Individual = self sign-up OR provisioned by system admin (Private QR):
-    # account root; primary is provisioned from a Communal ID at signup;
-    # up to 2 user-created secondary zones.
+    # account root; optional Communal ID at signup may provision a primary;
+    # up to 2 user-created secondary zones (never create primary themselves).
     # Invited Individual = invited by another account holder (Family/Organization):
     # linked under that admin; secondary quota follows the prior member workflow
     # (typically up to 2 when the admin has 1 primary).

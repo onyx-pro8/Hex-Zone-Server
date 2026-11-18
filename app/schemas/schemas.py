@@ -54,9 +54,10 @@ class OwnerBase(BaseModel):
         None,
         max_length=32,
         description=(
-            "Communal ID selected by Individual (Exclusive) accounts at signup. "
-            "Must be a registered public Communal ID with at least one zone. "
-            "Network admins mint/manage IDs separately; this field is subscription only."
+            "Optional Communal ID for Individual (Exclusive) accounts. "
+            "When set, must be a registered public Communal ID with at least one zone "
+            "(becomes the calculated primary). When omitted, the account has no primary "
+            "and may create secondary zones only. Network admins mint/manage IDs separately."
         ),
     )
     tier_level: Optional[int] = Field(
@@ -130,8 +131,9 @@ class OwnerCreate(BaseModel):
         default=None,
         max_length=32,
         description=(
-            "Required for Individual (exclusive) self-registration: public Communal ID "
-            "whose zones become the account's calculated primary zone."
+            "Optional for Individual (exclusive) self-registration: public Communal ID "
+            "whose zones become the account's calculated primary zone. "
+            "Omit to create with no primary (secondary zones only)."
         ),
         validation_alias=AliasChoices("communal_id", "communalId"),
     )
@@ -638,8 +640,9 @@ class QRRegistrationUse(BaseModel):
         default=None,
         max_length=32,
         description=(
-            "Required for system-administrator Individual invites: public Communal ID "
-            "whose zones become the calculated primary zone."
+            "Optional for system-administrator Individual invites: public Communal ID "
+            "whose zones become the calculated primary zone. "
+            "Omit to create with no primary (secondary zones only)."
         ),
         validation_alias=AliasChoices("communal_id", "communalId"),
     )
