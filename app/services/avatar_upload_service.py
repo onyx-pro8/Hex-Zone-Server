@@ -5,6 +5,9 @@ Catbox (and similar anonymous hosts) often block datacenter IPs with
 Primary path: validate + compress with Pillow and store a data URL on the
 owner row. Optional Catbox upload runs only when ``CATBOX_USERHASH`` is set
 and succeeds; otherwise we keep the local data URL.
+
+Avatars with a solid near-black background (typical logo uploads) are keyed
+to transparency and stored/served as PNG so clients do not show a black disc.
 """
 from __future__ import annotations
 
@@ -30,6 +33,8 @@ MAX_CHAT_EDGE_PX = 1280
 MAX_CHAT_DATA_URL_CHARS = 700_000
 JPEG_QUALITY = 78
 CHAT_JPEG_QUALITY = 72
+BLACK_BG_THRESHOLD = 36
+BLACK_BG_SOFT = 58
 
 
 def parse_image_payload(raw: str) -> Tuple[bytes, str]:
@@ -79,6 +84,95 @@ def parse_image_payload(raw: str) -> Tuple[bytes, str]:
     return data, "image/jpeg" if mime == "image/jpg" else mime
 
 
+def _is_near_black(pixel: tuple[int, ...], *, threshold: int = BLACK_BG_THRESHOLD) -> bool:
+    r, g, b = int(pixel[0]), int(pixel[1]), int(pixel[2])
+    a = int(pixel[3]) if len(pixel) > 3 else 255
+    if a < 8:
+        return True
+    return r <= threshold and g <= threshold and b <= threshold
+
+
+def clear_solid_black_background(img: Image.Image) -> Image.Image:
+    """If corners look like a solid black plate, key near-black pixels to alpha."""
+    rgba = img.convert("RGBA")
+    width, height = rgba.size
+    if width < 2 or height < 2:
+        return rgba
+
+    corners = [
+        rgba.getpixel((0, 0)),
+        rgba.getpixel((width - 1, 0)),
+        rgba.getpixel((0, height - 1)),
+        rgba.getpixel((width - 1, height - 1)),
+    ]
+    if sum(1 for corner in corners if _is_near_black(corner)) < 3:
+        return rgba
+
+    pixels = rgba.load()
+    soft = BLACK_BG_SOFT
+    hard = BLACK_BG_THRESHOLD
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = pixels[x, y]
+            if a == 0:
+                continue
+            brightest = r if r >= g else g
+            if b > brightest:
+                brightest = b
+            if brightest <= hard:
+                pixels[x, y] = (r, g, b, 0)
+            elif brightest < soft:
+                fade = int(a * (brightest - hard) / (soft - hard))
+                pixels[x, y] = (r, g, b, fade)
+    return rgba
+
+
+def _encode_avatar_image(rgba: Image.Image, *, max_chars: int) -> str:
+    """Prefer PNG when transparency exists; otherwise JPEG."""
+    alpha = rgba.getchannel("A")
+    has_transparency = alpha.getextrema()[0] < 250
+    out = io.BytesIO()
+    if has_transparency:
+        rgba.save(out, format="PNG", optimize=True)
+        mime = "image/png"
+    else:
+        rgba.convert("RGB").save(
+            out, format="JPEG", quality=JPEG_QUALITY, optimize=True
+        )
+        mime = "image/jpeg"
+    compressed = out.getvalue()
+    data_url = f"data:{mime};base64," + base64.b64encode(compressed).decode("ascii")
+    if len(data_url) > max_chars:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image is still too large after compression. Crop tighter and try again.",
+        )
+    return data_url
+
+
+def prepare_avatar_image_bytes(data: bytes) -> tuple[bytes, str]:
+    """Decode, clear solid black backgrounds, return (bytes, media_type)."""
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            rgba = clear_solid_black_background(img)
+            rgba.thumbnail((MAX_AVATAR_EDGE_PX, MAX_AVATAR_EDGE_PX), Image.Resampling.LANCZOS)
+            alpha = rgba.getchannel("A")
+            has_transparency = alpha.getextrema()[0] < 250
+            out = io.BytesIO()
+            if has_transparency:
+                rgba.save(out, format="PNG", optimize=True)
+                return out.getvalue(), "image/png"
+            rgba.convert("RGB").save(
+                out, format="JPEG", quality=JPEG_QUALITY, optimize=True
+            )
+            return out.getvalue(), "image/jpeg"
+    except UnidentifiedImageError:
+        return data, "image/jpeg"
+    except Exception as exc:
+        logger.warning("Avatar prepare failed: %s", exc)
+        return data, "image/jpeg"
+
+
 def compress_to_jpeg_data_url(
     data: bytes,
     *,
@@ -116,16 +210,34 @@ def compress_to_jpeg_data_url(
 
 
 def compress_avatar_to_data_url(data: bytes) -> str:
-    """Resize/compress to a JPEG data URL suitable for DB + mobile Image."""
-    return compress_to_jpeg_data_url(
-        data,
-        max_edge_px=MAX_AVATAR_EDGE_PX,
-        quality=JPEG_QUALITY,
-        max_chars=MAX_STORED_DATA_URL_CHARS,
-    )
+    """Resize, clear solid black backgrounds, store PNG when alpha is needed."""
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            rgba = clear_solid_black_background(img)
+            rgba.thumbnail((MAX_AVATAR_EDGE_PX, MAX_AVATAR_EDGE_PX), Image.Resampling.LANCZOS)
+            return _encode_avatar_image(rgba, max_chars=MAX_STORED_DATA_URL_CHARS)
+    except UnidentifiedImageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not decode image. Try another photo.",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Avatar compress failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not process image. Try another photo.",
+        ) from exc
 
 
-async def _try_catbox_upload(jpeg_bytes: bytes, userhash: str) -> str | None:
+async def _try_catbox_upload(
+    image_bytes: bytes,
+    userhash: str,
+    *,
+    filename: str,
+    content_type: str,
+) -> str | None:
     """Best-effort Catbox upload. Returns HTTPS URL or None on failure."""
     form: dict[str, str] = {"reqtype": "fileupload", "userhash": userhash}
     try:
@@ -137,7 +249,7 @@ async def _try_catbox_upload(jpeg_bytes: bytes, userhash: str) -> str | None:
             response = await client.post(
                 CATBOX_UPLOAD_URL,
                 data=form,
-                files={"fileToUpload": ("avatar.jpg", jpeg_bytes, "image/jpeg")},
+                files={"fileToUpload": (filename, image_bytes, content_type)},
             )
     except httpx.HTTPError as exc:
         logger.warning("Catbox unreachable: %s", exc)
@@ -161,15 +273,33 @@ async def _try_catbox_upload(jpeg_bytes: bytes, userhash: str) -> str | None:
     return body
 
 
-def _jpeg_bytes_from_data_url(data_url: str) -> bytes:
-    raw = data_url.split(",", 1)[1]
-    return base64.b64decode(raw)
+def _bytes_and_mime_from_data_url(data_url: str) -> tuple[bytes, str, str]:
+    match = re.match(
+        r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$",
+        data_url,
+        flags=re.DOTALL,
+    )
+    if not match:
+        raw = data_url.split(",", 1)[1]
+        return base64.b64decode(raw), "image/jpeg", "avatar.jpg"
+    mime = match.group(1).lower()
+    if mime == "image/jpg":
+        mime = "image/jpeg"
+    data = base64.b64decode(match.group(2))
+    filename = "avatar.png" if mime == "image/png" else "avatar.jpg"
+    return data, mime, filename
 
 
 async def _persist_compressed_image(data_url: str, *, log_label: str) -> str:
     userhash = (settings.CATBOX_USERHASH or "").strip()
     if userhash:
-        hosted = await _try_catbox_upload(_jpeg_bytes_from_data_url(data_url), userhash)
+        image_bytes, content_type, filename = _bytes_and_mime_from_data_url(data_url)
+        hosted = await _try_catbox_upload(
+            image_bytes,
+            userhash,
+            filename=filename,
+            content_type=content_type,
+        )
         if hosted:
             logger.info("%s uploaded to Catbox: %s", log_label, hosted)
             return hosted
@@ -218,7 +348,11 @@ def client_avatar_url(base_url: str, owner_id: int, avatar_url: str | None) -> s
 
 
 def avatar_bytes_and_media_type(avatar_url: str | None) -> tuple[bytes, str] | None:
-    """Decode a stored avatar into raw bytes for HTTP image responses."""
+    """Decode a stored avatar into raw bytes for HTTP image responses.
+
+    Solid black logo plates are keyed to transparency so existing stored JPEG
+    avatars also render without a black disc.
+    """
     raw = (avatar_url or "").strip()
     if not raw:
         return None
@@ -230,12 +364,11 @@ def avatar_bytes_and_media_type(avatar_url: str | None) -> tuple[bytes, str] | N
         )
         if not match:
             return None
-        mime = match.group(1).lower()
         try:
             data = base64.b64decode(match.group(2), validate=False)
         except Exception:
             return None
         if not data:
             return None
-        return data, mime if mime != "image/jpg" else "image/jpeg"
+        return prepare_avatar_image_bytes(data)
     return None

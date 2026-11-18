@@ -39,7 +39,10 @@ from app.services.account_type_policy import (
     is_system_administrator,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
-from app.services.avatar_upload_service import avatar_bytes_and_media_type
+from app.services.avatar_upload_service import (
+    avatar_bytes_and_media_type,
+    prepare_avatar_image_bytes,
+)
 router = APIRouter(prefix="/owners", tags=["owners"])
 
 
@@ -323,15 +326,11 @@ async def get_owner_avatar(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Avatar not found",
             ) from None
-        media_type = upstream.headers.get("content-type") or "image/jpeg"
-        if ";" in media_type:
-            media_type = media_type.split(";", 1)[0].strip()
-        if not media_type.startswith("image/"):
-            media_type = "image/jpeg"
+        data, media_type = prepare_avatar_image_bytes(upstream.content)
         return Response(
-            content=upstream.content,
+            content=data,
             media_type=media_type,
-            headers={"Cache-Control": "private, max-age=300"},
+            headers={"Cache-Control": "private, max-age=60"},
         )
     decoded = avatar_bytes_and_media_type(raw)
     if not decoded:
@@ -340,7 +339,7 @@ async def get_owner_avatar(
     return Response(
         content=data,
         media_type=media_type,
-        headers={"Cache-Control": "private, max-age=300"},
+        headers={"Cache-Control": "private, max-age=60"},
     )
 
 
