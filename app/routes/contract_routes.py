@@ -302,6 +302,7 @@ class MemberListItemResponse(BaseModel):
     email: EmailStr
     account_owner_id: int
     role: Literal["administrator", "user"]
+    platform_staff_role: str = "none"
     account_type: Literal[
         "private", "private_plus", "exclusive", "enhanced", "enhanced_plus"
     ]

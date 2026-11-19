@@ -385,7 +385,7 @@ async def generate_qr_registration(
 
     # System-admin tokens provision new Exclusive network admins (not members),
     # so invited-user capacity does not apply.
-    if not has_system_access(owner):
+    if not is_system_administrator(owner):
         assert_admin_user_member_capacity(db, owner)
 
     qr = qr_crud.create_qr_registration(
@@ -429,7 +429,7 @@ async def export_qr_invites_xlsx(
         )
     # Multi-QR Excel download is restricted to the platform system administrator.
     # Network (zone) admins may generate a single invite QR but cannot export/download.
-    if not has_system_access(owner):
+    if not is_system_administrator(owner):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the system administrator can download invite QR workbooks",
@@ -603,7 +603,7 @@ async def preview_qr_registration(
 ):
     """Return invite kind for the join UI."""
     _, owner = _load_valid_qr_and_inviter(db, token.strip())
-    if has_system_access(owner):
+    if is_system_administrator(owner):
         return QRRegistrationPreview(
             invite_kind="new_network_admin",
             account_type="exclusive",
@@ -672,7 +672,7 @@ async def join_with_qr(
 
     from app.schemas.schemas import OwnerCreate, AccountTypeEnum, OwnerRoleEnum
 
-    if has_system_access(owner):
+    if is_system_administrator(owner):
         new_zone_id = (qr_data.zone_id or "").strip()
         if not new_zone_id:
             raise HTTPException(

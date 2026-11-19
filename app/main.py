@@ -1,4 +1,5 @@
 """Main FastAPI application."""
+import utils.session
 import logging
 import threading
 import time
