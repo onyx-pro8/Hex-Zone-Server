@@ -875,6 +875,29 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
         is_guest,
     )
     connection_id = await ws_manager.connect(user_id, websocket)
+    presence_task: asyncio.Task | None = None
+    if not is_guest:
+        from app.services.member_presence_service import touch_owner_client_presence
+
+        async def _keep_member_presence_fresh() -> None:
+            while True:
+                await asyncio.sleep(20)
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, touch_owner_client_presence, int(user_id)
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to refresh member presence: user_id=%s", user_id
+                    )
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, touch_owner_client_presence, int(user_id)
+            )
+        except Exception:
+            logger.exception("Failed to mark member presence on connect: user_id=%s", user_id)
+        presence_task = asyncio.create_task(_keep_member_presence_fresh())
     if ws_manager.count_connections_for_user(user_id) == 1:
         try:
             if is_guest and guest_id:
@@ -968,6 +991,10 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
                 continue
 
             message_type = data.get("type")
+            if message_type == "PING":
+                await websocket.send_json({"type": "PONG", "data": {}})
+                continue
+
             if message_type == "LOCATION_UPDATE":
                 if is_guest:
                     await websocket.send_json(
@@ -1041,6 +1068,12 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        if presence_task is not None:
+            presence_task.cancel()
+            try:
+                await presence_task
+            except asyncio.CancelledError:
+                pass
         disconnected_user = await ws_manager.disconnect(connection_id)
         if (
             disconnected_user

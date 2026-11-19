@@ -58,11 +58,39 @@ async def broadcast_member_presence(owner_id: int, online: bool) -> None:
     )
 
 
-async def publish_member_presence(owner_id: int, online: bool) -> None:
-    """Persist device flags and fan out MEMBER_PRESENCE to all connected clients."""
+def touch_owner_client_presence(owner_id: int) -> None:
+    """Refresh phone/browser rows so other API workers can see this login.
+
+    A socket lives on one process. Closing a different tab must not clear the
+    phone's online flag; callers only use this to mark a live session fresh.
+    """
+    db = session_maker()
     try:
-        sync_owner_devices_online(int(owner_id), bool(online))
+        now = datetime.utcnow()
+        devices = db.query(Device).filter(Device.owner_id == int(owner_id)).all()
+        for device in devices:
+            if not is_client_session_hid(device.hid):
+                continue
+            device.is_online = True
+            device.last_seen = now
+        db.commit()
     except Exception:
-        # Presence broadcast should still fire even if device rows fail.
-        pass
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+async def publish_member_presence(owner_id: int, online: bool) -> None:
+    """Fan out MEMBER_PRESENCE. Only the online edge refreshes device rows.
+
+    Going offline clears the in-memory socket only. Wiping every device here
+    marked a still-open phone offline whenever the marketing tab disconnected.
+    """
+    if online:
+        try:
+            sync_owner_devices_online(int(owner_id), True)
+        except Exception:
+            # Presence broadcast should still fire even if device rows fail.
+            pass
     await broadcast_member_presence(int(owner_id), bool(online))
