@@ -1,6 +1,8 @@
 """Primary vs secondary acceptable-zone message routing for a network."""
 from __future__ import annotations
 
+import json
+
 from sqlalchemy.orm import Session
 
 from app.domain.message_types import CanonicalMessageType
@@ -179,9 +181,126 @@ def list_active_compose_zone_rows(db: Session) -> list[Zone]:
     )
 
 
+def _zone_config_dict(zone: Zone) -> dict:
+    params = getattr(zone, "parameters", None)
+    if not isinstance(params, dict):
+        return {}
+    config = params.get("config")
+    return config if isinstance(config, dict) else {}
+
+
+def _is_communal_calculated_copy(zone: Zone) -> bool:
+    """True for an Individual primary cloned from Communal ID source zones."""
+    return bool(_zone_config_dict(zone).get("is_communal_primary"))
+
+
+def _communal_source_ids(zone: Zone) -> tuple[int, ...]:
+    raw = _zone_config_dict(zone).get("source_zone_ids") or []
+    if not isinstance(raw, list):
+        return ()
+    ids: list[int] = []
+    for value in raw:
+        try:
+            record_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if record_id >= 1 and record_id not in ids:
+            ids.append(record_id)
+    return tuple(sorted(ids))
+
+
+def _h3_signature(zone: Zone) -> tuple[str, ...]:
+    seen: set[str] = set()
+    cells: list[str] = []
+    raw_lists = [getattr(zone, "h3_cells", None) or []]
+    config = _zone_config_dict(zone)
+    for key in ("h3_cells", "h3Cells"):
+        raw_lists.append(config.get(key) or [])
+    for raw in raw_lists:
+        if not isinstance(raw, list):
+            continue
+        for cell in raw:
+            text = str(cell or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                cells.append(text)
+    return tuple(sorted(cells))
+
+
+def _polygon_signature(zone: Zone) -> str:
+    params = getattr(zone, "parameters", None)
+    if not isinstance(params, dict):
+        return ""
+    geometry = params.get("geometry") if isinstance(params.get("geometry"), dict) else {}
+    polygon = geometry.get("geo_fence_polygon") if isinstance(geometry, dict) else None
+    if not isinstance(polygon, dict):
+        return ""
+    coordinates = polygon.get("coordinates")
+    if coordinates is None:
+        return ""
+    try:
+        return json.dumps(coordinates, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _compose_zone_dedupe_key(zone: Zone) -> tuple:
+    """Identity for one visible compose zone.
+
+    Calculated communal primaries that share source rows are one zone. Otherwise
+    the same name plus the same H3 cells or polygon is one zone, including
+    copies stored under a different network id. Rows with no geometry only
+    collapse inside a single network.
+    """
+    if _is_communal_calculated_copy(zone):
+        sources = _communal_source_ids(zone)
+        if sources:
+            return ("communal-sources", sources)
+    name = str(getattr(zone, "name", "") or "").strip().casefold()
+    cells = _h3_signature(zone)
+    polygon = _polygon_signature(zone)
+    if cells or polygon:
+        return ("coverage", name, cells, polygon)
+    network = str(getattr(zone, "zone_id", "") or "").strip().casefold()
+    return ("network-name", network, name)
+
+
+def _compose_zone_rank(zone: Zone) -> tuple:
+    """Prefer the defining zone over a calculated copy, then primary, then lowest id."""
+    communal = 1 if _is_communal_calculated_copy(zone) else 0
+    primary = 0 if bool(getattr(zone, "is_primary", False)) else 1
+    return (communal, primary, int(getattr(zone, "id", 0) or 0))
+
+
+def dedupe_compose_zone_rows(zones: list[Zone]) -> list[Zone]:
+    """Drop repeated compose zones that are copies of the same acceptable zone.
+
+    Individual signup stores a new primary whose name and geometry are copied
+    from the Communal ID's source zones. Containment then matches the original
+    and every subscriber copy, so compose listed the same zone once per copy.
+    """
+    present_ids = {int(getattr(zone, "id", 0) or 0) for zone in zones}
+    visible: list[Zone] = []
+    for zone in zones:
+        if _is_communal_calculated_copy(zone):
+            sources = _communal_source_ids(zone)
+            if sources and any(source_id in present_ids for source_id in sources):
+                continue
+        visible.append(zone)
+
+    chosen: dict[tuple, Zone] = {}
+    for zone in visible:
+        key = _compose_zone_dedupe_key(zone)
+        current = chosen.get(key)
+        if current is None or _compose_zone_rank(zone) < _compose_zone_rank(current):
+            chosen[key] = zone
+    return list(chosen.values())
+
+
 def list_all_compose_zones(db: Session) -> list[dict]:
     """Every active zone, for system-admin compose (location not required)."""
-    options = [_compose_option_from_zone(db, zone) for zone in list_active_compose_zone_rows(db)]
+    rows = dedupe_compose_zone_rows(list_active_compose_zone_rows(db))
+    options = [_compose_option_from_zone(db, zone) for zone in rows]
     options.sort(key=lambda row: (str(row.get("label") or ""), int(row["zone_record_id"])))
     return options
 
@@ -193,14 +312,18 @@ def list_matched_compose_zones(
     longitude: float,
     network_zone_id: str | None = None,
 ) -> list[dict]:
-    """Named acceptable-zone geometries that contain the evaluation point."""
+    """Named acceptable-zone geometries that contain the evaluation point.
+
+    Repeated rows for the same zone (communal calculated copies, or the same
+    name and coverage stored more than once) are returned once.
+    """
     zone_record_ids = evaluate_zone_records_containing_point(db, float(latitude), float(longitude))
     zone_rows = _zone_rows_for_records(db, zone_record_ids)
     network_filter = (network_zone_id or "").strip()
     if network_filter:
         zone_rows = [z for z in zone_rows if (z.zone_id or "").strip() == network_filter]
 
-    options = [_compose_option_from_zone(db, zone) for zone in zone_rows]
+    options = [_compose_option_from_zone(db, zone) for zone in dedupe_compose_zone_rows(zone_rows)]
     options.sort(key=lambda row: (str(row.get("label") or ""), int(row["zone_record_id"])))
     return options
 

@@ -1038,6 +1038,86 @@ def test_list_matched_compose_zones_and_preview(net_db, monkeypatch):
     assert {row["id"] for row in preview["members"]} == {member_a.id}
 
 
+def test_compose_zones_collapse_same_zone_copies(net_db, monkeypatch):
+    """Communal calculated primaries and identical coverage must list once."""
+    source = SimpleNamespace(
+        id=501,
+        zone_id="NET-A",
+        creator_id=1,
+        owner_id=1,
+        name="Park A",
+        is_primary=True,
+        active=True,
+        h3_cells=["8928308280fffff"],
+        parameters={"config": {}},
+    )
+    copy_a = SimpleNamespace(
+        id=777,
+        zone_id="NET-SUB-1",
+        creator_id=2,
+        owner_id=2,
+        name="Park A",
+        is_primary=True,
+        active=True,
+        h3_cells=["8928308280fffff"],
+        parameters={
+            "config": {
+                "is_communal_primary": True,
+                "source_zone_ids": [501],
+            }
+        },
+    )
+    copy_b = SimpleNamespace(
+        id=778,
+        zone_id="NET-SUB-2",
+        creator_id=3,
+        owner_id=3,
+        name="Park A",
+        is_primary=True,
+        active=True,
+        h3_cells=["8928308280fffff"],
+        parameters={
+            "config": {
+                "is_communal_primary": True,
+                "source_zone_ids": [501],
+            }
+        },
+    )
+    other = SimpleNamespace(
+        id=502,
+        zone_id="NET-B",
+        creator_id=4,
+        owner_id=4,
+        name="Park B",
+        is_primary=True,
+        active=True,
+        h3_cells=["8928308280fffff"],
+        parameters={"config": {}},
+    )
+    monkeypatch.setattr(
+        nzp,
+        "evaluate_zone_records_containing_point",
+        lambda db, lat, lon: [501, 777, 778, 502],
+    )
+    monkeypatch.setattr(
+        nzp,
+        "_zone_rows_for_records",
+        lambda db, ids: [source, copy_a, copy_b, other],
+    )
+
+    zones = nzp.list_matched_compose_zones(net_db, latitude=47.61, longitude=-122.33)
+    assert {row["zone_record_id"] for row in zones} == {501, 502}
+
+    monkeypatch.setattr(
+        nzp,
+        "list_active_compose_zone_rows",
+        lambda db: [copy_a, copy_b],
+    )
+    listed = nzp.list_all_compose_zones(net_db)
+    assert len(listed) == 1
+    assert listed[0]["zone_record_id"] == 777
+
+
 def test_system_admin_lists_and_sends_to_any_zone_without_location(net_db, monkeypatch):
     """Private system admin can pick any zone and fan-out as if inside it."""
     net_a = "NET-PA"
