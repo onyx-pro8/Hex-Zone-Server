@@ -893,6 +893,13 @@ class ZoneMessageResponse(BaseModel):
             "guest API recently (**`guest_access_sessions.last_seen_at`**)."
         ),
     )
+    sender_online: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether the member sender currently has a live socket or a fresh phone/browser "
+            "session. Null when the sender is withheld."
+        ),
+    )
     permission_visibility: Optional[Literal["direct", "zone_pending_broadcast"]] = Field(
         default=None,
         description=(

@@ -15,6 +15,7 @@ Server sends **`type`** + **`data`** envelopes. Common **`type`** values:
 - **`BLOCKS_CHANGED`** — block-rule create/delete for the owning user
 - **`SESSION_REVOKED`** — another device claimed the account session
 - **`MEMBER_PRESENCE`** — `{ owner_id, online }` when a member connects/disconnects
+- **`PRESENCE_SNAPSHOT`** — `{ online_owner_ids }` sent to a member socket when it connects
 - **`LOCATION_UPDATE_ACK`** — ack after a successful **`LOCATION_UPDATE`**
 - **`guest_zone_message`** — guest-thread CHAT push (member or guest clients)
 - **`GUEST_PRESENCE`** — `{ guest_id, online }` when a guest connects/disconnects WS or hits `/api/guest/*`
@@ -56,6 +57,24 @@ def _coords_from_frame(data: dict) -> tuple[float, float] | None:
     if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
         return None
     return float(latitude), float(longitude)
+
+
+async def _send_presence_snapshot(websocket: WebSocket) -> None:
+    """Tell this socket who is online right now, including accounts outside /members."""
+
+    def _load() -> list[int]:
+        from app.services.member_presence_service import list_online_owner_ids
+
+        db = session_maker()
+        try:
+            return list_online_owner_ids(db)
+        finally:
+            db.close()
+
+    online_owner_ids = await asyncio.get_running_loop().run_in_executor(None, _load)
+    await websocket.send_json(
+        {"type": "PRESENCE_SNAPSHOT", "data": {"online_owner_ids": online_owner_ids}}
+    )
 
 
 async def _publish_guest_ws_presence(guest_id: str, *, online: bool) -> None:
@@ -914,6 +933,11 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
                 await publish_member_presence(int(user_id), True)
         except Exception:
             logger.exception("Failed to publish online presence: user_id=%s", user_id)
+    if not is_guest:
+        try:
+            await _send_presence_snapshot(websocket)
+        except Exception:
+            logger.exception("Failed to send presence snapshot: user_id=%s", user_id)
     # Replay an in-flight call so late-joining guests/admins still see the card.
     try:
         if is_guest and guest_id:

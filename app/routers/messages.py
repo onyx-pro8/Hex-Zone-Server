@@ -27,12 +27,33 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 logger = logging.getLogger(__name__)
 
 
+def _attach_sender_online(
+    db: Session,
+    responses: list[ZoneMessageResponse],
+) -> list[ZoneMessageResponse]:
+    """Fill sender_online for rows that did not already resolve it."""
+    from app.services.member_presence_service import owner_appears_online
+
+    cache: dict[int, bool] = {}
+    filled: list[ZoneMessageResponse] = []
+    for item in responses:
+        if item.sender_online is not None or item.sender_id is None:
+            filled.append(item)
+            continue
+        sender_id = int(item.sender_id)
+        if sender_id not in cache:
+            cache[sender_id] = owner_appears_online(db, sender_id)
+        filled.append(item.model_copy(update={"sender_online": cache[sender_id]}))
+    return filled
+
+
 def _finalize_inbox_responses(
     db: Session,
     owner_id: int,
     responses: list[ZoneMessageResponse],
 ) -> list[ZoneMessageResponse]:
     visible = message_block_service.filter_zone_message_responses_for_viewer(db, owner_id, responses)
+    visible = _attach_sender_online(db, visible)
     return alarm_read_service.enrich_responses_with_alarm_reads(visible, owner_id, db)
 
 

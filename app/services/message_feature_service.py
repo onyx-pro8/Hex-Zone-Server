@@ -316,6 +316,34 @@ def resolve_geo_propagation_recipient_owner_ids(
     )
 
 
+def _private_reply_to_system_admin(
+    db: Session,
+    sender: Owner,
+    receiver_owner_id: int,
+) -> tuple[list[str], list[int], dict] | None:
+    """Allow a private reply to the system administrator without zone routing.
+
+    Ordinary member-to-member PRIVATE messages stay on the zone pool. This
+    exception is only when the receiver account type is the system admin.
+    """
+    if is_system_administrator(sender):
+        return None
+    receiver = db.get(Owner, int(receiver_owner_id))
+    if receiver is None or not bool(receiver.active):
+        return None
+    if not is_system_administrator(receiver):
+        return None
+    zone_id = (sender.zone_id or "").strip()
+    return (
+        [zone_id] if zone_id else [],
+        [int(receiver.id)],
+        {
+            "strategy": "private_reply_to_system_admin",
+            "geo_evaluation_source": "system_admin_reply",
+        },
+    )
+
+
 def _assert_private_receiver_reachable(
     db: Session,
     sender: Owner,
@@ -667,6 +695,13 @@ def _zone_based_recipients(
         target_zone_record_ids=list(payload.zone_record_ids or []) or None,
     )
     exclude_id = sender.id if exclude_sender_from_recipients else None
+
+    # A member can always answer a private thread with the system administrator,
+    # even when they are outside the normal primary/secondary zone pool.
+    if scope == MessageScope.PRIVATE and payload.receiver_owner_id is not None:
+        admin_reply = _private_reply_to_system_admin(db, sender, int(payload.receiver_owner_id))
+        if admin_reply is not None:
+            return admin_reply
 
     if is_system_administrator(sender):
         sender_zone_ids, sender_zone_record_ids, recipient_owner_ids, zone_meta = (

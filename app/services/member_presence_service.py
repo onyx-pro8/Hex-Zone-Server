@@ -89,13 +89,30 @@ def touch_owner_client_presence(owner_id: int) -> bool:
         db.close()
 
 
+def list_online_owner_ids(db: Session) -> list[int]:
+    """Owners with a live socket or a fresh phone/browser session."""
+    online = set(ws_manager.connected_member_owner_ids())
+    devices = db.query(Device).filter(Device.is_online.is_(True)).all()
+    for device in devices:
+        if device.owner_id is None:
+            continue
+        if is_client_session_hid(device.hid) and device_presence_is_active(device):
+            online.add(int(device.owner_id))
+    return sorted(online)
+
+
 async def publish_member_presence(owner_id: int, online: bool) -> None:
     """Fan out MEMBER_PRESENCE and store the same flag on client sessions.
 
     GET /members reads those rows. Leaving them online after the socket closed
     kept the web badge green for up to 30 minutes while the phone already
     showed the MEMBER_PRESENCE offline event.
+
+    A disconnect on one tab must not mark the account offline while another
+    socket for the same owner is still open.
     """
+    if not online and ws_manager.is_user_connected(owner_id):
+        return
     try:
         sync_owner_devices_online(int(owner_id), bool(online))
     except Exception:

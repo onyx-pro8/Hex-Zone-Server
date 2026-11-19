@@ -61,6 +61,19 @@ class WebSocketManager:
         uid = str(user_id)
         return sum(1 for state in self._connections.values() if state.user_id == uid)
 
+    def connected_member_owner_ids(self) -> list[int]:
+        """Member owner ids with at least one open socket on this process."""
+        ids: set[int] = set()
+        for state in self._connections.values():
+            raw = str(state.user_id)
+            if raw.startswith("guest:"):
+                continue
+            try:
+                ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        return sorted(ids)
+
     async def subscribe(self, connection_id: str, zone_ids: list[str]) -> set[str]:
         normalized = {str(zone_id).strip() for zone_id in zone_ids if str(zone_id).strip()}
         async with self._lock:
