@@ -1,5 +1,6 @@
 """Authentication business logic for contract endpoints."""
 import logging
+import secrets
 
 from fastapi import HTTPException, status
 from sqlalchemy import func
@@ -70,6 +71,24 @@ def _to_owner_role(registration_type: str | None) -> OwnerRole:
     )
 
 
+def _submitted_network_id(payload: dict) -> str:
+    """Network ID from the signup body, exactly as entered (trimmed).
+
+    Accept both the contract name (``zoneId``) and the legacy name (``zone_id``).
+    An empty value is not replaced with the email — that substitution made the
+    saved network ID different from the one the user typed.
+    """
+    raw = payload.get("zoneId")
+    if raw is None or not str(raw).strip():
+        raw = payload.get("zone_id")
+    return str(raw or "").strip()
+
+
+def _fallback_network_id() -> str:
+    """New-network id used only when the client sent none."""
+    return f"Network-{secrets.token_hex(3).upper()}"
+
+
 def _get_map_center(db: Session, owner_id: int) -> dict | None:
     """Return the owner's registered home map center (geocoded from `address`)."""
     owner = db.get(Owner, owner_id)
@@ -109,23 +128,31 @@ def register_user(db: Session, payload: dict) -> dict:
         )
         preallocated_api_key = consumed.api_key
         registration_tier_level = consumed.tier_level
+    submitted_network = _submitted_network_id(payload)
     account_owner_id = resolve_account_owner_id(
         db,
         role=role_value.value,
         requested_account_owner_id=payload.get("accountOwnerId"),
-        zone_id=payload.get("zoneId") or f"user-{payload['email']}",
+        zone_id=submitted_network,
         account_type=account_type_value,
         administrator_email=payload.get("administratorEmail")
         or payload.get("administrator_email"),
     )
-    # Linked members take the administrator's invited-member plan. The card
-    # selected during signup is only the caller's guess.
+    # Linked members take the administrator's invited-member plan and that
+    # network's ID. The card selected during signup is only the caller's guess.
+    # A new network keeps the ID the user entered.
+    stored_network = submitted_network
     if role_value == OwnerRole.USER and account_owner_id is not None:
         from app.services.account_type_policy import account_type_for_invited_member
 
         administrator = db.get(Owner, account_owner_id)
         if administrator is not None:
             account_type_value = account_type_for_invited_member(administrator).value
+            canonical = str(administrator.zone_id or "").strip()
+            if canonical:
+                stored_network = canonical
+    if not stored_network:
+        stored_network = _fallback_network_id()
     solo_exclusive = account_type_value == "exclusive" and account_owner_id is None
     # Communal ID is optional for solo Individuals. When provided it must be
     # selectable; when omitted they get no primary and may create secondaries only.
@@ -159,7 +186,7 @@ def register_user(db: Session, payload: dict) -> dict:
     owner = Owner(
         email=payload["email"],
         username=username,
-        zone_id=payload.get("zoneId") or f"user-{payload['email']}",
+        zone_id=stored_network,
         first_name=first_name,
         last_name=last_name,
         account_type=account_type_value,

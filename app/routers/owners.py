@@ -104,6 +104,7 @@ async def register_owner(
         role=owner.role,
     )
 
+    owner.zone_id = (owner.zone_id or "").strip()
     owner.account_owner_id = resolve_account_owner_id(
         db,
         role=owner.role.value,
@@ -113,13 +114,17 @@ async def register_owner(
         administrator_email=owner.administrator_email,
     )
 
-    # Invited users inherit the Family or Organization account type.
+    # Invited users inherit the Family or Organization account type and the
+    # network ID of the administrator they joined.
     if owner.role == OwnerRoleEnum.USER and owner.account_owner_id is not None:
         administrator = db.get(OwnerModel, owner.account_owner_id)
         if administrator is not None:
             member_type = account_type_for_invited_member(administrator)
             owner.account_type = AccountTypeEnum(member_type.value)
             owner.role = OwnerRoleEnum.USER
+            canonical = str(administrator.zone_id or "").strip()
+            if canonical:
+                owner.zone_id = canonical
 
     preallocated_api_key: str | None = None
     if owner.role == OwnerRoleEnum.ADMINISTRATOR:

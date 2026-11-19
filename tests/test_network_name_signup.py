@@ -306,3 +306,59 @@ async def test_register_endpoints_link_user_by_network_id(test_db, override_get_
         body = contract.json()
         payload = body.get("data", body)
         assert payload["account_owner_id"] == admin_id
+        assert payload["zone_id"] == network
+
+
+def test_signup_stores_the_network_id_that_was_entered(test_db, monkeypatch):
+    """A typed network ID is saved as-is, not rewritten to user-{email}."""
+    monkeypatch.setattr(
+        "app.services.auth_service.get_password_hash", lambda _password: "hashed"
+    )
+    monkeypatch.setattr(
+        "app.services.auth_service.sync_owner_home_from_address",
+        lambda _owner: None,
+    )
+    from app.services.auth_service import register_user
+
+    created = register_user(
+        test_db,
+        {
+            "name": "Tester One",
+            "email": "tester1@test.com",
+            "password": "SecurePassword123",
+            "accountType": "EXCLUSIVE",
+            "registrationType": "USER",
+            "zone_id": "NORTH-LOOP",
+            "address": "350 Fifth Avenue, New York",
+        },
+    )
+    assert created["zone_id"] == "NORTH-LOOP"
+    assert "tester1@test.com" not in created["zone_id"].lower()
+
+
+def test_joined_member_keeps_the_network_id(test_db, monkeypatch):
+    """Joining stores the network's ID, including when the typed case differs."""
+    monkeypatch.setattr(
+        "app.services.auth_service.get_password_hash", lambda _password: "hashed"
+    )
+    monkeypatch.setattr(
+        "app.services.auth_service.sync_owner_home_from_address",
+        lambda _owner: None,
+    )
+    from app.services.auth_service import register_user
+
+    _admin(test_db, email="ada@example.com", zone_id="Family-Net")
+    created = register_user(
+        test_db,
+        {
+            "name": "Mia Member",
+            "email": "mia-join@example.com",
+            "password": "SecurePassword123",
+            "accountType": "PRIVATE_PLUS",
+            "registrationType": "USER",
+            "zoneId": "family-net",
+            "address": "2 Member St",
+        },
+    )
+    assert created["zone_id"] == "Family-Net"
+    assert not created["zone_id"].lower().startswith("user-")

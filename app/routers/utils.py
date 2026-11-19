@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.schemas import (
@@ -684,7 +685,7 @@ async def join_with_qr(
         conflict = (
             db.query(Owner)
             .filter(
-                Owner.zone_id == new_zone_id,
+                func.lower(func.trim(Owner.zone_id)) == new_zone_id.lower(),
                 Owner.active.is_(True),
             )
             .first()
