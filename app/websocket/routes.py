@@ -883,9 +883,15 @@ async def _zone_websocket_session(websocket: WebSocket) -> None:
             while True:
                 await asyncio.sleep(20)
                 try:
-                    await asyncio.get_running_loop().run_in_executor(
+                    needs_announce = await asyncio.get_running_loop().run_in_executor(
                         None, touch_owner_client_presence, int(user_id)
                     )
+                    if needs_announce and ws_manager.is_user_connected(user_id):
+                        from app.services.member_presence_service import (
+                            publish_member_presence,
+                        )
+
+                        await publish_member_presence(int(user_id), True)
                 except Exception:
                     logger.exception(
                         "Failed to refresh member presence: user_id=%s", user_id

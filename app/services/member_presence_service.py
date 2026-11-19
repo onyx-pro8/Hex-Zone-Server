@@ -58,22 +58,30 @@ async def broadcast_member_presence(owner_id: int, online: bool) -> None:
     )
 
 
-def touch_owner_client_presence(owner_id: int) -> None:
+def touch_owner_client_presence(owner_id: int) -> bool:
     """Refresh phone/browser rows so other API workers can see this login.
 
-    A socket lives on one process. Closing a different tab must not clear the
-    phone's online flag; callers only use this to mark a live session fresh.
+    Returns True when those rows were not already online, so the caller can
+    rebroadcast MEMBER_PRESENCE. A socket lives on one process; another
+    worker may have cleared the rows when a different tab disconnected.
     """
     db = session_maker()
     try:
         now = datetime.utcnow()
         devices = db.query(Device).filter(Device.owner_id == int(owner_id)).all()
+        was_online = False
+        touched = False
         for device in devices:
             if not is_client_session_hid(device.hid):
                 continue
+            if device.is_online and device_presence_is_active(device):
+                was_online = True
             device.is_online = True
             device.last_seen = now
-        db.commit()
+            touched = True
+        if touched:
+            db.commit()
+        return touched and not was_online
     except Exception:
         db.rollback()
         raise
@@ -82,15 +90,15 @@ def touch_owner_client_presence(owner_id: int) -> None:
 
 
 async def publish_member_presence(owner_id: int, online: bool) -> None:
-    """Fan out MEMBER_PRESENCE. Only the online edge refreshes device rows.
+    """Fan out MEMBER_PRESENCE and store the same flag on client sessions.
 
-    Going offline clears the in-memory socket only. Wiping every device here
-    marked a still-open phone offline whenever the marketing tab disconnected.
+    GET /members reads those rows. Leaving them online after the socket closed
+    kept the web badge green for up to 30 minutes while the phone already
+    showed the MEMBER_PRESENCE offline event.
     """
-    if online:
-        try:
-            sync_owner_devices_online(int(owner_id), True)
-        except Exception:
-            # Presence broadcast should still fire even if device rows fail.
-            pass
+    try:
+        sync_owner_devices_online(int(owner_id), bool(online))
+    except Exception:
+        # Presence broadcast should still fire even if device rows fail.
+        pass
     await broadcast_member_presence(int(owner_id), bool(online))
