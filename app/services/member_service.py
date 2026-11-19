@@ -7,7 +7,7 @@ from app.models import Device, MemberLocation, Owner, PushToken, Zone
 from app.services.access_policy import messaging_visible_owner_ids
 from app.services.geospatial_service import evaluate_member_zones
 from app.services.zone_membership_service import refresh_owner_memberships
-from app.websocket.manager import ws_manager
+from app.services.member_presence_service import owner_appears_online
 
 
 def set_member_live_position(
@@ -78,13 +78,7 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
                 .first()
             )
         zones = db.query(Zone.zone_id).filter(Zone.owner_id == member.id).all()
-        # Prefer live WebSocket presence; fall back to device flag.
-        online = ws_manager.is_user_connected(member.id) or (
-            db.query(Device.id)
-            .filter(Device.owner_id == member.id, Device.is_online.is_(True))
-            .first()
-            is not None
-        )
+        online = owner_appears_online(db, member.id)
         prior = (getattr(member, "username", None) or "").strip()
         username = ensure_owner_username(db, member)
         if username != prior:
@@ -133,3 +127,65 @@ def upsert_push_token(db: Session, owner_id: int, token: str, platform: str) -> 
         row.active = True
     db.flush()
     return {"token": row.token, "platform": row.platform, "active": row.active}
+
+
+def list_communal_joined_members(db: Session, reference_id: str) -> list[dict]:
+    """Individual accounts that subscribed to this Communal ID, with live presence."""
+    from app.services.communal_zone_service import normalize_reference_id
+
+    normalized = normalize_reference_id(reference_id)
+    if not normalized:
+        return []
+    members = (
+        db.query(Owner)
+        .filter(Owner.communal_id == normalized)
+        .order_by(Owner.first_name.asc(), Owner.last_name.asc(), Owner.id.asc())
+        .all()
+    )
+    output: list[dict] = []
+    for member in members:
+        location = db.get(MemberLocation, member.id)
+        if location is None:
+            location = (
+                db.query(Device)
+                .filter(
+                    Device.owner_id == member.id,
+                    Device.latitude.isnot(None),
+                    Device.longitude.isnot(None),
+                )
+                .order_by(Device.updated_at.desc())
+                .first()
+            )
+        role = getattr(member.role, "value", member.role)
+        account_type = getattr(member.account_type, "value", member.account_type)
+        seen = getattr(location, "updated_at", None) if location is not None else None
+        output.append(
+            {
+                "id": str(member.id),
+                "name": f"{member.first_name} {member.last_name}".strip() or member.email,
+                "first_name": member.first_name,
+                "last_name": member.last_name,
+                "username": (getattr(member, "username", None) or "").strip() or None,
+                "email": member.email,
+                "address": member.address,
+                "zone_id": member.zone_id,
+                "role": str(role) if role is not None else None,
+                "account_type": str(account_type) if account_type is not None else None,
+                "active": bool(member.active),
+                "online": owner_appears_online(db, member.id),
+                "avatar_url": (
+                    None
+                    if not (getattr(member, "avatar_url", None) or "").strip()
+                    else f"/owners/{member.id}/avatar"
+                ),
+                "communal_id": normalized,
+                "location": None
+                if location is None
+                else {
+                    "latitude": location.latitude,
+                    "longitude": location.longitude,
+                },
+                "lastSeen": None if seen is None else seen.isoformat(),
+            }
+        )
+    return output

@@ -257,6 +257,10 @@ async def device_heartbeat(
     device_crud.touch_presence(db, device)
     db.commit()
     db.refresh(device)
+    if is_client_session_hid(device.hid) and device.owner_id:
+        from app.services.member_presence_service import broadcast_member_presence
+
+        await broadcast_member_presence(int(device.owner_id), True)
     return DeviceResponse.model_validate(device)
 
 

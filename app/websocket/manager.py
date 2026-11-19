@@ -22,6 +22,7 @@ class WebSocketManager:
         self._connections: dict[str, ConnectionState] = {}
         self._zone_subscribers: dict[str, set[str]] = {}
         self._lock = asyncio.Lock()
+        self._presence_notify_inflight: set[str] = set()
 
     async def connect(self, user_id: str, websocket: WebSocket) -> str:
         connection_id = uuid4().hex
@@ -131,9 +132,40 @@ class WebSocketManager:
                 logger.exception("Failed sending websocket message: connection_id=%s", state.connection_id)
                 dead_connection_ids.append(state.connection_id)
 
+        offline_users: list[str] = []
         for connection_id in dead_connection_ids:
-            await self.disconnect(connection_id)
+            user_id = await self.disconnect(connection_id)
+            if user_id and self.count_connections_for_user(user_id) == 0:
+                offline_users.append(user_id)
+        if offline_users:
+            await self._announce_fully_disconnected(offline_users)
         return delivered
+
+    async def _announce_fully_disconnected(self, user_ids: list[str]) -> None:
+        """A failed send dropped the last socket. Tell everyone they went offline."""
+        for user_id in user_ids:
+            if user_id in self._presence_notify_inflight:
+                continue
+            self._presence_notify_inflight.add(user_id)
+            try:
+                if str(user_id).startswith("guest:"):
+                    from app.websocket.routes import _publish_guest_ws_presence
+
+                    await _publish_guest_ws_presence(
+                        str(user_id)[len("guest:") :],
+                        online=False,
+                    )
+                else:
+                    from app.services.member_presence_service import publish_member_presence
+
+                    await publish_member_presence(int(user_id), False)
+            except Exception:
+                logger.exception(
+                    "Failed to publish offline presence after dropped socket: user_id=%s",
+                    user_id,
+                )
+            finally:
+                self._presence_notify_inflight.discard(user_id)
 
     async def get_connection_count(self) -> int:
         async with self._lock:

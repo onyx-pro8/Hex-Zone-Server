@@ -98,27 +98,14 @@ def list_zone_peers_for_guest(
         .order_by(Owner.id.asc())
         .all()
     )
-    online_owner_ids: set[int] = set()
-    if owners:
-        online_rows = (
-            db.query(Device.owner_id)
-            .filter(
-                Device.owner_id.in_([o.id for o in owners]),
-                Device.is_online.is_(True),
-            )
-            .distinct()
-            .all()
-        )
-        online_owner_ids = {int(r[0]) for r in online_rows if r and r[0] is not None}
-    # Prefer live WebSocket presence when available (Device flags can lag).
-    from app.websocket.manager import ws_manager
+    from app.services.member_presence_service import owner_appears_online
 
     out: list[dict] = []
     for o in owners:
         role = o.role.value if isinstance(o.role, OwnerRole) else str(o.role)
         display = f"{o.first_name} {o.last_name}".strip() or o.email
         can_chat = not guest_type_blocked(db, o.id, CanonicalMessageType.CHAT.value)
-        online = o.id in online_owner_ids or ws_manager.is_user_connected(o.id)
+        online = owner_appears_online(db, o.id)
         out.append(
             {
                 "peer_kind": "owner",

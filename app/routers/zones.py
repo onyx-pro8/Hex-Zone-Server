@@ -1655,6 +1655,61 @@ async def list_zones_for_communal_id(
     ]
 
 
+class CommunalMemberLocation(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class CommunalJoinedMemberResponse(BaseModel):
+    id: str
+    name: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    zone_id: Optional[str] = None
+    role: Optional[str] = None
+    account_type: Optional[str] = None
+    active: bool = True
+    online: bool = False
+    avatar_url: Optional[str] = None
+    communal_id: str
+    location: Optional[CommunalMemberLocation] = None
+    lastSeen: Optional[str] = None
+
+
+@router.get(
+    "/communal-ids/{reference_id}/members",
+    response_model=list[CommunalJoinedMemberResponse],
+    summary="List accounts that joined a Communal ID",
+    description=(
+        "Individuals that subscribed to this Communal ID at signup. "
+        "`online` follows the live WebSocket presence used by MEMBER_PRESENCE."
+    ),
+)
+async def list_members_for_communal_id(
+    reference_id: str = Path(..., min_length=3, max_length=32),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owner = owner_crud.get_owner(db, current_user["user_id"])
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    normalized = normalize_reference_id(reference_id)
+    if not is_valid_reference_format(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Communal ID must be 3–32 characters (letters, numbers, hyphen, underscore).",
+        )
+    from app.services.member_service import list_communal_joined_members
+
+    return [
+        CommunalJoinedMemberResponse.model_validate(row)
+        for row in list_communal_joined_members(db, normalized)
+    ]
+
+
 @router.get(
     "/public",
     response_model=list[ZoneContractResponse],
