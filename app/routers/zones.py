@@ -1040,6 +1040,13 @@ async def list_zones(
     # IDs minted by this network's administrators (not counted toward quota).
     zones, shared_ids = _merge_communal_shared_zones(db, caller, zones)
     zones = _merge_universal_primary_zones(db, caller, zones)
+    # System-admin compose already collapses communal copies of one zone.
+    # The zones list used a wider query, so the same geometry appeared once
+    # per subscriber. Use that compose set here too.
+    if is_system_administrator(caller):
+        from app.services.network_zone_propagation import dedupe_compose_zone_rows
+
+        zones = dedupe_compose_zone_rows(zones)
 
     return [
         ZoneContractResponse.model_validate(row)
