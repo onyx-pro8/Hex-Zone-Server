@@ -93,6 +93,9 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
                 "email": member.email,
                 "account_owner_id": member.account_owner_id or member.id,
                 "role": member.role.value,
+                "platform_staff_role": str(
+                    getattr(member, "platform_staff_role", None) or "none"
+                ),
                 "account_type": member.account_type.value,
                 "address": member.address,
                 "zone_id": member.zone_id,

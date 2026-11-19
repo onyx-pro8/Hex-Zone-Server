@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models import Owner, Zone
 from app.services.access_policy import account_root_id
-from app.services.account_type_policy import is_system_administrator
+from app.services.account_type_policy import has_system_access
 
 ZONE_NAME_MIN_LENGTH = 1
 ZONE_NAME_MAX_LENGTH = 120
@@ -407,7 +407,7 @@ def zone_is_primary(zone: Zone) -> bool:
 
 
 def caller_may_edit_zone(owner: Owner, zone: Zone) -> bool:
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         return True
     if zone_is_primary(zone):
         return (owner.role.value or "").strip().lower() == "administrator"
@@ -420,7 +420,7 @@ def caller_may_delete_zone(owner: Owner, zone: Zone) -> bool:
 
 def zone_belongs_to_caller_account(db: Session, owner: Owner, zone: Zone) -> bool:
     """Universal access can reveal another network's primary zone. That stays view-only."""
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         return True
     ids = {int(item) for item in account_owner_ids_for_policy(db, owner)}
     if int(zone.owner_id) in ids:
@@ -474,7 +474,7 @@ def ensure_zone_delete_allowed(db: Session, owner: Owner, zone: Zone) -> None:
 
 def zone_visible_to_caller(owner: Owner, zone: Zone, *, account_owner_ids: Sequence[int]) -> bool:
     """Primary zones are account-visible; secondary zones are creator-only."""
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         return True
     if int(zone.owner_id) not in {int(oid) for oid in account_owner_ids}:
         return False
@@ -485,7 +485,7 @@ def zone_visible_to_caller(owner: Owner, zone: Zone, *, account_owner_ids: Seque
 
 def list_zones_visibility_filter(owner: Owner):
     """SQLAlchemy filter: primary OR creator == caller. System admin: no filter."""
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         return None
     return or_(Zone.is_primary.is_(True), Zone.creator_id == owner.id)
 

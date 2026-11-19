@@ -506,7 +506,7 @@ def zone_eligible_for_communal_assignment(
     Only network / system administrators may stamp IDs, and only onto **primary**
     defining zones. System administrators may use any public defining primary.
     """
-    from app.services.account_type_policy import is_system_administrator
+    from app.services.account_type_policy import has_system_access
     from app.services.zone_policy import zone_is_primary
     from app.models.owner import OwnerRole
 
@@ -518,7 +518,7 @@ def zone_eligible_for_communal_assignment(
     role = getattr(getattr(owner, "role", None), "value", None) or str(
         getattr(owner, "role", "") or ""
     )
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         return True
     if str(role).strip().lower() != OwnerRole.ADMINISTRATOR.value:
         return False
@@ -544,13 +544,13 @@ def list_public_defining_zones(
     if db is None:
         return []
 
-    from app.services.account_type_policy import is_system_administrator
+    from app.services.account_type_policy import has_system_access
     from app.services.access_policy import zone_listing_owner_ids
 
     query = db.query(Zone).filter(Zone.active.is_(True))
     account_owner_ids: list[int] | None = None
 
-    if owner is not None and not is_system_administrator(owner):
+    if owner is not None and not has_system_access(owner):
         account_owner_ids = [int(oid) for oid in zone_listing_owner_ids(db, owner)]
         if not account_owner_ids:
             return []

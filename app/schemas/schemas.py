@@ -228,6 +228,7 @@ class OwnerResponse(OwnerBase):
     expired: bool
     created_at: datetime
     updated_at: datetime
+    platform_staff_role: str = "none"
 
     class Config:
         from_attributes = True
@@ -263,6 +264,7 @@ class OwnerListResponse(BaseModel):
     role: OwnerRoleEnum
     address: str
     avatar_url: Optional[str] = None
+    platform_staff_role: str = "none"
 
     class Config:
         from_attributes = True

@@ -41,7 +41,7 @@ from app.services.member_service import (
     set_member_live_position,
     upsert_member_location,
 )
-from app.services.account_type_policy import is_system_administrator
+from app.services.account_type_policy import has_system_access
 from app.services.message_relevant_zone_service import attach_relevant_zone_metadata
 from app.services.network_zone_propagation import (
     resolve_network_administrator,
@@ -326,12 +326,12 @@ def _private_reply_to_system_admin(
     Ordinary member-to-member PRIVATE messages stay on the zone pool. This
     exception is only when the receiver account type is the system admin.
     """
-    if is_system_administrator(sender):
+    if has_system_access(sender):
         return None
     receiver = db.get(Owner, int(receiver_owner_id))
     if receiver is None or not bool(receiver.active):
         return None
-    if not is_system_administrator(receiver):
+    if not has_system_access(receiver):
         return None
     zone_id = (sender.zone_id or "").strip()
     return (
@@ -538,7 +538,7 @@ def search_private_message_recipients(
     target_zone_record_id: int | None = None,
 ) -> dict:
     """Search network members by name or email for PRIVATE compose (invited members only)."""
-    if is_system_administrator(sender):
+    if has_system_access(sender):
         zone_ids, _, candidate_ids, _ = resolve_admin_selected_zone_recipients(
             db,
             sender,
@@ -703,7 +703,7 @@ def _zone_based_recipients(
         if admin_reply is not None:
             return admin_reply
 
-    if is_system_administrator(sender):
+    if has_system_access(sender):
         sender_zone_ids, sender_zone_record_ids, recipient_owner_ids, zone_meta = (
             resolve_admin_selected_zone_recipients(
                 db,
@@ -768,7 +768,7 @@ def _zone_based_recipients(
         raise ValueError("receiver_owner_id is required for private-scope message types")
 
     if scope == MessageScope.PRIVATE:
-        if is_system_administrator(sender):
+        if has_system_access(sender):
             if payload.receiver_owner_id not in set(recipient_owner_ids):
                 raise PrivateScopeRecipientError(
                     "PRIVATE receiver must be reachable under the selected zone."
@@ -808,7 +808,7 @@ def list_compose_zones_at_location(
 
     System administrators receive every active zone and do not need coordinates.
     """
-    if is_system_administrator(sender):
+    if has_system_access(sender):
         return {
             "location_status": "admin_all_zones",
             "zones": list_all_compose_zones(db),
@@ -852,7 +852,7 @@ def preview_compose_recipients(
     lat = latitude if latitude is not None else (live[0] if live else None)
     lon = longitude if longitude is not None else (live[1] if live else None)
 
-    if is_system_administrator(sender):
+    if has_system_access(sender):
         zone_ids, zone_record_ids, recipient_owner_ids, zone_meta = (
             resolve_admin_selected_zone_recipients(
                 db,
@@ -1053,7 +1053,7 @@ def create_geo_propagated_message(db: Session, sender: Owner, payload: Propagati
         if (
             eval_lat is None
             and eval_lon is None
-            and is_system_administrator(sender)
+            and has_system_access(sender)
         ):
             geo_source = "system_admin_selected_zone"
         position_for_metadata = {

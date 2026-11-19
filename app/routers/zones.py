@@ -13,7 +13,7 @@ from app.database import get_db
 from app.models.owner import Owner
 from app.models.zone import Zone, ZoneType
 from app.services.access_policy import visible_owner_ids, visible_zone_owner_ids
-from app.services.account_type_policy import is_system_administrator
+from app.services.account_type_policy import has_system_access
 from app.services.communal_zone_service import (
     apply_communal_ids_to_config,
     assert_communal_ids_attachable,
@@ -781,7 +781,7 @@ def _merge_communal_shared_zones(
     zones: list[Zone],
 ) -> tuple[list[Zone], set[int]]:
     """Append zones shared into this network via Communal IDs it owns."""
-    if is_system_administrator(caller):
+    if has_system_access(caller):
         return zones, set()
     shared = list_zones_shared_into_network(db, caller)
     if not shared:
@@ -1043,7 +1043,7 @@ async def list_zones(
     # System-admin compose already collapses communal copies of one zone.
     # The zones list used a wider query, so the same geometry appeared once
     # per subscriber. Use that compose set here too.
-    if is_system_administrator(caller):
+    if has_system_access(caller):
         from app.services.network_zone_propagation import dedupe_compose_zone_rows
 
         zones = dedupe_compose_zone_rows(zones)
@@ -1110,10 +1110,10 @@ async def get_zone_area_limits(
     owner = owner_crud.get_owner(db, current_user["user_id"])
     if not owner:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
-    from app.services.account_type_policy import is_system_administrator
+    from app.services.account_type_policy import has_system_access
     from app.services.zone_area import list_rules
 
-    if not is_system_administrator(owner):
+    if not has_system_access(owner):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the system administrator can read zone size limits.",
@@ -1775,7 +1775,7 @@ async def assign_communal_to_zones(
     )
 
     account_owner_ids = None
-    if not is_system_administrator(owner):
+    if not has_system_access(owner):
         account_owner_ids = [int(oid) for oid in visible_zone_owner_ids(db, owner)]
 
     updated_rows: list[Zone] = []

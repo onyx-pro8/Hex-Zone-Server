@@ -133,6 +133,17 @@ def patch_owner_location_columns() -> None:
         )
         conn.execute(
             text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS platform_staff_role "
+                "VARCHAR(32) NOT NULL DEFAULT 'none';"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE owners ADD COLUMN IF NOT EXISTS platform_staff_prior TEXT;"
+            )
+        )
+        conn.execute(
+            text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_owners_username_unique "
                 "ON owners (username) "
                 "WHERE username IS NOT NULL AND username <> '';"

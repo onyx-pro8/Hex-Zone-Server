@@ -53,6 +53,13 @@ class Owner(Base):
     # Organization (enhanced_plus) capacity band 1–5; null for other tiers.
     tier_level = Column(Integer, nullable=True)
     role = Column(Enum(OwnerRole), nullable=False, default=OwnerRole.ADMINISTRATOR)
+    # none | technical_support. Technical Support is Private on the system
+    # administrator's network and has the same operational access, but is not
+    # a system administrator and cannot grant this permission.
+    platform_staff_role = Column(String(32), nullable=False, default="none", server_default="none")
+    # JSON snapshot of account_type, role, zone_id, and account_owner_id taken
+    # when Technical Support is granted, so revoke can restore them.
+    platform_staff_prior = Column(Text, nullable=True)
     account_owner_id = Column(Integer, ForeignKey("owners.id", ondelete="SET NULL"), nullable=True, index=True)
     hashed_password = Column(String(255), nullable=False)
     api_key = Column(String(255), unique=True, nullable=False, index=True)

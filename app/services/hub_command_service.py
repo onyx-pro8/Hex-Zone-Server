@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.models.device import Device
 from app.models.hub_command import HubCommand
 from app.models.owner import Owner
-from app.services.account_type_policy import is_system_administrator
+from app.services.account_type_policy import has_system_access
 from app.services.device_entitlements import is_smart_home_hid
 from app.services.smart_home_webhook_service import is_valid_webhook_url, normalize_webhook_url
 
@@ -20,7 +20,7 @@ _HISTORY_LIMIT = 8
 
 def _require_can_command_hub(owner: Owner) -> None:
     """The hub owner may command that hub. System admins may not."""
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="System administrators do not send hub commands.",

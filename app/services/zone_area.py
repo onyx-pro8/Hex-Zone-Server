@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.owner import Owner
 from app.models.zone import Zone
 from app.models.zone_size_limit import ZoneSizeLimit
-from app.services.account_type_policy import is_system_administrator
+from app.services.account_type_policy import has_system_access
 
 _EARTH_RADIUS_M = 6_378_137.0
 
@@ -204,7 +204,7 @@ def list_rules(db: Session) -> list[dict[str, Any]]:
 
 
 def set_limits(db: Session, caller: Owner, *, rules: list[dict[str, Any]]) -> dict[str, Any]:
-    if not is_system_administrator(caller):
+    if not has_system_access(caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the system administrator can set zone size limits.",

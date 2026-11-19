@@ -20,7 +20,7 @@ from app.domain.permission_visibility import PERMISSION_VISIBILITY_ZONE_PENDING_
 from app.models import Device, GuestAccessSession, Owner, Zone, ZoneMessageEvent
 from app.services import message_block_service
 from app.services.access_policy import zone_listing_owner_ids
-from app.services.account_type_policy import is_system_administrator
+from app.services.account_type_policy import has_system_access
 from app.models.owner import OwnerRole
 from app.services import guest_access_service
 from app.services.private_plus_messaging import geo_event_visible_in_private_plus_shared_inbox
@@ -305,7 +305,7 @@ def list_zone_permission_events_for_owner_feed(
             visible.append(row)
             seen.add(row.id)
     # System admins review requests filed against another network id.
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         extra = (
             db.query(ZoneMessageEvent)
             .filter(ZoneMessageEvent.type == CanonicalMessageType.PERMISSION.value)

@@ -24,7 +24,7 @@ from app.models.universal_access import (
 from app.models.zone import Zone
 from app.models.zone_message_event import ZoneMessageEvent
 from app.services.access_policy import zone_listing_owner_ids
-from app.services.account_type_policy import is_system_administrator
+from app.services.account_type_policy import has_system_access, is_system_administrator
 from app.services.communal_zone_service import get_communal_ids
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ def _clean(value: str, *, limit: int) -> str:
 
 
 def _require_network_admin(owner: Owner) -> None:
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="System administrators are not part of the universal access workflow.",
@@ -865,7 +865,7 @@ def create_place_access_request(
     business_document: str,
     note: str = "",
 ) -> dict[str, Any]:
-    if is_system_administrator(requester):
+    if has_system_access(requester):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="System administrators are not part of the universal access workflow.",

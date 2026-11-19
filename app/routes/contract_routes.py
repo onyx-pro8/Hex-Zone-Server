@@ -367,6 +367,7 @@ class OwnerContractResponse(BaseModel):
     communal_id: str | None = None
     tier_level: int | None = None
     tierLevel: int | None = None
+    platform_staff_role: str = "none"
 
 
 class ContractSuccessOwnerMeResponse(BaseModel):
@@ -572,6 +573,7 @@ async def get_me(
         communal_id=getattr(owner, "communal_id", None),
         tier_level=getattr(owner, "tier_level", None),
         tierLevel=getattr(owner, "tier_level", None),
+        platform_staff_role=str(getattr(owner, "platform_staff_role", None) or "none"),
     )
     return success_response(data.model_dump())
 

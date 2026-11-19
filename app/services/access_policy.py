@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Owner
 from app.models.owner import OwnerRole
-from app.services.account_type_policy import is_system_administrator
+from app.services.account_type_policy import has_system_access, is_system_administrator
 from app.services.device_entitlements import (
     account_type_supports_member_invite,
     admin_user_members_at_capacity,
@@ -239,7 +239,7 @@ def list_joinable_networks(db: Session, *, account_type: str | None = None) -> l
 
 def visible_owner_ids(db: Session, owner: Owner, include_inactive: bool = False) -> list[int]:
     """Return owners visible to caller based on role/account type rules."""
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         return _all_owner_ids(db, include_inactive=include_inactive)
 
     # Default-deny for non-admin callers: only explicit administrators can see account-wide owners.
@@ -287,7 +287,7 @@ def messaging_visible_owner_ids(
     require_same_zone: bool = True,
 ) -> list[int]:
     """Return owner ids visible for private-message receiver discovery."""
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         return _all_owner_ids(db, include_inactive=include_inactive)
 
     root_id = account_root_id(owner)
@@ -324,7 +324,7 @@ def zone_listing_owner_ids(db: Session, owner: Owner) -> list[int]:
     zones (owned by the admin) can be loaded; secondary visibility is filtered
     afterward to creator-only via ``is_primary`` / ``creator_id``.
     """
-    if is_system_administrator(owner):
+    if has_system_access(owner):
         return _all_owner_ids(db, include_inactive=True)
 
     if owner.role.value != "administrator":

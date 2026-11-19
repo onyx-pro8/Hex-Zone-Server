@@ -129,7 +129,7 @@ def assert_role_change_allowed(
     """
     if new_role is None:
         return
-    if not is_system_administrator(caller):
+    if not has_system_access(caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ROLE_CHANGE_SYSTEM_ADMIN_ONLY_DETAIL,
@@ -140,11 +140,39 @@ def assert_role_change_allowed(
     )
 
 
+def platform_staff_role_value(owner: Owner) -> str:
+    """Normalized platform staff role. Ordinary accounts are ``none``."""
+    raw = getattr(owner, "platform_staff_role", None) or "none"
+    return str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def is_technical_support(owner: Owner) -> bool:
+    """True when this account was granted Technical Support permission."""
+    return platform_staff_role_value(owner) in {
+        "technical_support",
+        "technicalsupport",
+        "tech_support",
+    }
+
+
 def is_system_administrator(owner: Owner) -> bool:
-    """True for the built-in Private-tier platform administrator."""
-    if owner.role.value != "administrator":
+    """True for the built-in Private-tier platform administrator.
+
+    Technical Support uses the Private tier and the same operational access,
+    but the role stays Technical Support and is not a system administrator.
+    """
+    if is_technical_support(owner):
+        return False
+    if getattr(owner, "role", None) is None or owner.role.value != "administrator":
         return False
     return normalize_pricing_tier_key(owner.account_type.value) == PRICING_TIER_PRIVATE
+
+
+def has_system_access(owner: Owner) -> bool:
+    """Operational access shared by the system administrator and Technical Support."""
+    if is_technical_support(owner):
+        return normalize_pricing_tier_key(owner.account_type.value) == PRICING_TIER_PRIVATE
+    return is_system_administrator(owner)
 
 
 def account_type_for_invited_member(administrator: Owner) -> AccountType:
@@ -209,8 +237,8 @@ def migrate_invited_member_account_types(db: Session) -> int:
 
 
 def owner_may_edit_network_id(owner: Owner) -> bool:
-    """Only Private-tier owners may change their network id (zone_id)."""
-    return is_system_administrator(owner)
+    """Private system access may change the network id (zone_id)."""
+    return has_system_access(owner)
 
 
 def assert_owner_may_edit_network_id(owner: Owner) -> None:
@@ -223,7 +251,7 @@ def assert_owner_may_edit_network_id(owner: Owner) -> None:
 
 def assert_system_administrator_may_set_account_type(caller: Owner) -> None:
     """Only Private-tier administrators may assign account types."""
-    if not is_system_administrator(caller):
+    if not has_system_access(caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only system administrators may change account types.",
@@ -259,7 +287,7 @@ def assert_account_type_change_allowed(
     if new_key == current_key:
         return
 
-    if not is_system_administrator(caller):
+    if not has_system_access(caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ACCOUNT_TYPE_CHANGE_SYSTEM_ADMIN_ONLY_DETAIL,

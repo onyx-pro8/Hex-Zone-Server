@@ -36,6 +36,7 @@ from app.services.account_type_policy import (
     coerce_individual_registration_role,
     is_individual_account_type,
     is_individual_pro_account_type,
+    has_system_access,
     is_system_administrator,
 )
 from app.services.member_join_welcome_service import notify_members_of_new_join
@@ -364,7 +365,7 @@ async def list_network_admins(
     caller = owner_crud.get_owner(db, current_user["user_id"])
     if not caller:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Caller not found")
-    if not is_system_administrator(caller):
+    if not has_system_access(caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the system administrator can list network administrators.",
@@ -379,6 +380,81 @@ async def list_network_admins(
     )
     visible = [row for row in rows if not is_system_administrator(row)]
     return [OwnerListResponse.model_validate(row) for row in visible]
+
+
+class PlatformStaffRoleUpdate(BaseModel):
+    """Grant or remove Technical Support. Only the system administrator may call this."""
+
+    role: str = Field(..., description="technical_support or none")
+
+
+@router.get(
+    "/technical-support",
+    response_model=list[OwnerListResponse],
+    summary="List Technical Support accounts",
+    description="System administrator only. Returns every account granted Technical Support.",
+)
+async def list_technical_support(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    caller = owner_crud.get_owner(db, current_user["user_id"])
+    if not caller:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Caller not found")
+    if not is_system_administrator(caller):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the system administrator can list Technical Support.",
+        )
+    from app.models.owner import Owner
+
+    rows = (
+        db.query(Owner)
+        .filter(Owner.platform_staff_role == "technical_support")
+        .order_by(Owner.id.asc())
+        .all()
+    )
+    return [OwnerListResponse.model_validate(row) for row in rows]
+
+
+@router.put(
+    "/{owner_id}/platform-staff",
+    response_model=OwnerListResponse,
+    summary="Grant or remove Technical Support",
+    description=(
+        "System administrator only. technical_support makes the user a Private "
+        "account on the system administrator's network id, with the same access "
+        "and the role Technical Support. none restores the account from the grant."
+    ),
+)
+async def set_platform_staff_role(
+    owner_id: int,
+    payload: PlatformStaffRoleUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.services.platform_staff_service import (
+        grant_technical_support,
+        revoke_technical_support,
+    )
+
+    caller = owner_crud.get_owner(db, current_user["user_id"])
+    if not caller:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Caller not found")
+    target = owner_crud.get_owner(db, owner_id)
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    requested = str(payload.role or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if requested == "technical_support":
+        updated = grant_technical_support(db, caller, target)
+    elif requested == "none":
+        updated = revoke_technical_support(db, caller, target)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="role must be technical_support or none",
+        )
+    return OwnerListResponse.model_validate(updated)
 
 
 @router.get(
@@ -514,7 +590,7 @@ async def update_owner(
 
     if owner_update.email is not None:
         # Login email is private; only the account owner (or a system admin) may change it.
-        if current_user["user_id"] != owner_id and not is_system_administrator(caller):
+        if current_user["user_id"] != owner_id and not has_system_access(caller):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not authorized to change this owner's email",
@@ -551,7 +627,7 @@ async def update_owner(
             )
         owner_update.username = normalized_username
 
-    if owner_update.role is not None and not is_system_administrator(caller):
+    if owner_update.role is not None and not has_system_access(caller):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only system administrators may change user roles",
