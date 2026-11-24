@@ -50,6 +50,7 @@ from app.services.zone_policy import (
     ensure_zone_edit_allowed,
     list_zones_visibility_filter,
     normalize_zone_name,
+    apply_zone_tier_on_update,
     prepare_create_zone_policy,
     prepare_zone_tier_on_create,
     soft_delete_zone,
@@ -201,6 +202,10 @@ class ZoneContractUpdate(BaseModel):
     config: Optional[dict[str, Any]] = None
     h3_cells: Optional[list[str]] = None
     geo_fence_polygon: Optional[dict[str, Any]] = None
+    is_primary: Optional[bool] = Field(
+        default=None,
+        description="Administrators may switch an existing zone between primary and secondary.",
+    )
 
 
 class EvictedZoneInfoResponse(BaseModel):
@@ -1928,6 +1933,17 @@ async def update_zone(
         )
 
     ensure_zone_edit_allowed(owner, target_zone, db)
+
+    provided = zone_update.model_dump(exclude_unset=True)
+    if "is_primary" in provided:
+        evicted = apply_zone_tier_on_update(
+            db,
+            owner,
+            target_zone,
+            requested_is_primary=bool(provided["is_primary"]),
+        )
+        if evicted:
+            await notify_zone_evictions(db, admin=owner, evicted=evicted)
 
     normalized = _normalize_payload(zone_update.model_dump(exclude_none=True), partial=True)
     current = _serialize_zone(target_zone, db=db)

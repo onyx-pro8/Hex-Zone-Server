@@ -611,3 +611,62 @@ def prepare_zone_tier_on_create(
             new_primary_count=new_primary_count,
         )
     return will_be_primary, evicted
+
+
+def apply_zone_tier_on_update(
+    db: Session,
+    caller: Owner,
+    zone: Zone,
+    *,
+    requested_is_primary: bool,
+) -> list[EvictedZoneInfo]:
+    """Change an existing zone between primary and secondary.
+
+    Account administrators and system administrators may switch the tier.
+    Promoting checks the account primary cap. Demoting does not create a zone.
+    """
+    requested = bool(requested_is_primary)
+    if zone_is_primary(zone) == requested:
+        return []
+
+    account_key = str(caller.account_type.value or "").strip().lower()
+    is_admin = (caller.role.value or "").strip().lower() == "administrator"
+    invited = owner_is_invited_member(caller)
+    may_choose = has_system_access(caller) or (
+        is_admin and not (account_key == "exclusive" and not invited)
+    )
+    if not may_choose:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "ZONE_PRIMARY_FORBIDDEN",
+                "message": "Only an account administrator can change the zone tier.",
+            },
+        )
+
+    zone_owner = db.get(Owner, zone.owner_id) or caller
+    caps = prepare_create_zone_policy(db, zone_owner)
+    if requested and caps.admin_primary_count >= caps.max_primary:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "ZONE_PRIMARY_QUOTA_REACHED",
+                "message": (
+                    f"Maximum of {caps.max_primary} primary zones for "
+                    "administrators reached."
+                ),
+            },
+        )
+
+    zone.is_primary = requested
+    new_primary_count = (
+        caps.admin_primary_count + 1 if requested else max(0, caps.admin_primary_count - 1)
+    )
+    root_ids = account_owner_ids_for_policy(db, zone_owner)
+    admin = account_admin_owner(db, zone_owner) or zone_owner
+    return evict_member_secondary_overflow(
+        db,
+        account_owner_ids=root_ids,
+        admin_id=int(admin.id),
+        new_primary_count=new_primary_count,
+    )
