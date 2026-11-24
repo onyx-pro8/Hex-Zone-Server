@@ -16,6 +16,7 @@ from app.services.owner_home_service import (
     sync_owner_home_from_address,
 )
 from app.services.registration_code_service import (
+    public_account_type_label,
     require_and_consume_admin_registration_code,
     resolve_organization_signup_tier_level,
 )
@@ -45,7 +46,10 @@ def _to_contract_account_type(account_type: str) -> str:
     if contract_type is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Unsupported account type: {account_type}",
+            detail=(
+                "Unsupported account type: "
+                f"{public_account_type_label(account_type)}"
+            ),
         )
     return contract_type
 

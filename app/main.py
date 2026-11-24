@@ -207,7 +207,7 @@ OPENAPI_TAGS = [
         "description": (
             "Registration, login, and owner profile management. Public GET "
             "/owners/registration-code issues administrator signup codes; POST /owners/register "
-            "requires registration_code for administrator role. Exclusive accounts do not "
+            "requires registration_code for administrator role. Individual accounts do not "
             "allow user-member registrations. Administrators can activate/deactivate linked users."
         ),
     },

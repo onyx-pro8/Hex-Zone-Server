@@ -48,10 +48,19 @@ ENHANCED_PLUS_LEVELS: dict[int, int] = {
 
 PRICING_TIER_LABELS: dict[str, str] = {
     PRICING_TIER_PRIVATE: "Private — unlimited users (system owner)",
-    PRICING_TIER_PRIVATE_PLUS: "Private Plus [+] — max 10 users (family)",
-    PRICING_TIER_EXCLUSIVE: "Individual — 1 user, up to 3 secondary zones, no smart-home (FREE)",
-    PRICING_TIER_ENHANCED: "Enhanced — Individual Pro, administrator only, 1 device, no member invites",
-    PRICING_TIER_ENHANCED_PLUS: "Enhanced Plus [+] — tiered user capacity (levels 1–5: 20/50/100/500/2500)",
+    PRICING_TIER_PRIVATE_PLUS: "Family — max 10 users",
+    PRICING_TIER_EXCLUSIVE: "Individual — 1 user, up to 2 secondary zones, no smart-home (FREE)",
+    PRICING_TIER_ENHANCED: "Individual Pro — administrator only, 1 device, no member invites",
+    PRICING_TIER_ENHANCED_PLUS: "Organization — tiered user capacity (levels 1–5: 20/50/100/500/2500)",
+}
+
+# Short names shown in errors and the product UI. Stored keys stay unchanged.
+PUBLIC_ACCOUNT_TYPE_LABELS: dict[str, str] = {
+    PRICING_TIER_PRIVATE: "Private",
+    PRICING_TIER_PRIVATE_PLUS: "Family",
+    PRICING_TIER_EXCLUSIVE: "Individual",
+    PRICING_TIER_ENHANCED: "Individual Pro",
+    PRICING_TIER_ENHANCED_PLUS: "Organization",
 }
 
 logger = logging.getLogger(__name__)
@@ -103,6 +112,23 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def public_account_type_label(account_type: str | None) -> str:
+    """Public name for a stored account-type or plan key.
+
+    ``exclusive`` is Individual. Organization plan keys such as
+    ``enhanced_plus_3`` become ``Organization 3``. Unknown values are returned
+    unchanged so a bad request is still identifiable.
+    """
+    raw = str(account_type or "").strip()
+    key = normalize_pricing_tier_key(raw)
+    if key.startswith("enhanced_plus"):
+        suffix = key.removeprefix("enhanced_plus").strip("_")
+        if suffix.isdigit():
+            return f"Organization {int(suffix)}"
+        return "Organization"
+    return PUBLIC_ACCOUNT_TYPE_LABELS.get(key, raw or "Unknown")
+
+
 def normalize_pricing_tier_key(pricing_tier: str) -> str:
     key = pricing_tier.strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
@@ -125,8 +151,8 @@ def resolve_pricing_tier_spec(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                "Invalid pricing_tier. Expected one of: "
-                "private, private_plus, exclusive, enhanced, enhanced_plus"
+                "Invalid account type. Expected one of: "
+                "Private, Family, Individual, Individual Pro, Organization"
             ),
         )
 
@@ -135,7 +161,7 @@ def resolve_pricing_tier_spec(
         if tier_level is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="tier_level (1–5) is required for enhanced_plus pricing tier",
+                detail="Organization requires a level from 1 to 5.",
             )
         try:
             level = int(tier_level)
@@ -147,10 +173,10 @@ def resolve_pricing_tier_spec(
         if level not in ENHANCED_PLUS_LEVELS:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="tier_level must be between 1 and 5 for enhanced_plus",
+                detail="Organization level must be between 1 and 5.",
             )
         max_users = ENHANCED_PLUS_LEVELS[level]
-        label = f"Enhanced Plus [+] Level {level} — max {max_users} users"
+        label = f"Organization Level {level} — max {max_users} users"
         price_tier_key = f"enhanced_plus_{level}"
     else:
         label = PRICING_TIER_LABELS[key]

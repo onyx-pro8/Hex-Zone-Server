@@ -595,7 +595,7 @@ class QRRegistrationPreview(BaseModel):
     account_type: str = Field(
         description=(
             "Account type the redeeming user will receive. "
-            "System-admin invites always provision Exclusive network administrators."
+            "System-admin invites always provision Individual accounts."
         ),
     )
     zone_id: Optional[str] = Field(

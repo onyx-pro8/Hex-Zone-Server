@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.crud import device as device_crud
 from app.models import Owner
+from app.services.registration_code_service import public_account_type_label
 
 
 DEVICE_LIMITS_BY_ACCOUNT_TYPE: dict[str, int | None] = {
@@ -239,8 +240,8 @@ def evict_offline_devices_to_make_room(db: Session, owner: Owner) -> None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    f"Account type '{owner.account_type.value}' allows at most "
-                    f"{max_devices} smart-home device(s) per owner"
+                    f"Account type '{public_account_type_label(owner.account_type.value)}' "
+                    f"allows at most {max_devices} smart-home device(s) per owner"
                 ),
             )
         oldest = min(offline, key=_device_recency)
@@ -257,8 +258,8 @@ def assert_owner_device_capacity(owner: Owner, current_device_count: int) -> Non
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                f"Account type '{owner.account_type.value}' allows at most "
-                f"{max_devices} smart-home device(s) per owner"
+                f"Account type '{public_account_type_label(owner.account_type.value)}' "
+                f"allows at most {max_devices} smart-home device(s) per owner"
             ),
         )
 
@@ -268,7 +269,10 @@ def assert_account_allows_user_members(account_type: str) -> None:
     if not account_type_supports_member_invite(account_type):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Account type '{account_type}' does not allow user members",
+            detail=(
+                f"Account type '{public_account_type_label(account_type)}' "
+                "does not allow user members"
+            ),
         )
 
 
@@ -324,7 +328,10 @@ def assert_admin_user_member_capacity(
     if not account_type_supports_member_invite(account_type):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Account type '{account_type}' does not allow user members",
+            detail=(
+                f"Account type '{public_account_type_label(account_type)}' "
+                "does not allow user members"
+            ),
         )
     current = _count_active_account_users(db, admin_owner)
     if current >= limit:
@@ -332,8 +339,8 @@ def assert_admin_user_member_capacity(
             MEMBER_CAPACITY_FULL_DETAIL
             if invitee_facing
             else (
-                f"Account type '{account_type}' allows at most {limit} user(s) "
-                f"on this account"
+                f"Account type '{public_account_type_label(account_type)}' "
+                f"allows at most {limit} user(s) on this account"
             )
         )
         raise HTTPException(

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models import Owner
 from app.models.owner import OwnerRole
 from app.services.account_type_policy import has_system_access, is_system_administrator
+from app.services.registration_code_service import PUBLIC_ACCOUNT_TYPE_LABELS
 from app.services.device_entitlements import (
     account_type_supports_member_invite,
     admin_user_members_at_capacity,
@@ -175,13 +176,7 @@ def resolve_account_owner_id(
     )
 
 
-_JOINABLE_NETWORK_LABELS = {
-    "private_plus": "Family",
-    "enhanced": "Individual Pro",
-    "enhanced_plus": "Organization",
-    "exclusive": "Individual",
-    "private": "Private",
-}
+_JOINABLE_NETWORK_LABELS = PUBLIC_ACCOUNT_TYPE_LABELS
 
 
 def list_joinable_networks(db: Session, *, account_type: str | None = None) -> list[dict]:

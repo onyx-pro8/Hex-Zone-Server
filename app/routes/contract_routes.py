@@ -462,7 +462,7 @@ async def login(payload: LoginRequest, db: Session = Depends(get_db)):
     description=(
         "Mobile registration endpoint for administrator/user onboarding. Supports all "
         "5 account tiers, role-aware registration, and account owner linking for users. "
-        "Exclusive tier does not allow USER members. USER registrations join by "
+        "Individual accounts do not allow user members. User registrations join by "
         "Network ID (zoneId) and must match the administrator account type. "
         "administratorEmail is required only when several administrators share that Network ID. "
         "Administrators must submit registrationCode: either echo the single-use string "

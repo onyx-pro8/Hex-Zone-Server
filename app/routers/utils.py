@@ -328,11 +328,11 @@ async def convert_to_h3(
     description=(
         "Generate invite token used by the QR registration flow. "
         "Not for door guest access — use **`GET /api/access/qr-link`** for canonical **`/access?zid=`** URLs. "
-        "**System administrator (Private):** provisions a new **Individual (Exclusive)** user "
+        "**System administrator (Private):** provisions a new **Individual** user "
         "account for a new network (invitee chooses their own network ID on join). "
-        "**Family (Private+) / Organization (Enhanced+):** invite a **user-role** member with "
+        "**Family / Organization:** invite a **user-role** member with "
         "the same account type onto the inviter's network. "
-        "**Individual Pro (Enhanced)** and **Exclusive** (solo Individual) accounts "
+        "**Individual Pro** and **Individual** accounts "
         "cannot generate these invites. "
         "Each invite mints a unique Communal ID for the invitee (Individuals cannot "
         "generate one themselves). "
@@ -377,8 +377,12 @@ async def generate_qr_registration(
                 "Individual Pro accounts are administrator-only and cannot generate member invite QR codes."
                 if str(owner.account_type.value).strip().lower() == "enhanced"
                 else (
-                    "This account type does not support member invite QR codes "
-                    "(solo accounts cannot invite members)."
+                    "Individual accounts cannot generate member invite QR codes."
+                    if str(owner.account_type.value).strip().lower() == "exclusive"
+                    else (
+                        "This account type does not support member invite QR codes "
+                        "(solo accounts cannot invite members)."
+                    )
                 )
             ),
         )

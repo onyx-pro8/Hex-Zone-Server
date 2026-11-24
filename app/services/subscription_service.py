@@ -22,11 +22,13 @@ from app.services.device_entitlements import (
 )
 from app.services.plan_entitlements import (
     PAID_CHECKOUT_PLAN_KEYS,
+    PLAN_CATALOG,
     entitlements_for,
     entitlements_to_dict,
     list_public_plans,
     plan_key_for,
 )
+from app.services.registration_code_service import public_account_type_label
 
 logger = logging.getLogger(__name__)
 
@@ -512,7 +514,11 @@ def _price_id_for_plan(plan_key: str, billing_interval: str) -> str:
     if not price_id:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Stripe price is not configured for plan '{plan_key}' ({interval}).",
+            detail=(
+                "Stripe price is not configured for "
+                f"{PLAN_CATALOG[plan_key].label if plan_key in PLAN_CATALOG else public_account_type_label(plan_key)} "
+                f"({interval})."
+            ),
         )
     return price_id
 
