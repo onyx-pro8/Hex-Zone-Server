@@ -161,36 +161,36 @@ def send_registration_code_email(
         }
 
 
-def send_signup_verification_email(*, to_email: str, code: str) -> dict[str, Any]:
-    """Send the 4-digit account verification code through Resend.
-
-    When ``RESEND_API_KEY`` is empty the code is logged and delivery is reported
-    as ``logged`` so local signup can continue.
-    """
-    ttl_minutes = max(1, int(settings.SIGNUP_CODE_TTL_SECONDS) // 60)
-    from_addr = (settings.RESEND_FROM_EMAIL or "").strip() or "Hex Zone <onboarding@resend.dev>"
-    subject = "Your Hex Zone verification code"
-    plain = (
-        f"Your Hex Zone verification code is {code}.\n\n"
-        f"It expires in {ttl_minutes} minutes. "
-        "If you did not create an account, you can ignore this email.\n"
-    )
-    html = f"""<!DOCTYPE html>
+def _code_email_html(*, heading: str, lead: str, code: str, footer: str) -> str:
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <body style="font-family:system-ui,sans-serif;background:#0B0E11;color:#e2e8f0;padding:24px;">
   <div style="max-width:560px;margin:0 auto;background:#151a20;border:1px solid #334155;border-radius:8px;padding:24px;">
-    <h1 style="color:#00E5D1;font-size:20px;margin:0 0 12px;">Verify your email</h1>
-    <p style="color:#94a3b8;margin:0 0 16px;">Enter this code to finish creating your Hex Zone account.</p>
+    <h1 style="color:#00E5D1;font-size:20px;margin:0 0 12px;">{heading}</h1>
+    <p style="color:#94a3b8;margin:0 0 16px;">{lead}</p>
     <p style="font-family:monospace;font-size:32px;letter-spacing:0.28em;color:#00E5D1;margin:0 0 16px;">{code}</p>
-    <p style="color:#94a3b8;font-size:14px;margin:0;">This code expires in {ttl_minutes} minutes. If you did not create an account, you can ignore this email.</p>
+    <p style="color:#94a3b8;font-size:14px;margin:0;">{footer}</p>
   </div>
 </body>
 </html>"""
 
+
+def _send_resend_email(
+    *,
+    to_email: str,
+    subject: str,
+    plain: str,
+    html: str,
+    code: str,
+    log_label: str,
+) -> dict[str, Any]:
+    """Deliver one code email. Logs the code when Resend is not configured."""
+    from_addr = (settings.RESEND_FROM_EMAIL or "").strip() or "Hex Zone <onboarding@resend.dev>"
     api_key = (settings.RESEND_API_KEY or "").strip()
     if not api_key:
         logger.warning(
-            "Resend is not configured — verification email for %s logged only. CODE=%s",
+            "Resend is not configured — %s email for %s logged only. CODE=%s",
+            log_label,
             to_email,
             code,
         )
@@ -219,21 +219,72 @@ def send_signup_verification_email(*, to_email: str, code: str) -> dict[str, Any
             timeout=settings.SMTP_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        logger.exception("Failed to send verification email to %s: %s", to_email, exc)
+        logger.exception("Failed to send %s email to %s: %s", log_label, to_email, exc)
         return {"sent": False, "delivery": "failed", "reason": str(exc)}
 
     if response.status_code >= 400:
         reason = response.text[:500]
         logger.error(
-            "Resend rejected verification email to %s (%s): %s",
+            "Resend rejected %s email to %s (%s): %s",
+            log_label,
             to_email,
             response.status_code,
             reason,
         )
         return {"sent": False, "delivery": "failed", "reason": reason}
 
-    logger.info("Verification email sent to %s", to_email)
+    logger.info("%s email sent to %s", log_label, to_email)
     return {"sent": True, "delivery": "resend", "reason": None}
+
+
+def send_signup_verification_email(*, to_email: str, code: str) -> dict[str, Any]:
+    """Send the 4-digit account verification code through Resend.
+
+    When ``RESEND_API_KEY`` is empty the code is logged and delivery is reported
+    as ``logged`` so local signup can continue.
+    """
+    ttl_minutes = max(1, int(settings.SIGNUP_CODE_TTL_SECONDS) // 60)
+    footer = (
+        f"This code expires in {ttl_minutes} minutes. "
+        "If you did not create an account, you can ignore this email."
+    )
+    plain = f"Your Hex Zone verification code is {code}.\n\n{footer}\n"
+    return _send_resend_email(
+        to_email=to_email,
+        subject="Your Hex Zone verification code",
+        plain=plain,
+        html=_code_email_html(
+            heading="Verify your email",
+            lead="Enter this code to finish creating your Hex Zone account.",
+            code=code,
+            footer=footer,
+        ),
+        code=code,
+        log_label="verification",
+    )
+
+
+def send_password_reset_email(*, to_email: str, code: str) -> dict[str, Any]:
+    """Send the 4-digit password reset code through Resend."""
+    ttl_minutes = max(1, int(settings.SIGNUP_CODE_TTL_SECONDS) // 60)
+    footer = (
+        f"This code expires in {ttl_minutes} minutes. "
+        "If you did not ask to reset your password, you can ignore this email."
+    )
+    plain = f"Your Hex Zone password reset code is {code}.\n\n{footer}\n"
+    return _send_resend_email(
+        to_email=to_email,
+        subject="Your Hex Zone password reset code",
+        plain=plain,
+        html=_code_email_html(
+            heading="Reset your password",
+            lead="Enter this code to choose a new Hex Zone password.",
+            code=code,
+            footer=footer,
+        ),
+        code=code,
+        log_label="password reset",
+    )
 
 
 def support_contact_dict() -> dict[str, str]:
