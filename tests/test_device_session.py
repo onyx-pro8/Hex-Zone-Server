@@ -8,9 +8,11 @@ import pytest
 from app.crud import device as device_crud
 from app.database import Base
 from app.models.device import Device
+from app.models.owner import AccountType, Owner, OwnerRole
 from app.schemas.schemas import DeviceCreate
 from app.services.device_entitlements import (
     device_presence_is_active,
+    evict_offline_devices_to_make_room,
     expire_stale_device_sessions,
     is_client_session_hid,
     is_smart_home_hid,
@@ -128,3 +130,40 @@ def test_expire_stale_device_sessions(test_db):
 
     assert stale.is_online is False
     assert fresh.is_online is True
+
+
+def test_zero_hub_cap_ignores_login_sessions(test_db):
+    """Individual accounts can switch WEB-/MOB- sessions with no hubs registered."""
+    owner = Owner(
+        email="individual@example.com",
+        username="individual1",
+        zone_id="individual-zone",
+        first_name="Indi",
+        last_name="Vidual",
+        account_type=AccountType.EXCLUSIVE,
+        role=OwnerRole.USER,
+        hashed_password="hashed",
+        api_key="individual-api-key",
+        address="1 Main St",
+    )
+    test_db.add(owner)
+    test_db.commit()
+    test_db.refresh(owner)
+
+    web = device_crud.create_device(
+        test_db,
+        owner.id,
+        DeviceCreate(hid="WEB-MARKET1", name="Marketing", is_online=True),
+    )
+    phone = device_crud.create_device(
+        test_db,
+        owner.id,
+        DeviceCreate(hid="MOB-PHONE001", name="Phone", is_online=False),
+    )
+    test_db.commit()
+
+    evict_offline_devices_to_make_room(test_db, owner)
+    test_db.commit()
+
+    assert device_crud.get_device(test_db, web.id, owner_id=owner.id) is not None
+    assert device_crud.get_device(test_db, phone.id, owner_id=owner.id) is not None

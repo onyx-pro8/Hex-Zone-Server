@@ -227,7 +227,10 @@ def evict_offline_devices_to_make_room(db: Session, owner: Owner) -> None:
     """
     expire_stale_device_sessions(db, owner.id)
     max_devices = max_devices_for_owner(owner)
-    if max_devices is None:
+    # None is unlimited. A cap of 0 (Individual) has no hub slot to free.
+    # Login sessions are already excluded from ``smart_homes``; comparing
+    # ``0 >= 0`` would reject a phone/browser takeover that added no hub.
+    if max_devices is None or max_devices <= 0:
         return
     smart_homes = [
         device
