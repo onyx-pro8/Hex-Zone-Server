@@ -105,7 +105,7 @@ def _get_map_center(db: Session, owner_id: int) -> dict | None:
     return {"latitude": lat, "longitude": lng}
 
 
-def register_user(db: Session, payload: dict) -> dict:
+def register_user(db: Session, payload: dict, *, hashed_password: str | None = None) -> dict:
     existing = db.query(Owner).filter(Owner.email == payload["email"]).first()
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -197,7 +197,7 @@ def register_user(db: Session, payload: dict) -> dict:
         tier_level=owner_tier_level,
         role=role_value,
         account_owner_id=account_owner_id,
-        hashed_password=get_password_hash(payload["password"]),
+        hashed_password=hashed_password or get_password_hash(payload["password"]),
         api_key=preallocated_api_key or generate_api_key(),
         address=payload.get("address", "N/A"),
         communal_id=None,

@@ -22,6 +22,7 @@ from app.routers import (
     zones,
 )
 from app.routes.contract_routes import router as contract_router
+from app.routers.signup_verification import router as signup_verification_router
 from app.utils.api_response import error_response
 from app.websocket.routes import router as websocket_router
 
@@ -452,6 +453,7 @@ app.include_router(guest.router)
 app.include_router(app_links.router)
 app.include_router(subscription.router)
 app.include_router(contract_router)
+app.include_router(signup_verification_router)
 app.include_router(websocket_router)
 
 

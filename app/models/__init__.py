@@ -5,6 +5,7 @@ from app.models.zone import Zone
 from app.models.communal_id import CommunalIdRegistry
 from app.models.qr_registration import QRRegistration
 from app.models.registration_code import RegistrationCode
+from app.models.pending_signup import PendingSignup
 from app.models.message import Message
 from app.models.member_location import MemberLocation
 from app.models.push_token import PushToken
@@ -40,6 +41,7 @@ __all__ = [
     "CommunalIdRegistry",
     "QRRegistration",
     "RegistrationCode",
+    "PendingSignup",
     "Message",
     "MemberLocation",
     "PushToken",

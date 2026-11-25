@@ -176,6 +176,15 @@ class Settings(BaseSettings):
     SMTP_USE_SSL: bool = True
     SMTP_TIMEOUT_SECONDS: int = 15
 
+    # Resend.com — 4-digit code emailed when a public account is created.
+    # Leave RESEND_API_KEY empty to skip delivery; the code is logged so local
+    # signup can still be completed.
+    RESEND_API_KEY: str = ""
+    RESEND_FROM_EMAIL: str = "Hex Zone <onboarding@resend.dev>"
+    SIGNUP_CODE_TTL_SECONDS: int = 600
+    SIGNUP_CODE_RESEND_SECONDS: int = 60
+    SIGNUP_CODE_MAX_ATTEMPTS: int = 5
+
     # LiveKit Cloud. Each connected call gets its own room token.
     # The API secret stays on the server.
     LIVEKIT_URL: str = ""

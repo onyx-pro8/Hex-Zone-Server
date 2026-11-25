@@ -161,6 +161,81 @@ def send_registration_code_email(
         }
 
 
+def send_signup_verification_email(*, to_email: str, code: str) -> dict[str, Any]:
+    """Send the 4-digit account verification code through Resend.
+
+    When ``RESEND_API_KEY`` is empty the code is logged and delivery is reported
+    as ``logged`` so local signup can continue.
+    """
+    ttl_minutes = max(1, int(settings.SIGNUP_CODE_TTL_SECONDS) // 60)
+    from_addr = (settings.RESEND_FROM_EMAIL or "").strip() or "Hex Zone <onboarding@resend.dev>"
+    subject = "Your Hex Zone verification code"
+    plain = (
+        f"Your Hex Zone verification code is {code}.\n\n"
+        f"It expires in {ttl_minutes} minutes. "
+        "If you did not create an account, you can ignore this email.\n"
+    )
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<body style="font-family:system-ui,sans-serif;background:#0B0E11;color:#e2e8f0;padding:24px;">
+  <div style="max-width:560px;margin:0 auto;background:#151a20;border:1px solid #334155;border-radius:8px;padding:24px;">
+    <h1 style="color:#00E5D1;font-size:20px;margin:0 0 12px;">Verify your email</h1>
+    <p style="color:#94a3b8;margin:0 0 16px;">Enter this code to finish creating your Hex Zone account.</p>
+    <p style="font-family:monospace;font-size:32px;letter-spacing:0.28em;color:#00E5D1;margin:0 0 16px;">{code}</p>
+    <p style="color:#94a3b8;font-size:14px;margin:0;">This code expires in {ttl_minutes} minutes. If you did not create an account, you can ignore this email.</p>
+  </div>
+</body>
+</html>"""
+
+    api_key = (settings.RESEND_API_KEY or "").strip()
+    if not api_key:
+        logger.warning(
+            "Resend is not configured — verification email for %s logged only. CODE=%s",
+            to_email,
+            code,
+        )
+        return {
+            "sent": False,
+            "delivery": "logged",
+            "reason": "Resend is not configured (set RESEND_API_KEY and RESEND_FROM_EMAIL)",
+        }
+
+    try:
+        import httpx
+
+        response = httpx.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": from_addr,
+                "to": [to_email],
+                "subject": subject,
+                "text": plain,
+                "html": html,
+            },
+            timeout=settings.SMTP_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.exception("Failed to send verification email to %s: %s", to_email, exc)
+        return {"sent": False, "delivery": "failed", "reason": str(exc)}
+
+    if response.status_code >= 400:
+        reason = response.text[:500]
+        logger.error(
+            "Resend rejected verification email to %s (%s): %s",
+            to_email,
+            response.status_code,
+            reason,
+        )
+        return {"sent": False, "delivery": "failed", "reason": reason}
+
+    logger.info("Verification email sent to %s", to_email)
+    return {"sent": True, "delivery": "resend", "reason": None}
+
+
 def support_contact_dict() -> dict[str, str]:
     return {
         "name": settings.SUPPORT_CONTACT_NAME,
