@@ -273,13 +273,18 @@ def list_public_communal_ids(db: Session, owner=None) -> list[dict[str, Any]]:
             first = str(getattr(person, "first_name", "") or "").strip()
             last = str(getattr(person, "last_name", "") or "").strip()
             creator_name = f"{first} {last}".strip() or None
+            creator_broadcast_name = (
+                str(getattr(person, "broadcast_name", "") or "").strip() or None
+            )
         else:
             creator_name = None
+            creator_broadcast_name = None
         out.append(
             {
                 "reference_id": reference_id,
                 "creator_id": creator_id,
                 "creator_name": creator_name,
+                "creator_broadcast_name": creator_broadcast_name,
                 "network_id": str(getattr(row, "network_id", "") or "").strip(),
                 "zone_count": matched_count,
                 "created_at": (

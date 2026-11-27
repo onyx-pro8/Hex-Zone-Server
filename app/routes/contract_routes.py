@@ -293,6 +293,10 @@ class MemberLocationResponse(BaseModel):
 class MemberListItemResponse(BaseModel):
     id: str
     name: str = Field(description="Owner full name (first + last)")
+    broadcast_name: str | None = Field(
+        default=None,
+        description="Name neighbours see. Empty when the account name is used.",
+    )
     first_name: str
     last_name: str
     username: str | None = Field(

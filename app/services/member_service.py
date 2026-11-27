@@ -87,6 +87,8 @@ def list_members(db: Session, owner: Owner, active: bool | None = None) -> list[
             {
                 "id": str(member.id),
                 "name": f"{member.first_name} {member.last_name}".strip(),
+                "broadcast_name": (getattr(member, "broadcast_name", None) or "").strip()
+                or None,
                 "first_name": member.first_name,
                 "last_name": member.last_name,
                 "username": username,
@@ -165,7 +167,9 @@ def list_communal_joined_members(db: Session, reference_id: str) -> list[dict]:
         output.append(
             {
                 "id": str(member.id),
-                "name": f"{member.first_name} {member.last_name}".strip() or member.email,
+                "name": (member.message_display_name or "").strip() or member.email,
+                "broadcast_name": (getattr(member, "broadcast_name", None) or "").strip()
+                or None,
                 "first_name": member.first_name,
                 "last_name": member.last_name,
                 "username": (getattr(member, "username", None) or "").strip() or None,

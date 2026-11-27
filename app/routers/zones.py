@@ -327,6 +327,7 @@ class CommunalIdListItem(BaseModel):
     reference_id: str
     creator_id: Optional[int] = None
     creator_name: Optional[str] = None
+    creator_broadcast_name: Optional[str] = None
     network_id: str
     zone_count: int = 0
     created_at: Optional[str] = None
@@ -1675,6 +1676,7 @@ class CommunalMemberLocation(BaseModel):
 class CommunalJoinedMemberResponse(BaseModel):
     id: str
     name: str
+    broadcast_name: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     username: Optional[str] = None
